@@ -1,0 +1,81 @@
+/* 播放列表容器 */
+.playlist-container {
+    width: 100%;
+    max-height: 450px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    overflow-y: auto;
+}
+
+
+/* 播放列表項目 */
+.playlist-item {
+    display: flex;
+    align-items: center;
+    padding: 10px;
+    border-bottom: 1px solid #ccc;
+    transition: background-color 0.2s ease-in-out;
+}
+
+.playlist-item:last-child {
+    border-bottom: none;
+}
+
+.playlist-item:hover {
+    background-color: #f0f0f0;
+}
+
+/* 拖放效果 */
+.dragging {
+    opacity: 0;
+}
+
+.display-dragging {
+    opacity: 1 !important;
+    position: absolute;
+    left: -9999px;
+}
+
+/* 拖放圖標 */
+.drag-handle {
+    width: 16px;
+    height: 16px;
+    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/handle.png');
+    background-size: cover;
+    background-repeat: no-repeat;
+    margin-right: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: grab !important;
+}
+
+.drag-handle:active {
+    cursor: grabbing !important;
+}
+
+/* 播放列表項目文字 */
+.playlist-item-text {
+    flex-grow: 1;
+    margin-right: 10px;
+    width: 100px;
+    max-width: 100px;
+    font-size: 12px;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+
+.add-to-playlist {
+    width: 24px;
+    height: 24px;
+    border: 1px solid #ccc;
+    background-size: cover;
+    background-repeat: no-repeat;
+    background-color: #ffffff00;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 2px;
+    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/add.png');
+}
