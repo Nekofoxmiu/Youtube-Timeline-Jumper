@@ -271,7 +271,7 @@ async function main(sidebarElm) {
             tempContainer.appendChild(dragImage);
 
             // 将拖曳缩略图元素添加到临时容器中
-            document.body.appendChild(tempContainer);
+            sidebarElm.appendChild(tempContainer);
 
             e.dataTransfer.setDragImage(dragImage, 24, 24);
             dragItem.classList.add('dragging');
