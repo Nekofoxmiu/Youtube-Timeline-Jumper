@@ -21,6 +21,41 @@ function getTime() {
     }
 }
 
+function formatTime(hours, minutes, seconds) {
+
+    if(!Number(hours)) {hours = 0;};
+    if(!Number(minutes)) {minutes = 0;};
+    if(!Number(seconds)) {seconds = 0;};
+
+    const output =  `${String(Number(hours)).padStart(2, "0")}` + ":" +
+                    `${String(Number(minutes)).padStart(2, "0")}` + ":" +
+                    `${String(Number(seconds)).padStart(2, "0")}`;
+
+    return output;
+
+}
+
+function praseTimeAndCheck(inputString, originalText) {
+
+    let [hours, minutes, seconds] = String(inputString).split(":");
+
+    if(!Number(hours) | !Number(minutes) | !Number(seconds)) {
+        let [hours, minutes, seconds] = String(originalText).split(":");
+        return {
+            "hours": hours,
+            "minutes": minutes,
+            "seconds": seconds
+        };
+    };
+
+    return {
+        "hours": hours,
+        "minutes": minutes,
+        "seconds": seconds
+    };
+
+}
+
 //初始化並與background.js進行綁定
 chrome.runtime.onMessage.addListener(async function (request, sender, sendResponse) {
     if (request.action === "startExtension") {
@@ -155,7 +190,7 @@ async function main(sidebarElm) {
             const itemText = document.createElement('div');
             itemText.classList.add('playlist-item-text');
             let timeobj = getTime();
-            itemText.innerText = `${timeobj.hours}:${timeobj.minutes}:${timeobj.seconds}`;
+            itemText.innerText = formatTime(timeobj.hours, timeobj.minutes, timeobj.seconds);
 
             let originalText = itemText.innerText;
 
@@ -173,10 +208,12 @@ async function main(sidebarElm) {
                 if (event.key === 'Enter') {
                     // 保存編輯內容
                     itemText.contentEditable = false;
+                    let timeobj = praseTimeAndCheck(itemText.innerText, originalText);
+                    itemText.innerText = formatTime(timeobj.hours, timeobj.minutes, timeobj.seconds);
                     originalText = itemText.innerText;
                     logPlaylistState();
                 }
-                
+
             });
 
             itemText.addEventListener('keyup', (event) => {
@@ -197,6 +234,8 @@ async function main(sidebarElm) {
                 // 自動保存修改的內容
                 itemText.contentEditable = false;
                 // 在這裡處理保存操作，例如更新數據或其他相關操作
+                let timeobj = praseTimeAndCheck(itemText.innerText, originalText);
+                    itemText.innerText = formatTime(timeobj.hours, timeobj.minutes, timeobj.seconds);
                 originalText = itemText.innerText;
                 logPlaylistState();
             });
@@ -285,7 +324,7 @@ async function main(sidebarElm) {
         var lastPlaylistState = [];
         function logPlaylistState() {
             const playlistState = playlistItems.map(item => item.querySelector('.playlist-item-text').innerText);
-            if(equalsCheck(lastPlaylistState, playlistState)) {
+            if (equalsCheck(lastPlaylistState, playlistState)) {
                 lastPlaylistState = playlistState;
                 return;
             }
