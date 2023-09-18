@@ -38,15 +38,26 @@ function formatTime(hours, minutes, seconds) {
 function praseTimeAndCheck(inputString, originalText) {
 
     let [hours, minutes, seconds] = String(inputString).split(":");
+    console.log("first",[hours, minutes, seconds]);
 
-    if(!Number(hours) | !Number(minutes) | !Number(seconds)) {
-        let [hours, minutes, seconds] = String(originalText).split(":");
-        return {
-            "hours": hours,
-            "minutes": minutes,
-            "seconds": seconds
-        };
+    if((Number(hours) === NaN) || (Number(minutes) === NaN) || (Number(seconds) === NaN)) {
+        [hours, minutes, seconds] = String(originalText).split(":");
     };
+    console.log(originalText)
+    console.log([hours, minutes, seconds]);
+
+    hours = Number(hours);
+    minutes = Number(minutes);
+    seconds = Number(seconds);
+
+    if(seconds >= 60) {
+        minutes = minutes + Math.floor(seconds / 60);
+        seconds = seconds % 60;        
+    }
+    if(minutes >= 60) {
+        hours = hours + Math.floor(minutes / 60);
+        minutes = minutes % 60;        
+    }
 
     return {
         "hours": hours,
@@ -187,61 +198,68 @@ async function main(sidebarElm) {
             dragHandle.addEventListener('dragover', handleDragOver);
             dragHandle.addEventListener('dragend', handleDragEnd);
 
-            const itemText = document.createElement('div');
-            itemText.classList.add('playlist-item-text');
-            let timeobj = getTime();
-            itemText.innerText = formatTime(timeobj.hours, timeobj.minutes, timeobj.seconds);
-
-            let originalText = itemText.innerText;
-
-            itemText.addEventListener('click', () => {
-                // 啟用編輯模式
-                itemText.contentEditable = true;
-                itemText.focus();
-            });
-
-            itemText.addEventListener('keydown', (event) => {
-                // 阻止事件冒泡
-                event.stopPropagation();
-
-                // 在這裡處理按鍵事件
-                if (event.key === 'Enter') {
-                    // 保存編輯內容
+            function itemTextBuilder() {
+                const itemText = document.createElement('div');
+                itemText.classList.add('playlist-item-text');
+                let timeobj = getTime();
+                itemText.innerText = formatTime(timeobj.hours, timeobj.minutes, timeobj.seconds);
+    
+                let originalText = itemText.innerText;
+    
+                itemText.addEventListener('click', () => {
+                    // 啟用編輯模式
+                    itemText.contentEditable = true;
+                    itemText.focus();
+                });
+    
+                itemText.addEventListener('keydown', (event) => {
+                    // 阻止事件冒泡
+                    event.stopPropagation();
+    
+                    // 在這裡處理按鍵事件
+                    if (event.key === 'Enter') {
+                        // 保存編輯內容
+                        itemText.contentEditable = false;
+                        let timeobj = praseTimeAndCheck(itemText.innerText, originalText);
+                        itemText.innerText = formatTime(timeobj.hours, timeobj.minutes, timeobj.seconds);
+                        originalText = itemText.innerText;
+                        logPlaylistState();
+                    }
+    
+                });
+    
+                itemText.addEventListener('keyup', (event) => {
+                    // 阻止事件冒泡
+                    event.stopPropagation();
+    
+                    // 阻止按鍵事件的默認行為
+                    event.preventDefault();
+    
+                    if (event.key === 'Escape') {
+                        // 取消編輯
+                        itemText.innerText = originalText; // originalText 是原始文本
+                        itemText.contentEditable = false;
+                    }
+                });
+    
+                itemText.addEventListener('blur', () => {
+                    // 自動保存修改的內容
                     itemText.contentEditable = false;
+                    // 在這裡處理保存操作，例如更新數據或其他相關操作
                     let timeobj = praseTimeAndCheck(itemText.innerText, originalText);
                     itemText.innerText = formatTime(timeobj.hours, timeobj.minutes, timeobj.seconds);
                     originalText = itemText.innerText;
                     logPlaylistState();
-                }
+                });
+                
+                return itemText;
+            }
 
-            });
-
-            itemText.addEventListener('keyup', (event) => {
-                // 阻止事件冒泡
-                event.stopPropagation();
-
-                // 阻止按鍵事件的默認行為
-                event.preventDefault();
-
-                if (event.key === 'Escape') {
-                    // 取消編輯
-                    itemText.innerText = originalText; // originalText 是原始文本
-                    itemText.contentEditable = false;
-                }
-            });
-
-            itemText.addEventListener('blur', () => {
-                // 自動保存修改的內容
-                itemText.contentEditable = false;
-                // 在這裡處理保存操作，例如更新數據或其他相關操作
-                let timeobj = praseTimeAndCheck(itemText.innerText, originalText);
-                    itemText.innerText = formatTime(timeobj.hours, timeobj.minutes, timeobj.seconds);
-                originalText = itemText.innerText;
-                logPlaylistState();
-            });
+            
 
             newItem.appendChild(dragHandle);
-            newItem.appendChild(itemText);
+            newItem.appendChild(itemTextBuilder());
+            newItem.appendChild(itemTextBuilder());
 
             return newItem;
         }

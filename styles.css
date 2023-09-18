@@ -50,16 +50,12 @@
     cursor: grab !important;
 }
 
-.drag-handle:active {
-    cursor: grabbing !important;
-}
-
 /* 播放列表項目文字 */
 .playlist-item-text {
     flex-grow: 1;
     margin-right: 10px;
-    width: 100px;
-    max-width: 100px;
+    width: 50px;
+    max-width: 50px;
     font-size: 12px;
     overflow: hidden;
     white-space: nowrap;
