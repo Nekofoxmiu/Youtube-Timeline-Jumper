@@ -51,7 +51,7 @@
 }
 
 /* 播放列表項目文字 */
-.playlist-item-text {
+.playlist-item-text-start {
     flex-grow: 1;
     margin-right: 10px;
     width: 50px;
@@ -61,6 +61,15 @@
     white-space: nowrap;
 }
 
+.playlist-item-text-end {
+    flex-grow: 1;
+    margin-right: 10px;
+    width: 50px;
+    max-width: 50px;
+    font-size: 12px;
+    overflow: hidden;
+    white-space: nowrap;
+}
 
 .add-to-playlist {
     width: 24px;

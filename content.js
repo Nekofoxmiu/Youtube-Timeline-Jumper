@@ -23,40 +23,52 @@ function getTime() {
 
 function formatTime(hours, minutes, seconds) {
 
-    if(!Number(hours)) {hours = 0;};
-    if(!Number(minutes)) {minutes = 0;};
-    if(!Number(seconds)) {seconds = 0;};
+    if (!Number(hours)) { hours = 0; };
+    if (!Number(minutes)) { minutes = 0; };
+    if (!Number(seconds)) { seconds = 0; };
 
-    const output =  `${String(Number(hours)).padStart(2, "0")}` + ":" +
-                    `${String(Number(minutes)).padStart(2, "0")}` + ":" +
-                    `${String(Number(seconds)).padStart(2, "0")}`;
+    const output = `${String(Number(hours)).padStart(2, "0")}` + ":" +
+        `${String(Number(minutes)).padStart(2, "0")}` + ":" +
+        `${String(Number(seconds)).padStart(2, "0")}`;
 
     return output;
 
 }
 
+const mergeArraysToObjects = (arr1, arr2) => {
+    if (!Array.isArray(arr1) || !Array.isArray(arr2)) {
+        throw new Error('Both inputs must be arrays');
+    }
+
+    if (arr1.length !== arr2.length) {
+        throw new Error('Both input arrays must have the same length');
+    }
+
+    const mergedArray = arr1.map((start, index) => ({ start, end: arr2[index] }));
+
+
+    return mergedArray;
+};
+
 function praseTimeAndCheck(inputString, originalText) {
 
     let [hours, minutes, seconds] = String(inputString).split(":");
-    console.log("first",[hours, minutes, seconds]);
 
-    if((Number(hours) === NaN) || (Number(minutes) === NaN) || (Number(seconds) === NaN)) {
+    if ((Number(hours) === NaN) || (Number(minutes) === NaN) || (Number(seconds) === NaN)) {
         [hours, minutes, seconds] = String(originalText).split(":");
     };
-    console.log(originalText)
-    console.log([hours, minutes, seconds]);
 
     hours = Number(hours);
     minutes = Number(minutes);
     seconds = Number(seconds);
 
-    if(seconds >= 60) {
+    if (seconds >= 60) {
         minutes = minutes + Math.floor(seconds / 60);
-        seconds = seconds % 60;        
+        seconds = seconds % 60;
     }
-    if(minutes >= 60) {
+    if (minutes >= 60) {
         hours = hours + Math.floor(minutes / 60);
-        minutes = minutes % 60;        
+        minutes = minutes % 60;
     }
 
     return {
@@ -67,15 +79,44 @@ function praseTimeAndCheck(inputString, originalText) {
 
 }
 
+function checkStartAndEnd(parentItem, originalText, timeobj) {
+
+    const startTimeElement = parentItem.querySelector('.playlist-item-text-start');
+    const endTimeElement = parentItem.querySelector('.playlist-item-text-end');
+    const startTimeText = startTimeElement.textContent;
+    const endTimeText = endTimeElement.textContent;
+    let [hours, minutes, seconds] = String(startTimeText).split(":");
+    const startTime = 3600 * Number(hours) + 60 * Number(minutes) + Number(seconds);
+    [hours, minutes, seconds] = String(endTimeText).split(":");
+    const endTime = 3600 * Number(hours) + 60 * Number(minutes) + Number(seconds);
+    if(startTime > endTime) {
+        [hours, minutes, seconds] = String(originalText).split(":");
+        return {
+            "hours": hours,
+            "minutes": minutes,
+            "seconds": seconds
+        };
+    } else {
+        return timeobj;
+    }
+    
+
+
+}
+
 //初始化並與background.js進行綁定
 chrome.runtime.onMessage.addListener(async function (request, sender, sendResponse) {
     if (request.action === "startExtension") {
         console.log("receive startExtension");
-        sendResponse({ appstart: "yt-paj start." });
+        sendResponse({ appstart: "yt-tj start." });
         //尋找sidebar 並開始主程式
         const sidebarQuery = '#related.style-scope.ytd-watch-flexy';
+        const yttjQuery = '#playlist-container'
+        const yttjContainer = document.querySelector(yttjQuery);
         const sidebarElm = document.querySelector(sidebarQuery);
-        main(sidebarElm);
+        console.log(yttjContainer)
+        if (!yttjContainer)
+            main(sidebarElm);
 
     }
 });
@@ -198,68 +239,70 @@ async function main(sidebarElm) {
             dragHandle.addEventListener('dragover', handleDragOver);
             dragHandle.addEventListener('dragend', handleDragEnd);
 
-            function itemTextBuilder() {
+            function itemTextBuilder(startOrEnd) {
                 const itemText = document.createElement('div');
-                itemText.classList.add('playlist-item-text');
+                itemText.classList.add(`playlist-item-text-${startOrEnd}`);
                 let timeobj = getTime();
                 itemText.innerText = formatTime(timeobj.hours, timeobj.minutes, timeobj.seconds);
-    
+
                 let originalText = itemText.innerText;
-    
+
                 itemText.addEventListener('click', () => {
                     // 啟用編輯模式
                     itemText.contentEditable = true;
                     itemText.focus();
                 });
-    
+
                 itemText.addEventListener('keydown', (event) => {
                     // 阻止事件冒泡
                     event.stopPropagation();
-    
+
                     // 在這裡處理按鍵事件
                     if (event.key === 'Enter') {
                         // 保存編輯內容
                         itemText.contentEditable = false;
                         let timeobj = praseTimeAndCheck(itemText.innerText, originalText);
+                        timeobj = checkStartAndEnd(itemText.parentNode, originalText, timeobj);
                         itemText.innerText = formatTime(timeobj.hours, timeobj.minutes, timeobj.seconds);
                         originalText = itemText.innerText;
                         logPlaylistState();
                     }
-    
+
                 });
-    
+
                 itemText.addEventListener('keyup', (event) => {
                     // 阻止事件冒泡
                     event.stopPropagation();
-    
+
                     // 阻止按鍵事件的默認行為
                     event.preventDefault();
-    
+
                     if (event.key === 'Escape') {
                         // 取消編輯
                         itemText.innerText = originalText; // originalText 是原始文本
                         itemText.contentEditable = false;
                     }
                 });
-    
+
                 itemText.addEventListener('blur', () => {
                     // 自動保存修改的內容
                     itemText.contentEditable = false;
                     // 在這裡處理保存操作，例如更新數據或其他相關操作
                     let timeobj = praseTimeAndCheck(itemText.innerText, originalText);
+                    timeobj = checkStartAndEnd(itemText.parentNode, originalText, timeobj);
                     itemText.innerText = formatTime(timeobj.hours, timeobj.minutes, timeobj.seconds);
                     originalText = itemText.innerText;
                     logPlaylistState();
                 });
-                
+
                 return itemText;
             }
 
-            
+
 
             newItem.appendChild(dragHandle);
-            newItem.appendChild(itemTextBuilder());
-            newItem.appendChild(itemTextBuilder());
+            newItem.appendChild(itemTextBuilder('start'));
+            newItem.appendChild(itemTextBuilder('end'));
 
             return newItem;
         }
@@ -341,7 +384,9 @@ async function main(sidebarElm) {
         // 輸出播放列表狀態至控制台
         var lastPlaylistState = [];
         function logPlaylistState() {
-            const playlistState = playlistItems.map(item => item.querySelector('.playlist-item-text').innerText);
+            const playlistStartState = playlistItems.map(item => item.querySelector('.playlist-item-text-start').innerText);
+            const playlistEndState = playlistItems.map(item => item.querySelector('.playlist-item-text-end').innerText);
+            const playlistState = mergeArraysToObjects(playlistStartState, playlistEndState);
             if (equalsCheck(lastPlaylistState, playlistState)) {
                 lastPlaylistState = playlistState;
                 return;
