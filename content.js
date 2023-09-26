@@ -114,8 +114,7 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
         const yttjQuery = '#playlist-container'
         const yttjContainer = document.querySelector(yttjQuery);
         const sidebarElm = document.querySelector(sidebarQuery);
-        console.log(yttjContainer)
-        if (!yttjContainer)
+        if (!yttjContainer && sidebarElm)
             main(sidebarElm);
 
     }
