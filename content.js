@@ -1,10 +1,10 @@
 console.log("yt-paj content.js injected");
 
-function equalsCheck(a, b) {
+const equalsCheck = (a, b) => {
     return JSON.stringify(a) === JSON.stringify(b);
 }
 
-function getTime() {
+const getTime = () => {
     const video = document.querySelector('video');
     if (video) {
         const UnPraseSeconds = Math.floor(video.currentTime);
@@ -21,15 +21,15 @@ function getTime() {
     }
 }
 
-function formatTime(hours, minutes, seconds) {
+const formatTime = (hours, minutes, seconds) => {
 
     if (!Number(hours)) { hours = 0; };
     if (!Number(minutes)) { minutes = 0; };
     if (!Number(seconds)) { seconds = 0; };
 
-    const output = `${String(Number(hours)).padStart(2, "0")}` + ":" +
-        `${String(Number(minutes)).padStart(2, "0")}` + ":" +
-        `${String(Number(seconds)).padStart(2, "0")}`;
+    const output = `${String(Number(hours)).padStart(2, '0')}` + ':' +
+        `${String(Number(minutes)).padStart(2, '0')}` + ':' +
+        `${String(Number(seconds)).padStart(2, '0')}`;
 
     return output;
 
@@ -50,12 +50,12 @@ const mergeArraysToObjects = (arr1, arr2) => {
     return mergedArray;
 };
 
-function praseTimeAndCheck(inputString, originalText) {
+const praseTimeAndCheck = (inputString, originalText) => {
 
-    let [hours, minutes, seconds] = String(inputString).split(":");
+    let [hours, minutes, seconds] = String(inputString).split(':');
 
     if ((Number(hours) === NaN) || (Number(minutes) === NaN) || (Number(seconds) === NaN)) {
-        [hours, minutes, seconds] = String(originalText).split(":");
+        [hours, minutes, seconds] = String(originalText).split(':');
     };
 
     hours = Number(hours);
@@ -72,43 +72,43 @@ function praseTimeAndCheck(inputString, originalText) {
     }
 
     return {
-        "hours": hours,
-        "minutes": minutes,
-        "seconds": seconds
+        'hours': hours,
+        'minutes': minutes,
+        'seconds': seconds
     };
 
 }
 
-function checkStartAndEnd(parentItem, originalText, timeobj) {
+const checkStartAndEnd = (parentItem, originalText, timeobj) => {
 
     const startTimeElement = parentItem.querySelector('.playlist-item-text-start');
     const endTimeElement = parentItem.querySelector('.playlist-item-text-end');
     const startTimeText = startTimeElement.textContent;
     const endTimeText = endTimeElement.textContent;
-    let [hours, minutes, seconds] = String(startTimeText).split(":");
+    let [hours, minutes, seconds] = String(startTimeText).split(':');
     const startTime = 3600 * Number(hours) + 60 * Number(minutes) + Number(seconds);
-    [hours, minutes, seconds] = String(endTimeText).split(":");
+    [hours, minutes, seconds] = String(endTimeText).split(':');
     const endTime = 3600 * Number(hours) + 60 * Number(minutes) + Number(seconds);
-    if(startTime > endTime) {
-        [hours, minutes, seconds] = String(originalText).split(":");
+    if (startTime > endTime) {
+        [hours, minutes, seconds] = String(originalText).split(':');
         return {
-            "hours": hours,
-            "minutes": minutes,
-            "seconds": seconds
+            'hours': hours,
+            'minutes': minutes,
+            'seconds': seconds
         };
     } else {
         return timeobj;
     }
-    
+
 
 
 }
 
 //初始化並與background.js進行綁定
 chrome.runtime.onMessage.addListener(async function (request, sender, sendResponse) {
-    if (request.action === "startExtension") {
+    if (request.action === 'startExtension') {
         console.log("receive startExtension");
-        sendResponse({ appstart: "yt-tj start." });
+        sendResponse({ appstart: 'yt-tj start.' });
         //尋找sidebar 並開始主程式
         const sidebarQuery = '#related.style-scope.ytd-watch-flexy';
         const yttjQuery = '#playlist-container'
@@ -123,8 +123,8 @@ chrome.runtime.onMessage.addListener(async function (request, sender, sendRespon
 
 async function main(sidebarElm) {
 
-    /*
-    function jumper(sidebarElm) {
+   /*
+    const jumper = (sidebarElm) => {
 
         const jumpContainer = document.createElement('div');
         jumpContainer.id = 'auto-jumper';
@@ -158,7 +158,7 @@ async function main(sidebarElm) {
         jumpButton.textContent = 'Jump';
         jumpContainer.appendChild(jumpButton);
 
-        function buildContainer() {
+        const buildContainer = () => {
             if (sidebarElm) {
                 sidebarElm.insertBefore(jumpContainer, sidebarElm.firstChild);
             }
@@ -180,7 +180,7 @@ async function main(sidebarElm) {
                 jumpToTime(hour, min, sec);
             });
 
-            function jumpToTime(hour, min, sec) {
+            const jumpToTime = (hour, min, sec) => {
                 const video = document.querySelector('video');
                 if (video) {
                     const jumpSeconds = hour * 3600 + min * 60 + sec;
@@ -219,7 +219,7 @@ async function main(sidebarElm) {
         let dragItem;
 
         // 添加播放列表項目的函數
-        function addToPlaylist() {
+        const addToPlaylist = () => {
             const newItem = createPlaylistItem();
             playlistItems.push(newItem);
             renderPlaylist();
@@ -227,7 +227,7 @@ async function main(sidebarElm) {
         }
 
         // 創建播放列表項目的函數
-        function createPlaylistItem() {
+        const createPlaylistItem = () => {
             const newItem = document.createElement('li');
             newItem.classList.add('playlist-item');
 
@@ -235,10 +235,8 @@ async function main(sidebarElm) {
             dragHandle.classList.add('drag-handle');
             dragHandle.draggable = true;
             dragHandle.addEventListener('dragstart', handleDragStart);
-            dragHandle.addEventListener('dragover', handleDragOver);
-            dragHandle.addEventListener('dragend', handleDragEnd);
 
-            function itemTextBuilder(startOrEnd) {
+            const itemTextBuilder = (startOrEnd) => {
                 const itemText = document.createElement('div');
                 itemText.classList.add(`playlist-item-text-${startOrEnd}`);
                 let timeobj = getTime();
@@ -307,25 +305,34 @@ async function main(sidebarElm) {
         }
 
         // 更新播放列表的函數
-        function renderPlaylist() {
+        const renderPlaylist = () => {
             playlistContainer.innerHTML = '';
             const ul = document.createElement('ul');
             ul.id = 'playlist-items';
-
+            ul.addEventListener('dragover', handleDragOver);
+            ul.addEventListener('dragend', handleDragEnd);
             // Append items in the order of the playlistItems array
-            playlistItems.forEach(item => ul.appendChild(item));
+            playlistItems.forEach(item => {
+                item.querySelectorAll('.playlist-item').forEach(itemCompoment => {
+                    itemCompoment.addEventListener('dragover', handleDragOver);
+                    itemCompoment.addEventListener('dragend', handleDragEnd);
+                })
+                ul.appendChild(item)
+            });
             playlistContainer.appendChild(ul);
         }
 
         // 拖放相關事件處理函數
-        function handleDragStart(e) {
+        const handleDragStart = (e) => {
             dragItem = e.target.closest('.playlist-item'); // 找到最接近的包含整個項目的父元素
             e.dataTransfer.setData('text/plain', '');
 
             // 创建拖曳缩略图元素
             const dragImage = dragItem.cloneNode(true);
             dragImage.classList.add('display-dragging');
-            dragImage.id = "display_node";
+            dragImage.id = 'display_node';
+            dragImage.addEventListener('dragover', handleDragOver);
+            dragImage.addEventListener('dragend', handleDragEnd);
             // 创建一个临时的容器元素
             const tempContainer = document.createElement('div');
             tempContainer.appendChild(dragImage);
@@ -337,9 +344,9 @@ async function main(sidebarElm) {
             dragItem.classList.add('dragging');
         }
 
-        function handleDragOver(e) {
+        const handleDragOver = (e) => {
             e.preventDefault();
-
+            e.stopPropagation();
             const ul = playlistContainer.querySelector('ul');
             const afterElement = getDragAfterElement(ul, e.clientY);
             const draggable = document.querySelector('.dragging');
@@ -354,8 +361,9 @@ async function main(sidebarElm) {
             playlistItems = Array.from(ul.children);
         }
 
-        function handleDragEnd(e) {
+        const handleDragEnd = (e) => {
             e.preventDefault();
+            e.stopPropagation();
             const dragImage = document.querySelector('.display-dragging');
             if (dragImage) {
                 dragImage.remove();
@@ -365,12 +373,12 @@ async function main(sidebarElm) {
         }
 
         // 獲取拖放位置的函數
-        function getDragAfterElement(ul, y) {
+        const getDragAfterElement = (ul, y) => {
             const draggableElements = [...ul.querySelectorAll('.playlist-item:not(.dragging)')];
 
             return draggableElements.reduce((closest, child) => {
                 const box = child.getBoundingClientRect();
-                const offset = y - box.top - box.height / 2;
+                const offset = y - box.top - box.height / 3;
 
                 if (offset < 0 && offset > closest.offset) {
                     return { offset: offset, element: child };
@@ -381,8 +389,8 @@ async function main(sidebarElm) {
         }
 
         // 輸出播放列表狀態至控制台
-        var lastPlaylistState = [];
-        function logPlaylistState() {
+        let lastPlaylistState = [];
+        const logPlaylistState = () => {
             const playlistStartState = playlistItems.map(item => item.querySelector('.playlist-item-text-start').innerText);
             const playlistEndState = playlistItems.map(item => item.querySelector('.playlist-item-text-end').innerText);
             const playlistState = mergeArraysToObjects(playlistStartState, playlistEndState);

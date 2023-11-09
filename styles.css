@@ -28,12 +28,14 @@
 /* 拖放效果 */
 .dragging {
     opacity: 0;
+    cursor: grab !important;
 }
 
 .display-dragging {
     opacity: 1 !important;
     position: absolute;
     left: -9999px;
+    cursor: grab !important;
 }
 
 /* 拖放圖標 */
