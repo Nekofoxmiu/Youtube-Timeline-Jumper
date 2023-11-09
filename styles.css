@@ -17,6 +17,16 @@
     transition: background-color 0.2s ease-in-out;
 }
 
+.display-dragging {
+    display: flex;
+    align-items: center;
+    background-color: #ffffff;
+    padding: 10px;
+    transform: translateX(-18px) translateY(-18px);
+    box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+    cursor: grabbing !important;
+}
+
 .playlist-item:last-child {
     border-bottom: none;
 }
@@ -28,13 +38,6 @@
 /* 拖放效果 */
 .dragging {
     opacity: 0;
-    cursor: grab !important;
-}
-
-.display-dragging {
-    opacity: 1 !important;
-    position: absolute;
-    left: -9999px;
     cursor: grab !important;
 }
 
