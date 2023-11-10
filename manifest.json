@@ -26,7 +26,9 @@
   "content_scripts": [
     {
       "matches": [
-        "https://www.youtube.com/watch?v=*"
+        "*://*.youtube.com/*",
+        "*://youtube.com/*",
+        "*://youtu.be/*"
       ],
       "js": ["content.js"],
       "css": ["styles.css"],
@@ -34,7 +36,11 @@
     }
   ],
   "web_accessible_resources": [{
-    "matches": ["https://www.youtube.com/*"],
+    "matches": [        
+    "*://*.youtube.com/*",
+    "*://youtube.com/*",
+    "*://youtu.be/*"
+  ],
     "resources": [
       "images/ui/*"
     
