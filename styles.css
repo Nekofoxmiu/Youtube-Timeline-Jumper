@@ -24,7 +24,6 @@
     padding: 10px;
     transform: translateX(-18px) translateY(-18px);
     box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-    cursor: grabbing !important;
 }
 
 .playlist-item:last-child {
@@ -38,7 +37,6 @@
 /* 拖放效果 */
 .dragging {
     opacity: 0;
-    cursor: grab !important;
 }
 
 /* 拖放圖標 */
@@ -52,7 +50,19 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    cursor: grab !important;
+    cursor: grab;
+}
+.drag-handle-clicked {
+    width: 16px;
+    height: 16px;
+    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/handle.png');
+    background-size: cover;
+    background-repeat: no-repeat;
+    margin-right: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: grabbing;
 }
 
 /* 播放列表項目文字 */

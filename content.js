@@ -1,9 +1,25 @@
+'use strict';
+
 console.log('yt-paj content.js injected');
 
 // 定義拖動項目和播放列表項目
 let dragItem;
+let dragImage;
 let playlistItems = [];
 let lastPlaylistState = [];
+
+// 建立播放列表容器
+const playlistContainer = document.createElement('div');
+playlistContainer.id = 'playlist-container';
+playlistContainer.className = 'playlist-container';
+
+// 建立添加到播放列表的按鈕
+const addToPlaylistButton = document.createElement('button');
+addToPlaylistButton.id = 'add-to-playlist';
+addToPlaylistButton.className = 'add-to-playlist';
+
+const ul = document.createElement('ul');
+ul.id = 'playlist-items';
 
 const equalsCheck = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -183,6 +199,27 @@ const praseTimeAndCheck = (inputString, originalText) => {
 }
 */
 
+const createDragImage = (dragItem, event) => {
+    const computedStyle = window.getComputedStyle(dragItem);
+    const computedWidth = computedStyle.width;
+    const computedHeight = computedStyle.height;
+
+    const dragImage = dragItem.cloneNode(true);
+    const dragHandle = dragImage.querySelector('.drag-handle');
+    dragHandle.classList.remove('drag-handle');
+    dragHandle.classList.add('drag-handle-clicked');
+    dragImage.classList.add('display-dragging');
+    dragImage.classList.remove('playlist-item');
+    dragImage.style.position = 'absolute';
+    dragImage.style.top = `${event.pageY}px`;
+    dragImage.style.left = `${event.pageX}px`;
+    dragImage.style.zIndex = '1000';
+    dragImage.style.width = computedWidth;
+    dragImage.style.height = computedHeight;
+
+    return dragImage;
+};
+
 /**
  * 校驗並保證開始時間不晚於結束時間。
  * @param {Object} startObj - 開始時間物件，包含 hours、minutes 和 seconds 屬性。
@@ -271,6 +308,223 @@ const createTimeTextElement = (startOrEnd) => {
     return itemText;
 };
 
+/*
+        let drag_handle = document.querySelector('#drag-handle');
+        const handlerStyle = drag_handle.getBoundingClientRect();
+        const handlerWidth = handlerStyle.width;
+        const handlerHeight = handlerStyle.height;
+        */
+
+class MouseEventHandler {
+    constructor(playlistContainer) {
+        this.playlistContainer = playlistContainer;
+        // 其他需要的初始化代碼...
+    }
+
+    // 定義獲取拖放位置的函數
+    getDragAfterElement = (ul, y) => {
+        const draggableElements = [...ul.querySelectorAll('.playlist-item:not(.dragging)')];
+
+        return draggableElements.reduce((closest, child) => {
+            const box = child.getBoundingClientRect();
+            const offset = y - box.top - box.height * (2 / 3);
+
+            if (offset < 0 && offset > closest.offset) {
+                return { offset: offset, element: child };
+            } else {
+                return closest;
+            }
+        }, { offset: Number.NEGATIVE_INFINITY }).element;
+    }
+
+    /**
+     * 處理 mousedown 事件，開始拖曳過程。
+     * @param {MouseEvent} event - 觸發事件的事件對象。
+     */
+    handleMouseDown = (event) => {
+        const dragHandle = event.target.closest('.drag-handle');
+        if (!dragHandle) return;
+
+        const playlistItem = dragHandle.closest('.playlist-item');
+        handleDragStart(playlistItem, event);
+    };
+
+    /**
+    * 初始化拖曳過程。
+    * @param {HTMLElement} item - 要拖曳的播放列表項目。
+    * @param {MouseEvent} event - 觸發拖曳的事件對象。
+    */
+    handleDragStart = (Item, event) => {
+        // 避免對非 playlist-item 元素進行操作
+        if (!Item || !Item.classList.contains('playlist-item')) {
+            return;
+        }
+        event.preventDefault();
+
+        dragItem = Item; // 設置拖動項目的參考
+        // 創建拖曳縮略圖元素
+        dragImage = createDragImage(dragItem, event);
+        document.body.appendChild(dragImage);
+        dragItem.classList.add('dragging');
+
+        // 添加移動和放開的事件監聽器
+        document.addEventListener('mousemove', handleDragging);
+        document.addEventListener('mouseup', handleDragEnd);
+    };
+    /**
+     * 處理拖動過程中的事件。
+     * @param {MouseEvent} event - 觸發拖動事件的事件對象。
+     */
+    handleDragging = (event) => {
+        if (!dragImage) {
+            console.error('拖曳圖像未找到。');
+            return;
+        }
+
+        // 更新拖曳縮略圖的位置
+        dragImage.style.top = `${event.pageY}px`;
+        dragImage.style.left = `${event.pageX}px`;
+
+        const ul = playlistContainer.querySelector('ul');
+        const movingY = event.clientY;
+        const afterElement = getDragAfterElement(ul, movingY);
+
+        // 進行 DOM 操作前確保有改變再操作，避免不必要的性能消耗
+        if (afterElement == null) {
+            ul.appendChild(dragItem);
+        } else {
+            ul.insertBefore(dragItem, afterElement);
+        }
+    };
+
+    // 定義處理拖動結束的函數
+    handleDragEnd = () => {
+        // 移除滑鼠事件的監聽器
+        document.removeEventListener('mousemove', handleDragging);
+        document.removeEventListener('mouseup', handleDragEnd);
+
+        if (dragImage) {
+            dragImage.remove(); // 移除拖曳縮略圖
+            dragImage = null;
+        }
+
+        dragItem.classList.remove('dragging');
+        dragItem = null; // 清除拖動項目的參考
+        playlistItems = Array.from(playlistContainer.querySelectorAll('.playlist-item'));
+        lastPlaylistState = logPlaylistState(playlistItems, lastPlaylistState); // 更新播放列表狀態
+    }
+
+    bindEvents() {
+        this.playlistContainer.addEventListener('mousedown', this.handleMouseDown.bind(this));
+        document.addEventListener('mousemove', this.handleMouseMove.bind(this));
+        document.addEventListener('mouseup', this.handleMouseUp.bind(this));
+    }
+
+    unbindEvents() {
+        this.playlistContainer.removeEventListener('mousedown', this.handleMouseDown);
+        document.removeEventListener('mousemove', this.handleMouseMove);
+        document.removeEventListener('mouseup', this.handleMouseUp);
+    }
+
+}
+
+/**
+ * 處理 mousedown 事件，開始拖曳過程。
+ * @param {MouseEvent} event - 觸發事件的事件對象。
+ */
+const handleMouseDown = (event) => {
+    const dragHandle = event.target.closest('.drag-handle');
+    if (!dragHandle) return;
+
+    const playlistItem = dragHandle.closest('.playlist-item');
+    handleDragStart(playlistItem, event);
+};
+
+
+/**
+* 初始化拖曳過程。
+* @param {HTMLElement} item - 要拖曳的播放列表項目。
+* @param {MouseEvent} event - 觸發拖曳的事件對象。
+*/
+const handleDragStart = (Item, event) => {
+    // 避免對非 playlist-item 元素進行操作
+    if (!Item || !Item.classList.contains('playlist-item')) {
+        return;
+    }
+    event.preventDefault();
+
+    dragItem = Item; // 設置拖動項目的參考
+    // 創建拖曳縮略圖元素
+    dragImage = createDragImage(dragItem, event);
+    document.body.appendChild(dragImage);
+    dragItem.classList.add('dragging');
+
+    // 添加移動和放開的事件監聽器
+    document.addEventListener('mousemove', handleDragging);
+    document.addEventListener('mouseup', handleDragEnd);
+};
+
+
+/**
+ * 處理拖動過程中的事件。
+ * @param {MouseEvent} event - 觸發拖動事件的事件對象。
+ */
+const handleDragging = (event) => {
+    if (!dragImage) {
+        console.error('拖曳圖像未找到。');
+        return;
+    }
+
+    // 更新拖曳縮略圖的位置
+    dragImage.style.top = `${event.pageY}px`;
+    dragImage.style.left = `${event.pageX}px`;
+
+    const ul = playlistContainer.querySelector('ul');
+    const movingY = event.clientY;
+    const afterElement = getDragAfterElement(ul, movingY);
+
+    // 進行 DOM 操作前確保有改變再操作，避免不必要的性能消耗
+    if (afterElement == null) {
+        ul.appendChild(dragItem);
+    } else {
+        ul.insertBefore(dragItem, afterElement);
+    }
+};
+
+
+// 定義處理拖動結束的函數
+const handleDragEnd = () => {
+    // 移除滑鼠事件的監聽器
+    document.removeEventListener('mousemove', handleDragging);
+    document.removeEventListener('mouseup', handleDragEnd);
+
+    if (dragImage) {
+        dragImage.remove(); // 移除拖曳縮略圖
+        dragImage = null;
+    }
+
+    dragItem.classList.remove('dragging');
+    dragItem = null; // 清除拖動項目的參考
+    playlistItems = Array.from(playlistContainer.querySelectorAll('.playlist-item'));
+    lastPlaylistState = logPlaylistState(playlistItems, lastPlaylistState); // 更新播放列表狀態
+}
+
+// 定義獲取拖放位置的函數
+const getDragAfterElement = (ul, y) => {
+    const draggableElements = [...ul.querySelectorAll('.playlist-item:not(.dragging)')];
+
+    return draggableElements.reduce((closest, child) => {
+        const box = child.getBoundingClientRect();
+        const offset = y - box.top - box.height * (2 / 3);
+
+        if (offset < 0 && offset > closest.offset) {
+            return { offset: offset, element: child };
+        } else {
+            return closest;
+        }
+    }, { offset: Number.NEGATIVE_INFINITY }).element;
+}
+
 //初始化並與background.js進行綁定
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'startExtension') {
@@ -287,102 +541,70 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 });
 
+//一個集成撥放列表的類
+class TimeSlot {
+    constructor(start, end) {
+        this.start = start;
+        this.end = end;
+    }
+    getStartTime() {
+        return this.start;
+    }
+    getEndTime() {
+        return this.end;
+    }
+    setStartTime(start) {
+        this.start = start;
+    }
+    setEndTime(end) {
+        this.end = end;
+    }
+    toString() {
+        return this.start + " ~ " + this.end;
+    }
+    toObject() {
+        return { start: this.start, end: this.end };
+    }
+    static fromObject(obj) {
+        return new TimeSlot(obj.start, obj.end);
+    }
+}
 
 async function main(sidebarElm) {
 
-    /*
-     const jumper = (sidebarElm) => {
- 
-         const jumpContainer = document.createElement('div');
-         jumpContainer.id = 'auto-jumper';
-         jumpContainer.className = 'auto-jumper-css';
-         jumpContainer.style.marginTop = '10px';
-         jumpContainer.style.maxWidth = '500px';
-         jumpContainer.style.display = 'flex';
- 
-         const jumpInputHour = document.createElement('input');
-         jumpInputHour.type = 'text';
-         jumpInputHour.placeholder = 'hour';
-         jumpInputHour.style.marginRight = '5px';
-         jumpInputHour.style.maxWidth = '100px';
-         jumpContainer.appendChild(jumpInputHour);
- 
-         const jumpInputMin = document.createElement('input');
-         jumpInputMin.type = 'text';
-         jumpInputMin.placeholder = 'min';
-         jumpInputMin.style.marginRight = '5px';
-         jumpInputMin.style.maxWidth = '100px';
-         jumpContainer.appendChild(jumpInputMin);
- 
-         const jumpInputSec = document.createElement('input');
-         jumpInputSec.type = 'text';
-         jumpInputSec.placeholder = 'sec';
-         jumpInputSec.style.marginRight = '5px';
-         jumpInputSec.style.maxWidth = '100px';
-         jumpContainer.appendChild(jumpInputSec);
- 
-         const jumpButton = document.createElement('button');
-         jumpButton.textContent = 'Jump';
-         jumpContainer.appendChild(jumpButton);
- 
-         const buildContainer = () => {
-             if (sidebarElm) {
-                 sidebarElm.insertBefore(jumpContainer, sidebarElm.firstChild);
-             }
- 
-             jumpButton.addEventListener('click', function () {
-                 let hour = 0;
-                 let min = 0;
-                 let sec = 0;
-                 if (jumpInputHour.value) {
-                     hour = Number(jumpInputHour.value);
-                 }
-                 if (jumpInputMin.value) {
-                     min = Number(jumpInputMin.value);
-                 }
-                 if (jumpInputSec.value) {
-                     sec = Number(jumpInputSec.value);
-                 }
-                 console.log(hour, min, sec);
-                 jumpToTime(hour, min, sec);
-             });
- 
-             const jumpToTime = (hour, min, sec) => {
-                 const video = document.querySelector('video');
-                 if (video) {
-                     const jumpSeconds = hour * 3600 + min * 60 + sec;
-                     console.log(jumpSeconds)
-                     video.currentTime = jumpSeconds;
-                 }
-             }
-         }
- 
-         if (!sidebarElm) {
-             window.addEventListener('yt-navigate-finish', function () {
-                 buildContainer();
-             });
-         }
-         else {
-             buildContainer();
-         }
-     }
- 
-     jumper(sidebarElm);
-     */
-
     async function test(sidebarElm) {
         // 建立播放列表容器
-        const playlistContainer = document.createElement('div');
-        playlistContainer.id = 'playlist-container';
-        playlistContainer.className = 'playlist-container';
         sidebarElm.insertBefore(playlistContainer, sidebarElm.firstChild);
 
         // 建立添加到播放列表的按鈕
-        const addToPlaylistButton = document.createElement('button');
-        addToPlaylistButton.id = 'add-to-playlist';
-        addToPlaylistButton.className = 'add-to-playlist';
         sidebarElm.insertBefore(addToPlaylistButton, sidebarElm.firstChild);
 
+        // 使用事件委派來處理所有子項目的 mousedown 事件
+        ul.addEventListener('mousedown', event => {
+            const dragHandle = event.target.closest('.drag-handle');
+            if (dragHandle) {
+                handleMouseDown(event);
+            }
+        });
+
+        /**
+         * 重新渲染播放列表並設置事件委派以處理拖曳事件。
+         */
+        const reRenderPlaylist = () => {
+            // 清空播放列表容器
+            while (playlistContainer.firstChild) {
+                playlistContainer.removeChild(playlistContainer.firstChild);
+            }
+
+            // 使用 DocumentFragment 來一次性添加所有項目
+            const fragment = document.createDocumentFragment();
+            playlistItems.forEach(item => {
+                fragment.appendChild(item);
+            });
+
+            ul.appendChild(fragment);
+            playlistContainer.appendChild(ul);
+        };
 
         /**
         * 添加一個新的項目到播放列表並更新顯示。
@@ -390,9 +612,12 @@ async function main(sidebarElm) {
         const addToPlaylist = () => {
             const newItem = createPlaylistItem();
             playlistItems.push(newItem);
-            renderPlaylist();
+            ul.appendChild(newItem);
+            playlistContainer.appendChild(ul);
             lastPlaylistState = logPlaylistState(playlistItems, lastPlaylistState);
         }
+        // 監聽添加到播放列表按鈕的點擊事件
+        addToPlaylistButton.addEventListener('click', addToPlaylist);
 
         /**
         * 創建一個新的播放列表項目元素，包含拖拽處理和時間顯示。
@@ -405,7 +630,7 @@ async function main(sidebarElm) {
             const dragHandle = document.createElement('div');
             dragHandle.classList.add('drag-handle');
             dragHandle.draggable = true;
-            dragHandle.addEventListener('dragstart', handleDragStart);
+            dragHandle.addEventListener('dragstart', handleMouseDown);
 
             // 添加時間標籤，用於顯示和編輯開始和結束時間
             const startTimeText = createTimeTextElement('start');
@@ -418,149 +643,6 @@ async function main(sidebarElm) {
             return newItem;
         }
 
-        /**
-         * 渲染播放列表並設置事件委派以處理拖曳事件。
-         */
-        const renderPlaylist = () => {
-            // 清空播放列表容器
-            while (playlistContainer.firstChild) {
-                playlistContainer.removeChild(playlistContainer.firstChild);
-            }
-
-            const ul = document.createElement('ul');
-            ul.id = 'playlist-items';
-
-            // 使用事件委派來處理所有子項目的 mousedown 事件
-            ul.addEventListener('mousedown', handleMouseDown);
-
-            // 使用 DocumentFragment 來一次性添加所有項目
-            const fragment = document.createDocumentFragment();
-            playlistItems.forEach(item => {
-                fragment.appendChild(item);
-            });
-
-            ul.appendChild(fragment);
-            playlistContainer.appendChild(ul);
-        };
-
-        /*
-        let drag_handle = document.querySelector('#drag-handle');
-        const handlerStyle = drag_handle.getBoundingClientRect();
-        const handlerWidth = handlerStyle.width;
-        const handlerHeight = handlerStyle.height;
-        */
-
-        /**
-         * 處理 mousedown 事件，開始拖曳過程。
-         * @param {MouseEvent} event - 觸發事件的事件對象。
-         */
-        const handleMouseDown = (event) => {
-            const dragHandle = event.target.closest('.drag-handle');
-            if (!dragHandle) return;
-
-            const playlistItem = dragHandle.closest('.playlist-item');
-            handleDragStart(playlistItem, event);
-        };
-
-
-        /**
-        * 初始化拖曳過程。
-        * @param {HTMLElement} item - 要拖曳的播放列表項目。
-        * @param {MouseEvent} event - 觸發拖曳的事件對象。
-        */
-        const handleDragStart = (item, event) => {
-            // 避免對非 playlist-item 元素進行操作
-            if (!item || !item.classList.contains('playlist-item')) {
-                return;
-            }
-            event.preventDefault();
-            dragItem = item; // 使用傳入的 item 參數
-            const computedStyle = window.getComputedStyle(dragItem);
-            const computedWidth = computedStyle.width;
-            const computedHeight = computedStyle.height;
-
-            // 創建拖曳縮略圖元素
-            dragImage = dragItem.cloneNode(true);
-            dragImage.classList.add('display-dragging');
-            dragImage.classList.remove('playlist-item');
-            dragImage.style.position = 'absolute';
-            dragImage.style.top = `${event.pageY}px`;
-            dragImage.style.left = `${event.pageX}px`;
-            dragImage.style.zIndex = '1000';
-            dragImage.style.width = computedWidth; // 直接使用 computedStyle 的值
-            dragImage.style.height = computedHeight; // 直接使用 computedStyle 的值
-            document.body.appendChild(dragImage);
-
-            dragItem.classList.add('dragging');
-
-            // 添加移動和放開的事件監聽器
-            document.addEventListener('mousemove', handleDragging);
-            document.addEventListener('mouseup', handleDragEnd);
-        };
-
-
-        /**
-         * 處理拖動過程中的事件。
-         * @param {MouseEvent} event - 觸發拖動事件的事件對象。
-         */
-        const handleDragging = (event) => {
-            if (!dragImage) {
-                console.error('拖曳圖像未找到。');
-                return;
-            }
-
-            // 更新拖曳縮略圖的位置
-            dragImage.style.top = `${event.pageY}px`;
-            dragImage.style.left = `${event.pageX}px`;
-
-            const ul = playlistContainer.querySelector('ul');
-            const movingY = event.clientY;
-            const afterElement = getDragAfterElement(ul, movingY);
-
-            // 進行 DOM 操作前確保有改變再操作，避免不必要的性能消耗
-            if (afterElement == null) {
-                ul.appendChild(dragItem);
-            } else {
-                ul.insertBefore(dragItem, afterElement);
-            }
-        };
-
-
-        // 定義處理拖動結束的函數
-        const handleDragEnd = () => {
-            // 移除滑鼠事件的監聽器
-            document.removeEventListener('mousemove', handleDragging);
-            document.removeEventListener('mouseup', handleDragEnd);
-
-            if (dragImage) {
-                dragImage.remove(); // 移除拖曳縮略圖
-                dragImage = null;
-            }
-
-            dragItem.classList.remove('dragging');
-            dragItem = null; // 清除拖動項目的參考
-            playlistItems = Array.from(playlistContainer.querySelectorAll('.playlist-item'));
-            lastPlaylistState = logPlaylistState(playlistItems, lastPlaylistState); // 更新播放列表狀態
-        }
-
-        // 定義獲取拖放位置的函數
-        const getDragAfterElement = (ul, y) => {
-            const draggableElements = [...ul.querySelectorAll('.playlist-item:not(.dragging)')];
-
-            return draggableElements.reduce((closest, child) => {
-                const box = child.getBoundingClientRect();
-                const offset = y - box.top - box.height * (2 / 3);
-
-                if (offset < 0 && offset > closest.offset) {
-                    return { offset: offset, element: child };
-                } else {
-                    return closest;
-                }
-            }, { offset: Number.NEGATIVE_INFINITY }).element;
-        }
-
-        // 監聽添加到播放列表按鈕的點擊事件
-        addToPlaylistButton.addEventListener('click', addToPlaylist);
     }
 
     test(sidebarElm);
