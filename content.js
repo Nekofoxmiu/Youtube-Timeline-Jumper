@@ -18,6 +18,7 @@ const addToPlaylistButton = document.createElement('button');
 addToPlaylistButton.id = 'add-to-playlist';
 addToPlaylistButton.className = 'add-to-playlist';
 
+//建立播放列表內組件的容器
 const ul = document.createElement('ul');
 ul.id = 'playlist-items';
 
@@ -106,8 +107,8 @@ class PlaylistCheckTool {
         const playlistStartState = this.sharedState.playlistItems.map(item => item.querySelector('.playlist-item-text-start').innerText);
         const playlistEndState = this.sharedState.playlistItems.map(item => item.querySelector('.playlist-item-text-end').innerText);
         const playlistState = this.mergeArraysToObjects(playlistStartState, playlistEndState);
-        console.log(playlistState);
-        console.log(this.sharedState.lastPlaylistState);
+        //console.log(playlistState);
+        //console.log(this.sharedState.lastPlaylistState);
         if (!this.equalsCheck(this.sharedState.lastPlaylistState, playlistState)) {
             console.log('Playlist State:', playlistState);
         }
@@ -241,24 +242,19 @@ class PlaylistTimeManager extends PlaylistCheckTool {
     }
 }
 
-/*
-        let drag_handle = document.querySelector('#drag-handle');
-        const handlerStyle = drag_handle.getBoundingClientRect();
-        const handlerWidth = handlerStyle.width;
-        const handlerHeight = handlerStyle.height;
-        */
 class MouseEventHandler extends PlaylistCheckTool {
     /**
     * Create a playlist item.
     * @param {HTMLElement} playlistContainer - The container element for the playlist.
     * @param {PlaylistState} sharedState - The shared state object.
     */
-    constructor(playlistContainer, sharedState) {
+    constructor(ul, playlistContainer, sharedState) {
         super(playlistContainer, sharedState);
         this.playlistContainer = playlistContainer;
-        this.frame = null;
         this.dragItem = null;
         this.dragImage = null;
+        this.ul = ul;
+        this.waitCount = 3;
         // 其他需要的初始化代碼...
     }
 
@@ -269,6 +265,7 @@ class MouseEventHandler extends PlaylistCheckTool {
 
         const dragImage = dragItem.cloneNode(true);
         const dragHandle = dragImage.querySelector('.drag-handle');
+        dragItem.removeEventListener('dragstart', this.handleDragStart);
         dragHandle.classList.remove('drag-handle');
         dragHandle.classList.add('drag-handle-clicked');
         dragImage.classList.remove('playlist-item');
@@ -284,12 +281,12 @@ class MouseEventHandler extends PlaylistCheckTool {
     };
 
     // 定義獲取拖放位置的函數
-    getDragAfterElement = (ul, querySelector, y) => {
+    getDragCrossElement = (ul, querySelector, y) => {
         const draggableElements = [...ul.querySelectorAll(querySelector)];
 
         return draggableElements.reduce((closest, child) => {
             const box = child.getBoundingClientRect();
-            const offset = y - box.top - box.height * (2 / 3);
+            const offset = y - box.top - box.height * (1 / 2);
 
             if (offset < 0 && offset > closest.offset) {
                 return { offset: offset, element: child };
@@ -336,20 +333,31 @@ class MouseEventHandler extends PlaylistCheckTool {
             return;
         }
 
-        // 更新拖曳縮略圖的位置
-        this.dragImage.style.top = `${event.pageY}px`;
-        this.dragImage.style.left = `${event.pageX}px`;
 
-        const movingY = event.clientY;
-        const ul = this.playlistContainer.querySelector('ul');
-        const afterElement = this.getDragAfterElement(ul, '.playlist-item:not(.dragging)', movingY);
+        requestAnimationFrame(() => {
+            this.dragImage.style.top = `${event.pageY}px`;
+            this.dragImage.style.left = `${event.pageX}px`;
 
-        // 進行 DOM 操作前確保有改變再操作，避免不必要的性能消耗
-        if (afterElement == null && this.dragItem.parentNode !== this.ul) {
-            ul.appendChild(this.dragItem);
-        } else if (afterElement && this.dragItem.nextSibling !== afterElement) {
-            ul.insertBefore(this.dragItem, afterElement);
-        }
+            // 更新拖曳縮略圖的位置
+
+            this.waitCount--;
+            if (this.waitCount > 0) {
+                return;
+            }
+            this.waitCount = 3;
+
+            const movingY = event.clientY;
+            const crossElement = this.getDragCrossElement(this.ul, '.playlist-item:not(.dragging)', movingY);
+
+            // 進行 DOM 操作前確保有改變再操作，避免不必要的性能消耗
+            if (crossElement == null) {
+                this.ul.appendChild(this.dragItem);
+            } else {
+                if (this.dragItem.nextElementSibling !== crossElement) {
+                    this.ul.insertBefore(this.dragItem, crossElement);
+                }
+            }
+        });
 
     };
 
@@ -372,8 +380,7 @@ class MouseEventHandler extends PlaylistCheckTool {
 
 }
 
-
-const mouseEventHandler = new MouseEventHandler(playlistContainer, playlistState);
+const mouseEventHandler = new MouseEventHandler(ul, playlistContainer, playlistState);
 const playlistTimeManager = new PlaylistTimeManager(playlistContainer, playlistState);
 
 /**
@@ -505,6 +512,29 @@ async function main(sidebarElm) {
         */
 
         /**
+        * 創建一個新的播放列表項目元素，包含拖拽處理和時間顯示。
+        * @returns {HTMLElement} 一個代表播放列表項目的新元素。
+        */
+        const createPlaylistItem = () => {
+            const newItem = document.createElement('li');
+            newItem.classList.add('playlist-item');
+
+            const dragHandle = document.createElement('div');
+            dragHandle.classList.add('drag-handle');
+            dragHandle.draggable = true;
+            dragHandle.addEventListener('dragstart', mouseEventHandler.handleDragStart);
+            // 添加時間標籤，用於顯示和編輯開始和結束時間
+            const startTimeText = createTimeTextElement('start');
+            const endTimeText = createTimeTextElement('end');
+
+            newItem.appendChild(dragHandle);
+            newItem.appendChild(startTimeText);
+            newItem.appendChild(endTimeText);
+
+            return newItem;
+        }
+
+        /**
         * 添加一個新的項目到播放列表並更新顯示。
         */
         const addToPlaylist = () => {
@@ -517,29 +547,7 @@ async function main(sidebarElm) {
         // 監聽添加到播放列表按鈕的點擊事件
         addToPlaylistButton.addEventListener('click', addToPlaylist);
 
-        /**
-        * 創建一個新的播放列表項目元素，包含拖拽處理和時間顯示。
-        * @returns {HTMLElement} 一個代表播放列表項目的新元素。
-        */
-        const createPlaylistItem = () => {
-            const newItem = document.createElement('li');
-            newItem.classList.add('playlist-item');
 
-            const dragHandle = document.createElement('div');
-            dragHandle.classList.add('drag-handle');
-            dragHandle.draggable = true;
-            dragHandle.addEventListener('dragstart', mouseEventHandler.handleDragStart);
-
-            // 添加時間標籤，用於顯示和編輯開始和結束時間
-            const startTimeText = createTimeTextElement('start');
-            const endTimeText = createTimeTextElement('end');
-
-            newItem.appendChild(dragHandle);
-            newItem.appendChild(startTimeText);
-            newItem.appendChild(endTimeText);
-
-            return newItem;
-        }
 
     }
 
