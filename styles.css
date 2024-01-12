@@ -7,9 +7,20 @@
     overflow-y: auto;
 }
 
+ul {
+    font-size: 10px;
+    font-family: Roboto, Arial, sans-serif;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+}
+
 
 /* 播放列表項目 */
-.playlist-item {
+.ytj-playlist-item {
+    margin: 0;
+    padding: 0;
     display: flex;
     align-items: center;
     padding: 10px;
@@ -17,21 +28,21 @@
     transition: background-color 0.2s ease-in-out;
 }
 
-.display-dragging {
-    display: flex;
-    align-items: center;
-    background-color: #ffffff;
-    padding: 10px;
-    transform: translateX(-18px) translateY(-18px);
-    box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-}
-
-.playlist-item:last-child {
+.ytj-playlist-item:last-child {
     border-bottom: none;
 }
 
-.playlist-item:hover {
+.ytj-playlist-item:hover {
     background-color: #f0f0f0;
+}
+
+.display-dragging {
+    margin: 0;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    padding: 10px;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
 }
 
 /* 拖放效果 */
@@ -52,6 +63,7 @@
     justify-content: center;
     cursor: grab;
 }
+
 .drag-handle-clicked {
     width: 16px;
     height: 16px;
@@ -66,7 +78,7 @@
 }
 
 /* 播放列表項目文字 */
-.playlist-item-text-start {
+.ytj-playlist-item-text-start {
     flex-grow: 1;
     margin-right: 10px;
     width: 50px;
@@ -76,7 +88,7 @@
     white-space: nowrap;
 }
 
-.playlist-item-text-end {
+.ytj-playlist-item-text-end {
     flex-grow: 1;
     margin-right: 10px;
     width: 50px;
