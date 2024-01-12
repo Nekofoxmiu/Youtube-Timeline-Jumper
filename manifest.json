@@ -13,7 +13,7 @@
     "type": "module"
   },
   "action": {
-    "default_icon": {              
+    "default_icon": {
       "16": "images/icon/icon16.png",
       "48": "images/icon/icon48.png",
       "128": "images/icon/icon128.png"
@@ -29,22 +29,29 @@
       "matches": [
         "*://*.youtube.com/*",
         "*://youtube.com/*",
-        "*://youtu.be/*"
+        "*://youtu.be/*",
+        "<all_urls>"
       ],
-      "js": ["content.js"],
-      "css": ["styles.css"],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
       "run_at": "document_idle"
     }
   ],
-  "web_accessible_resources": [{
-    "matches": [        
-    "*://*.youtube.com/*",
-    "*://youtube.com/*",
-    "*://youtu.be/*"
-  ],
-    "resources": [
-      "images/ui/*"
-    
-    ]
-  }]
+  "web_accessible_resources": [
+    {
+      "matches": [
+        "*://*.youtube.com/*",
+        "*://youtube.com/*",
+        "*://youtu.be/*",
+        "<all_urls>"
+      ],
+      "resources": [
+        "images/ui/*"
+      ]
+    }
+  ]
 }
