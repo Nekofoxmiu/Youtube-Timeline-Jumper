@@ -40,7 +40,7 @@
 
     const playlistState = new PlaylistState();
 
-    class MouseEventHandler extends PlaylistCheckTool {
+    class MouseEventHandler extends PlaylistCheckTool{
         /**
         * Create a playlist item.
         * @param {HTMLElement} playlistContainer - The container element for the playlist.
@@ -49,6 +49,7 @@
         constructor(ul, playlistContainer, sharedState) {
             super(playlistContainer, sharedState);
             this.playlistContainer = playlistContainer;
+            this.sharedState = sharedState;
             this.dragItem = null;
             this.dragImage = null;
             this.ul = ul;

@@ -51,7 +51,7 @@
       ],
       "resources": [
         "images/ui/*",
-        "lib/dataclass.js"
+        "lib/*"
       ]
     }
   ]
