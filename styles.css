@@ -5,6 +5,7 @@
     border: 1px solid #ccc;
     border-radius: 5px;
     overflow-y: auto;
+    margin-bottom: 10px;
 }
 
 ul {
@@ -36,7 +37,7 @@ ul {
     background-color: #f0f0f0;
 }
 
-.display-dragging {
+.ytj-display-dragging {
     margin: 0;
     padding: 0;
     display: flex;
@@ -46,12 +47,12 @@ ul {
 }
 
 /* 拖放效果 */
-.dragging {
+.ytj-dragging {
     opacity: 0;
 }
 
 /* 拖放圖標 */
-.drag-handle {
+.ytj-drag-handle {
     width: 16px;
     height: 16px;
     background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/handle.png');
@@ -64,7 +65,7 @@ ul {
     cursor: grab;
 }
 
-.drag-handle-clicked {
+.ytj-drag-handle-clicked {
     width: 16px;
     height: 16px;
     background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/handle.png');
