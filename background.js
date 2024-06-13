@@ -7,3 +7,14 @@ chrome.action.onClicked.addListener(async (tab) => {
     console.log("Content.js isn't injected.")
   }
 });
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'updatePlaylistState') {
+      const { videoId, state } = request.data;
+      // 儲存資料的邏輯，例如使用 chrome.storage.local
+      chrome.storage.local.set({ [videoId]: state }, () => {
+          sendResponse({ success: true });
+      });
+      return true; // 表示異步回應
+  }
+});
