@@ -1,5 +1,5 @@
 /* 播放列表容器 */
-.playlist-container {
+.ytj-playlist-container {
     width: 100%;
     max-height: 450px;
     border: 1px solid #ccc;
@@ -99,7 +99,7 @@ ul {
     white-space: nowrap;
 }
 
-.add-to-playlist {
+.ytj-add-to-playlist {
     width: 24px;
     height: 24px;
     border: 1px solid #ccc;

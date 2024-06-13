@@ -21,13 +21,20 @@ console.log('yt-paj content.js injected');
     const { MouseEventHandler } = mouseEventHandlerModule;
 
     // 建立播放列表容器
-    const playlistContainer = createPlaylistContainer();
-    const addToPlaylistButton = createAddToPlaylistButton();
-    const ul = createPlaylistItemsContainer();
+    let playlistContainer = createPlaylistContainer();
+    let addToPlaylistButton = createAddToPlaylistButton();
+    let ul = createPlaylistItemsContainer();
 
     const playlistState = new PlaylistState();
-    const mouseEventHandler = new MouseEventHandler(ul, playlistContainer, playlistState);
-    const playlistTimeManager = new PlaylistTimeManager(playlistContainer, playlistState);
+    let mouseEventHandler = new MouseEventHandler(ul, playlistContainer, playlistState);
+    let playlistTimeManager = new PlaylistTimeManager(playlistContainer, playlistState);
+
+    // 擴展是否啟用的標誌
+    let extensionWorkOrNot = false;
+
+    // 常量
+    const sidebarQuery = '#related.style-scope.ytd-watch-flexy';
+    const appPlayListContainerQuery = '#ytj-playlist-container';
 
     // 初始化並與 background.js 綁定
     chrome.runtime.onMessage.addListener(handleRuntimeMessage);
@@ -38,8 +45,8 @@ console.log('yt-paj content.js injected');
      */
     function createPlaylistContainer() {
         const container = document.createElement('div');
-        container.id = 'playlist-container';
-        container.className = 'playlist-container';
+        container.id = 'ytj-playlist-container';
+        container.className = 'ytj-playlist-container';
         return container;
     }
 
@@ -49,8 +56,8 @@ console.log('yt-paj content.js injected');
      */
     function createAddToPlaylistButton() {
         const button = document.createElement('button');
-        button.id = 'add-to-playlist';
-        button.className = 'add-to-playlist';
+        button.id = 'ytj-add-to-playlist';
+        button.className = 'ytj-add-to-playlist';
         return button;
     }
 
@@ -75,17 +82,6 @@ console.log('yt-paj content.js injected');
     }
 
     /**
-    * 獲取當前 YouTube 影片 ID。
-    * @returns {string|null} 影片 ID 或 null。
-    */
-    function getCurrentVideoId() {
-        const videoUrl = window.location.href;
-        const urlParams = new URLSearchParams((new URL(videoUrl)).search);
-        return urlParams.get('v');
-    }
-
-
-    /**
      * 創建一個時間文本元素，用於播放列表中顯示和編輯時間。
      * @param {string} startOrEnd - 指示是創建開始時間還是結束時間的元素允許值 'start', 'end'。
      * @returns {HTMLElement|null} 返回一個時間文本的 DOM 元素，如果沒有視頻元素則返回 null。
@@ -106,19 +102,129 @@ console.log('yt-paj content.js injected');
     }
 
     /**
+    * 獲取當前 YouTube 影片 ID。
+    * @returns {string|null} 影片 ID 或 null。
+    */
+    function getCurrentVideoId() {
+        const videoUrl = window.location.href;
+        const urlParams = new URLSearchParams((new URL(videoUrl)).search);
+        return urlParams.get('v');
+    }
+
+    async function deleteAppElement() {
+        playlistState.clearAll();
+    
+        const oldPlaylistContainer = document.querySelector(appPlayListContainerQuery);
+        const oldAddToPlaylistButton = document.querySelector('.ytj-add-to-playlist');
+        const oldUl = document.querySelector('.ytj-playlist-items');
+    
+        if (oldPlaylistContainer) oldPlaylistContainer.remove();
+        if (oldAddToPlaylistButton) oldAddToPlaylistButton.remove();
+        if (oldUl) oldUl.remove();
+    
+        // 清空容器內容
+        playlistContainer.innerHTML = '';
+        ul.innerHTML = '';
+    
+        // 重新創建容器和按鈕
+        playlistContainer = createPlaylistContainer();
+        addToPlaylistButton = createAddToPlaylistButton();
+        ul = createPlaylistItemsContainer();
+
+        // 重新創建事件處理程序
+        mouseEventHandler = new MouseEventHandler(ul, playlistContainer, playlistState);
+        playlistTimeManager = new PlaylistTimeManager(playlistContainer, playlistState);
+    }
+    
+
+
+
+
+
+    /**
      * 處理接收到的 runtime 訊息
      * @param {Object} request - 訊息請求物件
      * @param {Object} sender - 發送訊息的發件人
      * @param {function} sendResponse - 回應訊息的函數
      */
-    function handleRuntimeMessage(request, sender, sendResponse) {
-        if (request.action === 'startExtension') {
-            console.log("receive startExtension");
-            sendResponse({ appstart: 'yt-tj start.' });
-            const sidebarQuery = '#related.style-scope.ytd-watch-flexy';
-            const sidebarElm = document.querySelector(sidebarQuery);
-            if (!document.querySelector('#playlist-container') && sidebarElm) {
-                main(sidebarElm);
+    async function handleRuntimeMessage(request, sender, sendResponse) {
+        let sidebarElm = document.querySelector(sidebarQuery);
+        if (request.action === 'switchExtensionOnState') {
+            extensionWorkOrNot = !extensionWorkOrNot;
+            if (extensionWorkOrNot) {
+                console.log('yt-tj start.');
+                sendResponse({ appstart: 'yt-tj start.' });
+                if (sidebarElm) {
+                    if (!document.querySelector(appPlayListContainerQuery)) {
+                        main(sidebarElm);
+                    }
+                    else {
+                        await deleteAppElement();
+                        main(sidebarElm);
+                    }
+                }
+                else {
+                    //loop for wait sidebarElm
+                    let loopCount = 0;
+                    const loop = setInterval(() => {
+                        loopCount++;
+                        if (sidebarElm) {
+                            clearInterval(loop);
+                        }
+                        else if (loopCount > 100) {
+                            clearInterval(loop);
+                        }
+                        else {
+                            sidebarElm = document.querySelector(sidebarQuery);
+                            if (sidebarElm) {
+                                main(sidebarElm);
+                            }
+                        }
+                    }, 100);
+                }
+            }
+            else {
+                sendResponse({ appstop: 'yt-tj stop.' });
+                console.log('yt-tj stop.');
+                await deleteAppElement();
+            }
+
+        }
+        if (request.action === 'initializePlaylist') {
+            if (extensionWorkOrNot) {
+                sendResponse( { initialize: 'success' });
+                if (sidebarElm) {
+                    if (!document.querySelector(appPlayListContainerQuery)) {
+                        main(sidebarElm);
+                    }
+                    else {
+                        await deleteAppElement();
+                        main(sidebarElm);
+                    }
+                }
+                else {
+                    //loop for wait sidebarElm
+                    let loopCount = 0;
+                    const loop = setInterval(() => {
+                        loopCount++;
+                        if (document.querySelector(appPlayListContainerQuery)) {
+                            clearInterval(loop);
+                        }
+                        else if (loopCount > 100) {
+                            clearInterval(loop);
+                        }
+                        else {
+                            sidebarElm = document.querySelector(sidebarQuery);
+                            if (sidebarElm) {
+                                main(sidebarElm);
+                            }
+                        }
+                    }, 100);
+                }
+            }
+            else 
+            {
+                sendResponse( { initialize: 'app-not-start' });
             }
         }
     }
@@ -138,6 +244,26 @@ console.log('yt-paj content.js injected');
      */
     async function initializePlaylist(sidebarElm) {
         // 將播放列表容器和按鈕插入側邊欄
+        const videoId = getCurrentVideoId();
+        if (!videoId) {
+            console.error('No video ID found for initialization.');
+            return;
+        }
+
+        chrome.storage.local.get([videoId], async (result) => {
+            const savedState = result[videoId];
+            if (savedState && Array.isArray(savedState)) {
+                savedState.forEach(itemData => {
+                    const startTime = TimeSlot.fromObject(itemData.start);
+                    const endTime = TimeSlot.fromObject(itemData.end);
+                    const newItem = createPlaylistItemFromData(startTime, endTime);
+                    playlistState.playlistItems.push(newItem);
+                    ul.appendChild(newItem);
+                });
+                playlistContainer.appendChild(ul);
+            }
+        });
+
         sidebarElm.insertBefore(playlistContainer, sidebarElm.firstChild);
         sidebarElm.insertBefore(addToPlaylistButton, sidebarElm.firstChild);
 
@@ -247,6 +373,34 @@ console.log('yt-paj content.js injected');
         // 添加時間標籤，用於顯示和編輯開始和結束時間
         const startTimeText = createTimeTextElement('start');
         const endTimeText = createTimeTextElement('end');
+
+        newItem.appendChild(dragHandle);
+        newItem.appendChild(startTimeText);
+        newItem.appendChild(endTimeText);
+
+        return newItem;
+    }
+
+    function createPlaylistItemFromData(startTime, endTime) {
+        const newItem = document.createElement('li');
+        newItem.classList.add('ytj-playlist-item');
+
+        const dragHandle = document.createElement('div');
+        dragHandle.classList.add('ytj-drag-handle');
+        dragHandle.draggable = true;
+        dragHandle.addEventListener('dragstart', mouseEventHandler.handleDragStart);
+
+        const startTimeText = document.createElement('div');
+        startTimeText.classList.add('ytj-playlist-item-text-start');
+        startTimeText.innerText = startTime.toformatString();
+        startTimeText.setAttribute('timeat', startTime.getTotalseconds());
+        startTimeText.contentEditable = false;
+
+        const endTimeText = document.createElement('div');
+        endTimeText.classList.add('ytj-playlist-item-text-end');
+        endTimeText.innerText = endTime.toformatString();
+        endTimeText.setAttribute('timeat', endTime.getTotalseconds());
+        endTimeText.contentEditable = false;
 
         newItem.appendChild(dragHandle);
         newItem.appendChild(startTimeText);
