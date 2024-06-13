@@ -18,3 +18,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       return true; // 表示異步回應
   }
 });
+
+chrome.webNavigation.onCompleted.addListener((details) => {
+  if (details.url.includes('youtube.com/watch')) {
+      chrome.tabs.sendMessage(details.tabId, { action: 'initializePlaylist' });
+  }
+}, { url: [{ hostContains: 'youtube.com' }] });
+
