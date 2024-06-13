@@ -22,7 +22,9 @@ console.log('yt-paj content.js injected');
 
     // 建立播放列表容器
     let playlistContainer = createPlaylistContainer();
+    let buttonContainer = createButtonContainer(); // 新增按鈕容器
     let addToPlaylistButton = createAddToPlaylistButton();
+    let playButton = createPlayButton(); // 新增播放按鈕
     let ul = createPlaylistItemsContainer();
 
     const playlistState = new PlaylistState();
@@ -39,6 +41,30 @@ console.log('yt-paj content.js injected');
     // 初始化並與 background.js 綁定
     chrome.runtime.onMessage.addListener(handleRuntimeMessage);
 
+    // 讀取本地存儲中的狀態
+    chrome.runtime.sendMessage({ action: 'getExtensionWorkOrNot' }, (response) => {
+        extensionWorkOrNot = response.state || false;
+        if (extensionWorkOrNot) {
+            let sidebarElm = document.querySelector(sidebarQuery);
+            if (sidebarElm) {
+                main(sidebarElm);
+            } else {
+                // loop for wait sidebarElm
+                let loopCount = 0;
+                const loop = setInterval(() => {
+                    loopCount++;
+                    sidebarElm = document.querySelector(sidebarQuery);
+                    if (sidebarElm) {
+                        clearInterval(loop);
+                        main(sidebarElm);
+                    } else if (loopCount > 100) {
+                        clearInterval(loop);
+                    }
+                }, 100);
+            }
+        }
+    });
+
     /**
      * 建立播放列表容器的函數
      * @returns {HTMLElement} 播放列表容器
@@ -51,6 +77,17 @@ console.log('yt-paj content.js injected');
     }
 
     /**
+     * 建立按鈕容器的函數
+     * @returns {HTMLElement} 按鈕容器
+     */
+    function createButtonContainer() {
+        const container = document.createElement('div');
+        container.id = 'ytj-button-container';
+        container.className = 'ytj-button-container';
+        return container;
+    }
+
+    /**
      * 建立添加到播放列表按鈕的函數
      * @returns {HTMLElement} 按鈕元素
      */
@@ -58,6 +95,19 @@ console.log('yt-paj content.js injected');
         const button = document.createElement('button');
         button.id = 'ytj-add-to-playlist';
         button.className = 'ytj-add-to-playlist';
+        button.innerText = '';
+        return button;
+    }
+
+    /**
+     * 建立播放按鈕的函數
+     * @returns {HTMLElement} 播放按鈕
+     */
+    function createPlayButton() {
+        const button = document.createElement('button');
+        button.id = 'ytj-play-playlist';
+        button.className = 'ytj-play-playlist';
+        button.innerText = '';
         return button;
     }
 
@@ -116,10 +166,12 @@ console.log('yt-paj content.js injected');
     
         const oldPlaylistContainer = document.querySelector(appPlayListContainerQuery);
         const oldAddToPlaylistButton = document.querySelector('.ytj-add-to-playlist');
+        const oldPlayButton = document.querySelector('.ytj-play-playlist');
         const oldUl = document.querySelector('.ytj-playlist-items');
     
         if (oldPlaylistContainer) oldPlaylistContainer.remove();
         if (oldAddToPlaylistButton) oldAddToPlaylistButton.remove();
+        if (oldPlayButton) oldPlayButton.remove();
         if (oldUl) oldUl.remove();
     
         // 清空容器內容
@@ -128,18 +180,15 @@ console.log('yt-paj content.js injected');
     
         // 重新創建容器和按鈕
         playlistContainer = createPlaylistContainer();
+        buttonContainer = createButtonContainer();
         addToPlaylistButton = createAddToPlaylistButton();
+        playButton = createPlayButton(); // 重新創建播放按鈕
         ul = createPlaylistItemsContainer();
 
         // 重新創建事件處理程序
         mouseEventHandler = new MouseEventHandler(ul, playlistContainer, playlistState);
         playlistTimeManager = new PlaylistTimeManager(playlistContainer, playlistState);
     }
-    
-
-
-
-
 
     /**
      * 處理接收到的 runtime 訊息
@@ -151,69 +200,61 @@ console.log('yt-paj content.js injected');
         let sidebarElm = document.querySelector(sidebarQuery);
         if (request.action === 'switchExtensionOnState') {
             extensionWorkOrNot = !extensionWorkOrNot;
+            // 保存 extensionWorkOrNot 狀態到本地存儲
+            chrome.storage.sync.set({ extensionWorkOrNot }, () => {
+                console.log('Extension state saved:', extensionWorkOrNot);
+            });
+
             if (extensionWorkOrNot) {
                 console.log('yt-tj start.');
                 sendResponse({ appstart: 'yt-tj start.' });
                 if (sidebarElm) {
                     if (!document.querySelector(appPlayListContainerQuery)) {
                         main(sidebarElm);
-                    }
-                    else {
+                    } else {
                         await deleteAppElement();
                         main(sidebarElm);
                     }
-                }
-                else {
-                    //loop for wait sidebarElm
+                } else {
+                    // loop for wait sidebarElm
                     let loopCount = 0;
                     const loop = setInterval(() => {
                         loopCount++;
+                        sidebarElm = document.querySelector(sidebarQuery);
                         if (sidebarElm) {
                             clearInterval(loop);
-                        }
-                        else if (loopCount > 100) {
+                            main(sidebarElm);
+                        } else if (loopCount > 100) {
                             clearInterval(loop);
-                        }
-                        else {
-                            sidebarElm = document.querySelector(sidebarQuery);
-                            if (sidebarElm) {
-                                main(sidebarElm);
-                            }
                         }
                     }, 100);
                 }
-            }
-            else {
+            } else {
                 sendResponse({ appstop: 'yt-tj stop.' });
                 console.log('yt-tj stop.');
                 await deleteAppElement();
             }
-
         }
         if (request.action === 'initializePlaylist') {
             if (extensionWorkOrNot) {
-                sendResponse( { initialize: 'success' });
+                sendResponse({ initialize: 'success' });
                 if (sidebarElm) {
                     if (!document.querySelector(appPlayListContainerQuery)) {
                         main(sidebarElm);
-                    }
-                    else {
+                    } else {
                         await deleteAppElement();
                         main(sidebarElm);
                     }
-                }
-                else {
-                    //loop for wait sidebarElm
+                } else {
+                    // loop for wait sidebarElm
                     let loopCount = 0;
                     const loop = setInterval(() => {
                         loopCount++;
                         if (document.querySelector(appPlayListContainerQuery)) {
                             clearInterval(loop);
-                        }
-                        else if (loopCount > 100) {
+                        } else if (loopCount > 100) {
                             clearInterval(loop);
-                        }
-                        else {
+                        } else {
                             sidebarElm = document.querySelector(sidebarQuery);
                             if (sidebarElm) {
                                 main(sidebarElm);
@@ -221,14 +262,11 @@ console.log('yt-paj content.js injected');
                         }
                     }, 100);
                 }
-            }
-            else 
-            {
-                sendResponse( { initialize: 'app-not-start' });
+            } else {
+                sendResponse({ initialize: 'app-not-start' });
             }
         }
     }
-
 
     /**
      * 主程式入口
@@ -250,7 +288,7 @@ console.log('yt-paj content.js injected');
             return;
         }
 
-        chrome.storage.local.get([videoId], async (result) => {
+        chrome.storage.sync.get([videoId], async (result) => {
             const savedState = result[videoId];
             if (savedState && Array.isArray(savedState)) {
                 savedState.forEach(itemData => {
@@ -265,7 +303,11 @@ console.log('yt-paj content.js injected');
         });
 
         sidebarElm.insertBefore(playlistContainer, sidebarElm.firstChild);
-        sidebarElm.insertBefore(addToPlaylistButton, sidebarElm.firstChild);
+
+        // 將按鈕插入按鈕容器
+        buttonContainer.appendChild(addToPlaylistButton);
+        buttonContainer.appendChild(playButton);
+        sidebarElm.insertBefore(buttonContainer, sidebarElm.firstChild); // 插入按鈕容器
 
         // 使用事件委派來處理所有子項目的 mousedown 事件
         ul.addEventListener('mousedown', handleMouseDown);
@@ -275,6 +317,9 @@ console.log('yt-paj content.js injected');
 
         // 監聽添加到播放列表按鈕的點擊事件
         addToPlaylistButton.addEventListener('click', addToPlaylist);
+
+        // 監聽播放按鈕的點擊事件
+        playButton.addEventListener('click', playPlaylist);
     }
 
     /**
@@ -407,6 +452,31 @@ console.log('yt-paj content.js injected');
         newItem.appendChild(endTimeText);
 
         return newItem;
+    }
+
+    /**
+     * 自動播放播放列表中的項目
+     */
+    async function playPlaylist() {
+        for (const item of playlistState.playlistItems) {
+            const startTime = item.querySelector('.ytj-playlist-item-text-start').getAttribute('timeat');
+            const endTime = item.querySelector('.ytj-playlist-item-text-end').getAttribute('timeat');
+            const video = document.querySelector('video');
+
+            if (video) {
+                video.currentTime = parseInt(startTime);
+                video.play();
+                await new Promise((resolve) => {
+                    const checkTime = setInterval(() => {
+                        if (video.currentTime >= parseInt(endTime)) {
+                            video.pause();
+                            clearInterval(checkTime);
+                            resolve();
+                        }
+                    }, 100);
+                });
+            }
+        }
     }
 
 })();

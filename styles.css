@@ -99,6 +99,11 @@ ul {
     white-space: nowrap;
 }
 
+.ytj-button-container {
+    display: flex;
+    align-items: center;
+}
+
 .ytj-add-to-playlist {
     width: 24px;
     height: 24px;
@@ -111,4 +116,21 @@ ul {
     justify-content: center;
     border-radius: 2px;
     background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/add.png');
+    margin-right: 5px; 
+    cursor: pointer;
+}
+
+.ytj-play-playlist {
+    width: 24px;
+    height: 24px;
+    border: none;
+    background-size: cover;
+    background-repeat: no-repeat;
+    background-color: #ffffff00;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 2px;
+    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/play.png'); 
+    cursor: pointer;
 }
