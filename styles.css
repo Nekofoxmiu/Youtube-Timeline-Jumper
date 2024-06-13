@@ -2,14 +2,16 @@
 .ytj-playlist-container {
     width: 100%;
     max-height: 450px;
+    max-width: 350px;
     border: 1px solid #ccc;
     border-radius: 5px;
     overflow-y: auto;
+    overflow-x: auto;
     margin-bottom: 10px;
 }
 
 ul {
-    font-size: 10px;
+    font-size: 14px;
     font-family: Roboto, Arial, sans-serif;
     margin: 0;
     padding: 0;
@@ -53,8 +55,8 @@ ul {
 
 /* 拖放圖標 */
 .ytj-drag-handle {
-    width: 16px;
-    height: 16px;
+    width: 24px;
+    height: 24px;
     background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/handle.png');
     background-size: cover;
     background-repeat: no-repeat;
@@ -62,12 +64,18 @@ ul {
     display: flex;
     align-items: center;
     justify-content: center;
+    opacity: 0;
+    transition: opacity 0.3s ease;
     cursor: grab;
 }
 
+.ytj-playlist-item:hover .ytj-drag-handle {
+    opacity: 1;
+}
+
 .ytj-drag-handle-clicked {
-    width: 16px;
-    height: 16px;
+    width: 24px;
+    height: 24px;
     background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/handle.png');
     background-size: cover;
     background-repeat: no-repeat;
@@ -81,20 +89,20 @@ ul {
 /* 播放列表項目文字 */
 .ytj-playlist-item-text-start {
     flex-grow: 1;
-    margin-right: 10px;
-    width: 50px;
-    max-width: 50px;
-    font-size: 12px;
+    margin-right: 30px;
+    width: 60px;
+    max-width: 60px;
+    font-size: 14px;
     overflow: hidden;
     white-space: nowrap;
 }
 
 .ytj-playlist-item-text-end {
     flex-grow: 1;
-    margin-right: 10px;
-    width: 50px;
-    max-width: 50px;
-    font-size: 12px;
+    margin-right: 30px;
+    width: 60px;
+    max-width: 60px;
+    font-size: 14px;
     overflow: hidden;
     white-space: nowrap;
 }
@@ -104,23 +112,8 @@ ul {
     align-items: center;
 }
 
-.ytj-add-to-playlist {
-    width: 24px;
-    height: 24px;
-    border: 1px solid #ccc;
-    background-size: cover;
-    background-repeat: no-repeat;
-    background-color: #ffffff00;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 2px;
-    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/add.png');
-    margin-right: 5px; 
-    cursor: pointer;
-}
 
-.ytj-play-playlist {
+.ytj-set-start-time, .ytj-set-end-time, .ytj-delete-item {
     width: 24px;
     height: 24px;
     border: none;
@@ -131,6 +124,70 @@ ul {
     align-items: center;
     justify-content: center;
     border-radius: 2px;
-    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/play.png'); 
     cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+.ytj-playlist-item:hover .ytj-set-start-time,
+.ytj-playlist-item:hover .ytj-set-end-time,
+.ytj-playlist-item:hover .ytj-delete-item {
+    opacity: 1;
+}
+
+
+.ytj-set-start-time:hover, .ytj-set-end-time:hover, .ytj-delete-item:hover {
+    background-color: rgba(201, 201, 201, 0.7);
+}
+
+.ytj-set-start-time {
+    border: 1px solid #ccc;
+    margin-right: 10px;
+    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/set-start.png');
+}
+
+.ytj-set-end-time {
+    border: 1px solid #ccc;
+    margin-right: 20px;
+    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/set-end.png');
+}
+
+.ytj-delete-item {
+    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/delete.png');
+}
+
+
+
+
+.ytj-add-to-playlist, .ytj-play-playlist {
+    width: 24px;
+    height: 24px;
+    background-size: cover;
+    background-repeat: no-repeat;
+    background-color: #ffffff00;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 2px;
+    margin-right: 10px;
+    cursor: pointer;
+}
+
+.ytj-add-to-playlist:hover, .ytj-play-playlist:hover {
+    background-color: rgba(201, 201, 201, 0.7);
+}
+
+.ytj-play-playlist {
+    border: none;
+    margin-top: 10px;
+    margin-bottom: 10px;
+    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/play.png');
+}
+
+.ytj-add-to-playlist {
+    border: 1px solid #ccc;
+    margin-top: 10px;
+    margin-bottom: 10px;
+    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/add.png');
+
 }

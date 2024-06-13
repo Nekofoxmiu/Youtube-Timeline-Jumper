@@ -95,7 +95,6 @@ console.log('yt-paj content.js injected');
         const button = document.createElement('button');
         button.id = 'ytj-add-to-playlist';
         button.className = 'ytj-add-to-playlist';
-        button.innerText = '';
         return button;
     }
 
@@ -107,7 +106,6 @@ console.log('yt-paj content.js injected');
         const button = document.createElement('button');
         button.id = 'ytj-play-playlist';
         button.className = 'ytj-play-playlist';
-        button.innerText = '';
         return button;
     }
 
@@ -419,9 +417,16 @@ console.log('yt-paj content.js injected');
         const startTimeText = createTimeTextElement('start');
         const endTimeText = createTimeTextElement('end');
 
+        const setStartTimeButton = createSetStartTimeButton();
+        const setEndTimeButton = createSetEndTimeButton();
+        const deleteButton = createDeleteButton(newItem);
+
         newItem.appendChild(dragHandle);
         newItem.appendChild(startTimeText);
         newItem.appendChild(endTimeText);
+        newItem.appendChild(setStartTimeButton);
+        newItem.appendChild(setEndTimeButton);
+        newItem.appendChild(deleteButton);
 
         return newItem;
     }
@@ -447,11 +452,64 @@ console.log('yt-paj content.js injected');
         endTimeText.setAttribute('timeat', endTime.getTotalseconds());
         endTimeText.contentEditable = false;
 
+        const setStartTimeButton = createSetStartTimeButton();
+        const setEndTimeButton = createSetEndTimeButton();
+        const deleteButton = createDeleteButton(newItem);
+
         newItem.appendChild(dragHandle);
         newItem.appendChild(startTimeText);
         newItem.appendChild(endTimeText);
+        newItem.appendChild(setStartTimeButton);
+        newItem.appendChild(setEndTimeButton);
+        newItem.appendChild(deleteButton);
 
         return newItem;
+    }
+
+    function createSetStartTimeButton() {
+        const button = document.createElement('button');
+        button.classList.add('ytj-set-start-time');
+        button.addEventListener('click', (event) => {
+            const listItem = event.target.closest('.ytj-playlist-item');
+            const startTimeText = listItem.querySelector('.ytj-playlist-item-text-start');
+            const originalTime = Number(startTimeText.getAttribute('timeat'));
+            const timeObj = getCurrentVideoTime();
+            if (timeObj) {
+                startTimeText.innerText = timeObj.toformatString();
+                startTimeText.setAttribute('timeat', timeObj.getTotalseconds().toString());
+                playlistTimeManager.updateTimeText(startTimeText, originalTime);
+                playlistState.state = getandUpdatePlaylistState(playlistState);
+            }
+        });
+        return button;
+    }
+
+    function createSetEndTimeButton() {
+        const button = document.createElement('button');
+        button.classList.add('ytj-set-end-time');
+        button.addEventListener('click', (event) => {
+            const listItem = event.target.closest('.ytj-playlist-item');
+            const endTimeText = listItem.querySelector('.ytj-playlist-item-text-end');
+            const originalTime = Number(endTimeText.getAttribute('timeat'));
+            const timeObj = getCurrentVideoTime();
+            if (timeObj) {
+                endTimeText.innerText = timeObj.toformatString();
+                endTimeText.setAttribute('timeat', timeObj.getTotalseconds().toString());
+                playlistTimeManager.updateTimeText(endTimeText, originalTime);
+                playlistState.state = getandUpdatePlaylistState(playlistState);
+            }
+        });
+        return button;
+    }
+
+    function createDeleteButton(listItem) {
+        const button = document.createElement('button');
+        button.classList.add('ytj-delete-item');
+        button.addEventListener('click', () => {
+            ul.removeChild(listItem);
+            playlistState.state = getandUpdatePlaylistState(playlistState);
+        });
+        return button;
     }
 
     /**
