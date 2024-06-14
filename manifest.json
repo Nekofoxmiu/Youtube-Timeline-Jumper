@@ -29,8 +29,7 @@
       "matches": [
         "*://*.youtube.com/*",
         "*://youtube.com/*",
-        "*://youtu.be/*",
-        "<all_urls>"
+        "*://youtu.be/*"
       ],
       "js": [
         "content.js"
@@ -46,8 +45,7 @@
       "matches": [
         "*://*.youtube.com/*",
         "*://youtube.com/*",
-        "*://youtu.be/*",
-        "<all_urls>"
+        "*://youtu.be/*"
       ],
       "resources": [
         "images/ui/*",

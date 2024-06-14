@@ -1,22 +1,56 @@
+/* 全域變數定義 */
+:root {
+    --background-color-light: white;
+    --text-color-light: black;
+    --background-color-dark: #121212;
+    --text-color-dark: white;
+    --border-color-light: #ccc;
+    --border-color-dark: #333;
+    --hover-background-light: #f0f0f0;
+    --hover-background-dark: #333;
+    --img-filter-light: brightness(1) contrast(1);
+    --img-filter-dark: brightness(2.5) contrast(1.5);
+}
+
+/* 應用主題樣式 */
+body.light-theme {
+    --background-color: var(--background-color-light);
+    --text-color: var(--text-color-light);
+    --border-color: var(--border-color-light);
+    --hover-background: var(--hover-background-light);
+    --img-filter: var(--img-filter-light);
+}
+
+body.dark-theme {
+    --background-color: var(--background-color-dark);
+    --text-color: var(--text-color-dark);
+    --border-color: var(--border-color-dark);
+    --hover-background: var(--hover-background-dark);
+    --img-filter: var(--img-filter-dark);
+}
+
 /* 播放列表容器 */
-.playlist-container {
+.ytj-playlist-container {
     width: 100%;
     max-height: 450px;
-    border: 1px solid #ccc;
+    max-width: 500px;
+    border: 1px solid var(--border-color);
     border-radius: 5px;
     overflow-y: auto;
+    overflow-x: auto;
     margin-bottom: 10px;
+    background-color: var(--background-color);
+    color: var(--text-color);
 }
 
 ul {
-    font-size: 10px;
+    font-size: 12px;
     font-family: Roboto, Arial, sans-serif;
     margin: 0;
     padding: 0;
     border: 0;
     background: transparent;
 }
-
 
 /* 播放列表項目 */
 .ytj-playlist-item {
@@ -25,8 +59,9 @@ ul {
     display: flex;
     align-items: center;
     padding: 10px;
-    border-bottom: 1px solid #ccc;
+    border-bottom: 1px solid var(--border-color);
     transition: background-color 0.2s ease-in-out;
+    position: relative; /* 確保父容器設置相對定位 */
 }
 
 .ytj-playlist-item:last-child {
@@ -34,7 +69,7 @@ ul {
 }
 
 .ytj-playlist-item:hover {
-    background-color: #f0f0f0;
+    background-color: var(--hover-background);
 }
 
 .ytj-display-dragging {
@@ -53,62 +88,270 @@ ul {
 
 /* 拖放圖標 */
 .ytj-drag-handle {
+    flex: 0 0 16px;  /* 固定寬度 */
     width: 16px;
     height: 16px;
     background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/handle.png');
     background-size: cover;
     background-repeat: no-repeat;
-    margin-right: 10px;
+    margin-right: 5px;
     display: flex;
     align-items: center;
     justify-content: center;
+    opacity: 0;
+    transition: opacity 0.3s ease;
     cursor: grab;
+    filter: var(--img-filter);
+}
+
+.ytj-playlist-item:hover .ytj-drag-handle {
+    opacity: 1;
 }
 
 .ytj-drag-handle-clicked {
+    flex: 0 0 16px;
     width: 16px;
     height: 16px;
     background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/handle.png');
     background-size: cover;
     background-repeat: no-repeat;
-    margin-right: 10px;
+    margin-right: 5px;
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: grabbing;
+    filter: var(--img-filter);
 }
 
 /* 播放列表項目文字 */
-.ytj-playlist-item-text-start {
-    flex-grow: 1;
-    margin-right: 10px;
-    width: 50px;
-    max-width: 50px;
+.ytj-playlist-item-title {
+    font-family: Roboto, Arial, sans-serif;
+    margin-right: 5px;
+    width: 200px;
+    max-width: 200px;
+    border: none;
+    background-color: transparent;
+    font-size: 12px;
+    overflow: scroll;
+    white-space: nowrap;
+    position: relative;
+    z-index: 1;
+    color: var(--text-color);
+}
+
+.ytj-playlist-item-text-start, .ytj-playlist-item-text-end {
+    flex: 0 0 60px;  /* 固定寬度 */
+    font-family: Roboto, Arial, sans-serif;
+    margin-right: 5px;
     font-size: 12px;
     overflow: hidden;
     white-space: nowrap;
+    color: var(--text-color);
 }
 
-.ytj-playlist-item-text-end {
-    flex-grow: 1;
-    margin-right: 10px;
-    width: 50px;
-    max-width: 50px;
-    font-size: 12px;
-    overflow: hidden;
-    white-space: nowrap;
+.ytj-button-container {
+    display: flex;
+    align-items: center;
 }
 
-.add-to-playlist {
-    width: 24px;
-    height: 24px;
-    border: 1px solid #ccc;
+.ytj-importexport-container {
+    margin-top: 2px;
+    display: flex;
+    align-items: center;
+}
+
+.ytj-set-start-time, .ytj-set-end-time, .ytj-delete-item, .ytj-start-from-here {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    border: none;
     background-size: cover;
     background-repeat: no-repeat;
-    background-color: #ffffff00;
+    background-color: transparent;
     display: flex;
     align-items: center;
     justify-content: center;
     border-radius: 2px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    filter: var(--img-filter);
+}
+
+.ytj-playlist-item:hover .ytj-set-start-time,
+.ytj-playlist-item:hover .ytj-set-end-time,
+.ytj-playlist-item:hover .ytj-delete-item,
+.ytj-playlist-item:hover .ytj-start-from-here{
+    opacity: 1;
+}
+
+.ytj-set-start-time:hover, .ytj-set-end-time:hover, .ytj-delete-item:hover {
+    background-color: rgba(201, 201, 201, 0.7);
+}
+
+.ytj-set-start-time {
+    position: absolute; 
+    right: 20px; 
+    bottom: 0; 
+    border: 1px solid var(--border-color);
+    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/set-start.png');
+}
+
+.ytj-set-end-time {
+    position: absolute; /* 設置絕對定位 */
+    right: 0px; 
+    bottom: 0; 
+    border: 1px solid var(--border-color);
+    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/set-end.png');
+}
+
+.ytj-delete-item {
+    position: absolute; /* 設置絕對定位 */
+    right: 0px;
+    top: 0; 
+    border: none;
+    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/delete.png');
+    filter: var(--img-filter);
+}
+
+.ytj-start-from-here {
+    border: none;
+    margin-right: 5px;
+    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/play.png');
+}
+
+.ytj-add-to-playlist, .ytj-play-playlist {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    background-size: cover;
+    background-repeat: no-repeat;
+    background-color: transparent;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 2px;
+    margin-right: 5px;
+    cursor: pointer;
+    filter: var(--img-filter);
+}
+
+.ytj-add-to-playlist:hover, .ytj-play-playlist:hover {
+    background-color: rgba(201, 201, 201, 0.7);
+}
+
+.ytj-play-playlist {
+    border: none;
+    margin-top: 10px;
+    margin-bottom: 10px;
+    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/play.png');
+}
+
+.ytj-add-to-playlist {
+    border: 1px solid var(--border-color);
+    margin-top: 10px;
+    margin-bottom: 10px;
     background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/add.png');
+}
+
+.ytj-playing-item {
+    background-color: rgba(255, 60, 60, 0.1); /* 將背景變為紅色 */
+}
+
+.ytj-playing-item:hover {
+    background-color: rgba(255, 60, 60, 0.2); /* 將背景變為紅色 */
+}
+
+.ytj-drag-handle.playing {
+    /* 新增播放樣式 */
+    opacity: 1;
+    background: url('chrome-extension://__MSG_@@extension_id__/images/ui/play.png');
+    background-size: contain;
+}
+
+#ytj-play-playlist.playing {
+    /* 新增暫停按鈕樣式 */
+    background: url('chrome-extension://__MSG_@@extension_id__/images/ui/stop.png');
+    background-size: contain;
+}
+
+.ytj-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 9999;
+}
+
+.ytj-popup {
+    font-family: Roboto, Arial, sans-serif;
+    background-color: var(--background-color);
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+    width: 80%;
+    max-width: 600px;
+    color: var(--text-color);
+}
+
+.ytj-popup h2 {
+    font-family: Roboto, Arial, sans-serif;
+    margin-top: 0;
+}
+
+.ytj-popup-textarea {
+    width: 100%;
+    height: 200px;
+    margin-bottom: 10px;
+    background-color: var(--background-color);
+    color: var(--text-color);
+}
+
+.ytj-popup-button-container {
+    font-family: Roboto, Arial, sans-serif;
+    text-align: right;
+}
+
+.ytj-popup-button-container button {
+    font-family: Roboto, Arial, sans-serif;
+    margin-right: 10px;
+    font-size: 12px;
+    background: none;
+    border: 1px solid var(--border-color);
+    justify-content: center;
+    border-radius: 2px;
+    padding: 5px;
+    cursor: pointer;
+    color: var(--text-color);
+}
+
+/* 新增的深色主題和亮色主題的CSS樣式 */
+body.dark-theme .ytj-popup {
+    font-family: Roboto, Arial, sans-serif;
+    background-color: var(--background-color-dark);
+    color: var(--text-color-dark);
+}
+
+body.light-theme .ytj-popup {
+    font-family: Roboto, Arial, sans-serif;
+    background-color: var(--background-color-light);
+    color: var(--text-color-light);
+}
+
+.ytj-import-playlist-text, .ytj-export-playlist{
+    font-family: Roboto, Arial, sans-serif;
+    margin-right: 5px;
+    font-size: 12px;
+    background: none;
+    border: 1px solid var(--border-color);
+    justify-content: center;
+    border-radius: 2px;
+    padding: 5px;
+    cursor: pointer;
+    color: var(--text-color);
 }
