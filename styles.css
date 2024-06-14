@@ -2,7 +2,7 @@
 .ytj-playlist-container {
     width: 100%;
     max-height: 450px;
-    max-width: 350px;
+    max-width: 500px;
     border: 1px solid #ccc;
     border-radius: 5px;
     overflow-y: auto;
@@ -11,7 +11,7 @@
 }
 
 ul {
-    font-size: 14px;
+    font-size: 12px;
     font-family: Roboto, Arial, sans-serif;
     margin: 0;
     padding: 0;
@@ -87,22 +87,34 @@ ul {
 }
 
 /* 播放列表項目文字 */
+.ytj-playlist-item-title {
+    flex-grow: 1;
+    margin-right: 10px;
+    width: 80px;
+    max-width: 80px;
+    border: none;
+    background-color: #ffffff00;
+    font-size: 12px;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
 .ytj-playlist-item-text-start {
     flex-grow: 1;
-    margin-right: 30px;
+    margin-right: 10px;
     width: 60px;
     max-width: 60px;
-    font-size: 14px;
+    font-size: 12px;
     overflow: hidden;
     white-space: nowrap;
 }
 
 .ytj-playlist-item-text-end {
     flex-grow: 1;
-    margin-right: 30px;
+    margin-right: 10px;
     width: 60px;
     max-width: 60px;
-    font-size: 14px;
+    font-size: 12px;
     overflow: hidden;
     white-space: nowrap;
 }
@@ -113,7 +125,7 @@ ul {
 }
 
 
-.ytj-set-start-time, .ytj-set-end-time, .ytj-delete-item {
+.ytj-set-start-time, .ytj-set-end-time, .ytj-delete-item, .ytj-start-from-here {
     width: 24px;
     height: 24px;
     border: none;
@@ -131,7 +143,8 @@ ul {
 
 .ytj-playlist-item:hover .ytj-set-start-time,
 .ytj-playlist-item:hover .ytj-set-end-time,
-.ytj-playlist-item:hover .ytj-delete-item {
+.ytj-playlist-item:hover .ytj-delete-item,
+.ytj-playlist-item:hover .ytj-start-from-here{
     opacity: 1;
 }
 
@@ -153,9 +166,15 @@ ul {
 }
 
 .ytj-delete-item {
+    border: none;
     background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/delete.png');
 }
 
+
+.ytj-start-from-here {
+    border: none;
+    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/play.png');
+}
 
 
 
@@ -190,4 +209,25 @@ ul {
     margin-bottom: 10px;
     background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/add.png');
 
+}
+
+.ytj-playing-item {
+    background-color: rgba(255, 60, 60, 0.1); /* 將背景變為紅色 */
+}
+
+.ytj-playing-item:hover {
+    background-color: rgba(255, 60, 60, 0.2); /* 將背景變為紅色 */
+}
+
+.ytj-drag-handle.playing {
+    /* 新增播放樣式 */
+    opacity: 1;
+    background: url('chrome-extension://__MSG_@@extension_id__/images/ui/play.png');
+    background-size: contain;
+}
+
+#ytj-play-playlist.playing {
+    /* 新增暫停按鈕樣式 */
+    background: url('chrome-extension://__MSG_@@extension_id__/images/ui/add.png');
+    background-size: contain;
 }

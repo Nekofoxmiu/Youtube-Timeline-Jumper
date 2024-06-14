@@ -12,7 +12,7 @@ console.log('yt-paj content.js injected');
         playlistToolModule = await import('./lib/playlistTool.js');
         mouseEventHandlerModule = await import('./lib/mouseEventHandler.js');
     } catch (error) {
-        console.error('Module loading failed:', error);
+        console.log('Module loading failed:', error);
     }
 
     // 從模組中提取所需的類和方法
@@ -119,6 +119,43 @@ console.log('yt-paj content.js injected');
         return ul;
     }
 
+
+    const styleModificationPromises = [];
+    /**
+     * 創建 "從這裡開始播放" 按鈕的函數
+     * @param {HTMLElement} listItem - 播放列表項目元素
+     * @returns {HTMLElement} 按鈕元素
+     */
+    async function createStartFromHereButton(listItem) {
+        const button = document.createElement('button');
+        button.classList.add('ytj-start-from-here');
+        button.addEventListener('click', async () => {
+            const video = document.querySelector('video');
+            if (!video) return;
+            const index = Array.from(playlistState.playlistItems).indexOf(listItem);
+
+            if (playButton.classList.contains('playing')) {
+                // 如果 playButton 是 playing 狀態，則恢復按鈕樣式再播放
+                const styleModificationPromise = new Promise(resolve => {
+                    document.querySelectorAll('.ytj-playing-item').forEach(item => item.classList.remove('ytj-playing-item'));
+                    document.querySelectorAll('.ytj-drag-handle.playing').forEach(handle => handle.classList.remove('playing'));
+                    resolve();
+                });
+                styleModificationPromises.push(styleModificationPromise);
+                await styleModificationPromise;
+            }
+
+            // 確保所有樣式修改操作都完成後再繼續
+            await Promise.all(styleModificationPromises);
+            styleModificationPromises.length = 0; // 清空已完成的 promise 列表
+
+            await playPlaylist(index);
+        });
+        return button;
+    }
+
+
+
     /**
      * 獲取當前視頻播放時間，並轉換為小時、分鐘和秒。
      * @returns {?TimeSlot} 包含時間信息的物件，或者如果沒有視頻元素則返回 null。
@@ -161,21 +198,21 @@ console.log('yt-paj content.js injected');
 
     async function deleteAppElement() {
         playlistState.clearAll();
-    
+
         const oldPlaylistContainer = document.querySelector(appPlayListContainerQuery);
         const oldAddToPlaylistButton = document.querySelector('.ytj-add-to-playlist');
         const oldPlayButton = document.querySelector('.ytj-play-playlist');
         const oldUl = document.querySelector('.ytj-playlist-items');
-    
+
         if (oldPlaylistContainer) oldPlaylistContainer.remove();
         if (oldAddToPlaylistButton) oldAddToPlaylistButton.remove();
         if (oldPlayButton) oldPlayButton.remove();
         if (oldUl) oldUl.remove();
-    
+
         // 清空容器內容
         playlistContainer.innerHTML = '';
         ul.innerHTML = '';
-    
+
         // 重新創建容器和按鈕
         playlistContainer = createPlaylistContainer();
         buttonContainer = createButtonContainer();
@@ -282,17 +319,17 @@ console.log('yt-paj content.js injected');
         // 將播放列表容器和按鈕插入側邊欄
         const videoId = getCurrentVideoId();
         if (!videoId) {
-            console.error('No video ID found for initialization.');
+            console.log('No video ID found for initialization.');
             return;
         }
 
         chrome.storage.sync.get([videoId], async (result) => {
             const savedState = result[videoId];
             if (savedState && Array.isArray(savedState)) {
-                savedState.forEach(itemData => {
+                savedState.forEach(async itemData => {
                     const startTime = TimeSlot.fromObject(itemData.start);
                     const endTime = TimeSlot.fromObject(itemData.end);
-                    const newItem = createPlaylistItemFromData(startTime, endTime);
+                    const newItem = await createPlaylistItemFromData(startTime, endTime, itemData.title);
                     playlistState.playlistItems.push(newItem);
                     ul.appendChild(newItem);
                 });
@@ -314,10 +351,30 @@ console.log('yt-paj content.js injected');
         playlistContainer.addEventListener('click', handleClick);
 
         // 監聽添加到播放列表按鈕的點擊事件
-        addToPlaylistButton.addEventListener('click', addToPlaylist);
+        addToPlaylistButton.addEventListener('click', await addToPlaylist);
 
         // 監聽播放按鈕的點擊事件
-        playButton.addEventListener('click', playPlaylist);
+        playButton.addEventListener('click', async () => {
+            const video = document.querySelector('video');
+            if (!video) return;
+
+            //如果playButton不是playing狀態，則正常開始播放
+            if (!playButton.classList.contains('playing')) {
+                await playPlaylist();
+            }
+            else {
+                // 如果 playButton 是 playing 狀態，則暫停播放
+                video.pause();
+                // 恢復按鈕樣式
+                playButton.classList.remove('playing');
+                // 清除所有播放項目的樣式
+                document.querySelectorAll('.ytj-playing-item').forEach(item => item.classList.remove('ytj-playing-item'));
+                document.querySelectorAll('.ytj-drag-handle.playing').forEach(handle => handle.classList.remove('playing'));
+            }
+
+
+        });
+
     }
 
     /**
@@ -392,8 +449,8 @@ console.log('yt-paj content.js injected');
     /**
      * 添加一個新的項目到播放列表並更新顯示
      */
-    function addToPlaylist() {
-        const newItem = createPlaylistItem();
+    async function addToPlaylist() {
+        const newItem = await createPlaylistItem();
         playlistState.playlistItems.push(newItem);
         ul.appendChild(newItem);
         playlistContainer.appendChild(ul);
@@ -404,7 +461,7 @@ console.log('yt-paj content.js injected');
      * 創建一個新的播放列表項目元素，包含拖拽處理和時間顯示
      * @returns {HTMLElement} 一個代表播放列表項目的新元素
      */
-    function createPlaylistItem() {
+    async function createPlaylistItem() {
         const newItem = document.createElement('li');
         newItem.classList.add('ytj-playlist-item');
 
@@ -413,17 +470,19 @@ console.log('yt-paj content.js injected');
         dragHandle.draggable = true;
         dragHandle.addEventListener('dragstart', mouseEventHandler.handleDragStart);
 
-        // 添加時間標籤，用於顯示和編輯開始和結束時間
         const startTimeText = createTimeTextElement('start');
         const endTimeText = createTimeTextElement('end');
-
         const setStartTimeButton = createSetStartTimeButton();
         const setEndTimeButton = createSetEndTimeButton();
         const deleteButton = createDeleteButton(newItem);
+        const titleInput = createTitleInput();
+        const startFromHereButton = await createStartFromHereButton(newItem); // 新增的按鈕
 
         newItem.appendChild(dragHandle);
+        newItem.appendChild(startFromHereButton);
         newItem.appendChild(startTimeText);
         newItem.appendChild(endTimeText);
+        newItem.appendChild(titleInput);
         newItem.appendChild(setStartTimeButton);
         newItem.appendChild(setEndTimeButton);
         newItem.appendChild(deleteButton);
@@ -431,7 +490,7 @@ console.log('yt-paj content.js injected');
         return newItem;
     }
 
-    function createPlaylistItemFromData(startTime, endTime) {
+    async function createPlaylistItemFromData(startTime, endTime, title) {
         const newItem = document.createElement('li');
         newItem.classList.add('ytj-playlist-item');
 
@@ -455,13 +514,19 @@ console.log('yt-paj content.js injected');
         const setStartTimeButton = createSetStartTimeButton();
         const setEndTimeButton = createSetEndTimeButton();
         const deleteButton = createDeleteButton(newItem);
+        const titleInput = createTitleInput();
+        titleInput.value = title || '';
+        const startFromHereButton = await createStartFromHereButton(newItem);
 
         newItem.appendChild(dragHandle);
+        newItem.appendChild(startFromHereButton);
         newItem.appendChild(startTimeText);
         newItem.appendChild(endTimeText);
+        newItem.appendChild(titleInput);
         newItem.appendChild(setStartTimeButton);
         newItem.appendChild(setEndTimeButton);
         newItem.appendChild(deleteButton);
+
 
         return newItem;
     }
@@ -512,29 +577,88 @@ console.log('yt-paj content.js injected');
         return button;
     }
 
-    /**
-     * 自動播放播放列表中的項目
-     */
-    async function playPlaylist() {
-        for (const item of playlistState.playlistItems) {
+    function createTitleInput() {
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.classList.add('ytj-playlist-item-title');
+        input.placeholder = '';
+        input.addEventListener('blur', () => {
+            playlistState.state = getandUpdatePlaylistState(playlistState);
+        });
+        return input;
+    }
+
+    let isPlaying = false;
+    let currentPlayId = 0;
+
+    function updateStyles(item, add) {
+        return new Promise((resolve) => {
+            requestAnimationFrame(() => {
+                if (add) {
+                    item.classList.add('ytj-playing-item');
+                    item.querySelector('.ytj-drag-handle').classList.add('playing');
+                } else {
+                    item.classList.remove('ytj-playing-item');
+                    item.querySelector('.ytj-drag-handle').classList.remove('playing');
+                }
+                resolve();
+            });
+        });
+    }
+
+    async function playPlaylist(startIndex = 0) {
+        currentPlayId++;
+        const thisPlayId = currentPlayId;
+        if (isPlaying) {
+            isPlaying = false;
+            await new Promise(resolve => setTimeout(resolve, 100)); // 給予當前播放一些時間去停止
+        }
+        isPlaying = true;
+
+        const video = document.querySelector('video');
+        if (!video) return;
+
+        const playButton = document.querySelector('#ytj-play-playlist');
+        if (!playButton) return;
+        if (!playButton.classList.contains('playing')) {
+            playButton.classList.add('playing'); // 播放按鈕變為暫停按鈕
+        }
+
+        for (let i = startIndex; i < playlistState.playlistItems.length; i++) {
+            if (thisPlayId !== currentPlayId) break;
+
+            const item = playlistState.playlistItems[i];
             const startTime = item.querySelector('.ytj-playlist-item-text-start').getAttribute('timeat');
             const endTime = item.querySelector('.ytj-playlist-item-text-end').getAttribute('timeat');
-            const video = document.querySelector('video');
 
-            if (video) {
-                video.currentTime = parseInt(startTime);
-                video.play();
-                await new Promise((resolve) => {
-                    const checkTime = setInterval(() => {
-                        if (video.currentTime >= parseInt(endTime)) {
-                            video.pause();
-                            clearInterval(checkTime);
-                            resolve();
-                        }
-                    }, 100);
-                });
-            }
+            video.currentTime = parseInt(startTime);
+            video.play();
+
+            await updateStyles(item, true);
+
+            await new Promise((resolve) => {
+                const checkTime = setInterval(() => {
+                    if (thisPlayId !== currentPlayId) {
+                        clearInterval(checkTime);
+                        resolve();
+                    }
+                    if (video.currentTime >= parseInt(endTime)) {
+                        clearInterval(checkTime);
+                        resolve();
+                    }
+                }, 100);
+            });
+
+            await updateStyles(item, false);
         }
+
+        if (thisPlayId === currentPlayId) {
+            playButton.classList.remove('playing'); // 播放按鈕恢復為播放按鈕
+        }
+        isPlaying = false;
+        video.pause();
     }
+
+
 
 })();
