@@ -23,7 +23,10 @@ console.log('yt-paj content.js injected');
     // 建立播放列表容器
     let playlistContainer = createPlaylistContainer();
     let buttonContainer = createButtonContainer(); // 新增按鈕容器
+    let importexportContainer = createImportExportContainer(); // 新增導入導出容器
     let addToPlaylistButton = createAddToPlaylistButton();
+    let importPlaylistButton = createImportPlaylistButton();
+    let exportPlaylistButton = createExportPlaylistButton();
     let playButton = createPlayButton(); // 新增播放按鈕
     let ul = createPlaylistItemsContainer();
 
@@ -66,6 +69,39 @@ console.log('yt-paj content.js injected');
     });
 
     /**
+     * 判斷 YouTube 是否為黑暗主題
+     * @returns {boolean} true 表示為黑暗主題，false 表示為明亮主題
+     */
+    function isYouTubeDarkTheme() {
+        var element = document.querySelector('ytd-app');
+        var styles = getComputedStyle(element);
+        var value = styles.getPropertyValue('--yt-spec-base-background').trim();
+        return value === '#0f0f0f';
+    }
+
+    /**
+     * 應用相應的 CSS 主題
+     */
+    function applyTheme() {
+        if (isYouTubeDarkTheme()) {
+            document.body.classList.add('dark-theme');
+            document.body.classList.remove('light-theme');
+        } else {
+            document.body.classList.add('light-theme');
+            document.body.classList.remove('dark-theme');
+        }
+    }
+
+    // 初始化時應用主題
+    applyTheme();
+
+    // 監聽主題變更
+    const observer = new MutationObserver(() => {
+        applyTheme();
+    });
+    observer.observe(document.querySelector('ytd-app'), { attributes: true, attributeFilter: ['style'] });
+
+    /**
      * 建立播放列表容器的函數
      * @returns {HTMLElement} 播放列表容器
      */
@@ -85,6 +121,43 @@ console.log('yt-paj content.js injected');
         container.id = 'ytj-button-container';
         container.className = 'ytj-button-container';
         return container;
+    }
+
+    /**
+     * 建立導入導出容器的函數
+     * @returns {HTMLElement} 導入導出容器
+     */
+    function createImportExportContainer() {
+        const container = document.createElement('div');
+        container.id = 'ytj-importexport-container';
+        container.className = 'ytj-importexport-container';
+        return container;
+    }
+
+    /**
+     * 建立從文本解析並添加到播放列表按鈕的函數
+     * @returns {HTMLElement} 按鈕元素
+     */
+    function createImportPlaylistButton() {
+        const button = document.createElement('button');
+        button.id = 'ytj-import-playlist-text';
+        button.className = 'ytj-import-playlist-text';
+        button.innerText = 'Import Playlist';
+        button.addEventListener('click', importPlaylistFromText);
+        return button;
+    }
+
+    /**
+     * 建立匯出播放列表按鈕的函數
+     * @returns {HTMLElement} 按鈕元素
+     */
+    function createExportPlaylistButton() {
+        const button = document.createElement('button');
+        button.id = 'ytj-export-playlist';
+        button.className = 'ytj-export-playlist';
+        button.innerText = 'Export Playlist';
+        button.addEventListener('click', exportPlaylist);
+        return button;
     }
 
     /**
@@ -119,7 +192,6 @@ console.log('yt-paj content.js injected');
         return ul;
     }
 
-
     const styleModificationPromises = [];
     /**
      * 創建 "從這裡開始播放" 按鈕的函數
@@ -153,8 +225,6 @@ console.log('yt-paj content.js injected');
         });
         return button;
     }
-
-
 
     /**
      * 獲取當前視頻播放時間，並轉換為小時、分鐘和秒。
@@ -200,13 +270,21 @@ console.log('yt-paj content.js injected');
         playlistState.clearAll();
 
         const oldPlaylistContainer = document.querySelector(appPlayListContainerQuery);
+        const oldbuttonContainer = document.querySelector('#ytj-button-container');
+        const oldimportexportContainer = document.querySelector('#ytj-importexport-container');
         const oldAddToPlaylistButton = document.querySelector('.ytj-add-to-playlist');
         const oldPlayButton = document.querySelector('.ytj-play-playlist');
+        const oldImportPlaylistButton = document.querySelector('.ytj-import-playlist-text');
+        const oldExportPlaylistButton = document.querySelector('.ytj-export-playlist');
         const oldUl = document.querySelector('.ytj-playlist-items');
 
         if (oldPlaylistContainer) oldPlaylistContainer.remove();
+        if (oldbuttonContainer) oldbuttonContainer.remove();
+        if (oldimportexportContainer) oldimportexportContainer.remove();
         if (oldAddToPlaylistButton) oldAddToPlaylistButton.remove();
         if (oldPlayButton) oldPlayButton.remove();
+        if (oldImportPlaylistButton) oldImportPlaylistButton.remove();
+        if (oldExportPlaylistButton) oldExportPlaylistButton.remove();
         if (oldUl) oldUl.remove();
 
         // 清空容器內容
@@ -215,9 +293,12 @@ console.log('yt-paj content.js injected');
 
         // 重新創建容器和按鈕
         playlistContainer = createPlaylistContainer();
-        buttonContainer = createButtonContainer();
+        buttonContainer = createButtonContainer(); // 新增按鈕容器
+        importexportContainer = createImportExportContainer(); // 新增導入導出容器
         addToPlaylistButton = createAddToPlaylistButton();
-        playButton = createPlayButton(); // 重新創建播放按鈕
+        playButton = createPlayButton(); // 新增播放按鈕
+        importPlaylistButton = createImportPlaylistButton();
+        exportPlaylistButton = createExportPlaylistButton();
         ul = createPlaylistItemsContainer();
 
         // 重新創建事件處理程序
@@ -337,9 +418,12 @@ console.log('yt-paj content.js injected');
             }
         });
 
+        importexportContainer.appendChild(importPlaylistButton);
+        importexportContainer.appendChild(exportPlaylistButton);
+        sidebarElm.insertBefore(importexportContainer, sidebarElm.firstChild);
+
         sidebarElm.insertBefore(playlistContainer, sidebarElm.firstChild);
 
-        // 將按鈕插入按鈕容器
         buttonContainer.appendChild(addToPlaylistButton);
         buttonContainer.appendChild(playButton);
         sidebarElm.insertBefore(buttonContainer, sidebarElm.firstChild); // 插入按鈕容器
@@ -353,28 +437,25 @@ console.log('yt-paj content.js injected');
         // 監聽添加到播放列表按鈕的點擊事件
         addToPlaylistButton.addEventListener('click', await addToPlaylist);
 
-        // 監聽播放按鈕的點擊事件
+        // 在播放按鈕的點擊事件中調用 clearPlayingStyles
         playButton.addEventListener('click', async () => {
             const video = document.querySelector('video');
             if (!video) return;
 
-            //如果playButton不是playing狀態，則正常開始播放
             if (!playButton.classList.contains('playing')) {
                 await playPlaylist();
-            }
-            else {
-                // 如果 playButton 是 playing 狀態，則暫停播放
+            } else {
+                // 暫停播放
                 video.pause();
-                // 恢復按鈕樣式
                 playButton.classList.remove('playing');
-                // 清除所有播放項目的樣式
-                document.querySelectorAll('.ytj-playing-item').forEach(item => item.classList.remove('ytj-playing-item'));
-                document.querySelectorAll('.ytj-drag-handle.playing').forEach(handle => handle.classList.remove('playing'));
+                isPlaying = false;
+                currentPlayId++; // 增加currentPlayId以取消現有的播放會話
             }
-
-
         });
 
+        // 監聽文本區域按鈕的點擊事件
+        document.querySelector('#ytj-import-playlist-text').addEventListener('click', importPlaylistFromText);
+        document.querySelector('#ytj-export-playlist').addEventListener('click', exportPlaylist);
     }
 
     /**
@@ -417,7 +498,6 @@ console.log('yt-paj content.js injected');
         // 設置鍵盤事件，以支持保存和取消
         timeTextElement.addEventListener('keydown', (event) => handleKeydown(event, timeTextElement, originalText));
     }
-
     /**
      * 處理失去焦點事件
      * @param {HTMLElement} timeTextElement - 時間文本元素
@@ -491,6 +571,10 @@ console.log('yt-paj content.js injected');
     }
 
     async function createPlaylistItemFromData(startTime, endTime, title) {
+        const timeObj = playlistTimeManager.checkStartAndEnd(startTime, endTime);
+        startTime = timeObj.start;
+        endTime = timeObj.end;
+
         const newItem = document.createElement('li');
         newItem.classList.add('ytj-playlist-item');
 
@@ -526,7 +610,6 @@ console.log('yt-paj content.js injected');
         newItem.appendChild(setStartTimeButton);
         newItem.appendChild(setEndTimeButton);
         newItem.appendChild(deleteButton);
-
 
         return newItem;
     }
@@ -571,7 +654,7 @@ console.log('yt-paj content.js injected');
         const button = document.createElement('button');
         button.classList.add('ytj-delete-item');
         button.addEventListener('click', () => {
-            ul.removeChild(listItem);
+            playlistTimeManager.deletePlaylistItem(listItem)
             playlistState.state = getandUpdatePlaylistState(playlistState);
         });
         return button;
@@ -618,8 +701,6 @@ console.log('yt-paj content.js injected');
         const video = document.querySelector('video');
         if (!video) return;
 
-        const playButton = document.querySelector('#ytj-play-playlist');
-        if (!playButton) return;
         if (!playButton.classList.contains('playing')) {
             playButton.classList.add('playing'); // 播放按鈕變為暫停按鈕
         }
@@ -659,6 +740,89 @@ console.log('yt-paj content.js injected');
         video.pause();
     }
 
+    /**
+     * 建立彈出文本框的函數
+     * @param {string} title - 彈出框的標題
+     * @param {function} onSave - 當保存按鈕被點擊時的回調函數
+     * @returns {HTMLElement} 彈出文本框元素
+     */
+    function createPopupTextBox(title, onSave) {
+        const overlay = document.createElement('div');
+        overlay.className = 'ytj-overlay';
 
+        const popup = document.createElement('div');
+        popup.className = 'ytj-popup';
 
+        const popupTitle = document.createElement('h2');
+        popupTitle.innerText = title;
+
+        const textArea = document.createElement('textarea');
+        textArea.className = 'ytj-popup-textarea';
+
+        const buttonContainer = document.createElement('div');
+        buttonContainer.className = 'ytj-popup-button-container';
+
+        const saveButton = document.createElement('button');
+        saveButton.innerText = 'Save';
+        saveButton.addEventListener('click', () => {
+            onSave(textArea.value);
+            document.body.removeChild(overlay);
+        });
+
+        const cancelButton = document.createElement('button');
+        cancelButton.innerText = 'Cancel';
+        cancelButton.addEventListener('click', () => {
+            document.body.removeChild(overlay);
+        });
+
+        buttonContainer.appendChild(saveButton);
+        buttonContainer.appendChild(cancelButton);
+        popup.appendChild(popupTitle);
+        popup.appendChild(textArea);
+        popup.appendChild(buttonContainer);
+        overlay.appendChild(popup);
+        document.body.appendChild(overlay);
+
+        return overlay;
+    }
+
+    /**
+    * 將文本解析並添加到播放列表的函數
+    */
+    async function importPlaylistFromText() {
+        createPopupTextBox('Import Playlist', async (text) => {
+            if (!text) return;
+
+            const lines = text.split('\n');
+            const regex = /(\d{1,2}:\d{2}(?::\d{2})?)\s*(\d{1,2}:\d{2}(?::\d{2})?)?\s*(.*)/;
+
+            for (const line of lines) {
+                const match = line.match(regex);
+                if (match) {
+                    const [, startTime, endTime, title] = match;
+                    const start = TimeSlot.fromString(startTime);
+                    const end = endTime ? TimeSlot.fromString(endTime) : start;
+                    const newItem = await createPlaylistItemFromData(start, end, title);
+                    playlistState.playlistItems.push(newItem);
+                    ul.appendChild(newItem);
+                }
+            }
+            playlistContainer.appendChild(ul);
+            playlistState.state = getandUpdatePlaylistState(playlistState);
+        });
+    }
+
+    /**
+     * 將播放列表匯出為文本的函數
+     */
+    function exportPlaylist() {
+        const items = playlistState.playlistItems.map(item => {
+            const start = item.querySelector('.ytj-playlist-item-text-start').innerText;
+            const end = item.querySelector('.ytj-playlist-item-text-end').innerText;
+            const title = item.querySelector('.ytj-playlist-item-title').value;
+            return `${start} ${end !== start ? end : ''} ${title}`.trim();
+        });
+        const text = items.join('\n');
+        createPopupTextBox('Export Playlist', () => { }).querySelector('textarea').value = text;
+    }
 })();
