@@ -239,8 +239,6 @@ console.log('yt-paj content.js injected');
         if (appPlayListContainer) {
             if (appPlayListContainer.getAttribute('youtubeID') !== getCurrentVideoId()) {
                 await deleteAppElement();
-            } else {
-                return;
             }
         }
 
