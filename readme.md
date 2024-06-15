@@ -1,4 +1,4 @@
-#YouTube Playlist Manager Chrome Extension
+# YouTube Playlist Manager Chrome Extension
 
 ## Introduction
 This project is a Chrome extension designed to enhance the YouTube experience by providing playlist management capabilities. The extension allows users to create, edit, import, and export playlists directly within the YouTube interface.
