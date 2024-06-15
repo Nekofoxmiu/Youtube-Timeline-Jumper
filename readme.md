@@ -1,4 +1,10 @@
 # YouTube Playlist Manager Chrome Extension
+  \
+![Snipaste_2024-06-14_17-42-59](https://github.com/Nekofoxmiu/Youtube-Timeline-Jumper/assets/76677660/2d262c7f-28de-4998-8fd1-18a0a3873d50)  
+  \
+From: 【歌回】響到什麼唱什麼｜響Hibiki  
+Owner: [@HibikiVtuber](https://www.youtube.com/@HibikiVtuber)  
+Playlist from: [@MATAT_EX](https://www.youtube.com/@MATAT_EX) in comments  
 
 ## Introduction
 This project is a Chrome extension designed to enhance the YouTube experience by providing playlist management capabilities. The extension allows users to create, edit, import, and export playlists directly within the YouTube interface.
