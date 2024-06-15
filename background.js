@@ -54,7 +54,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   try {
-    if (changeInfo.url && changeInfo.url.includes('youtube.com/watch')) {
+    if (changeInfo.status === 'complete' && tab.url.includes('youtube.com/watch')) {
       const response = await chrome.tabs.sendMessage(tabId, { action: 'initializePlaylist' });
       console.log(response);
     }
