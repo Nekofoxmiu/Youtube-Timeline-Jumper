@@ -57,12 +57,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   (async () => {
     try {
-      //console.log(tabId, changeInfo, tab);
-      if (changeInfo.status === 'complete' && tab.url) {
+      console.debug(tabId, changeInfo, tab);
+      if (tab.url) {
         const videoId = extractVideoId(tab.url);
         if (videoId) {
-          const response = await chrome.tabs.sendMessage(tabId, { action: 'initializePlaylist' });
-          console.log(response);
+          try {
+            const response = await chrome.tabs.sendMessage(tabId, { action: 'initializePlaylist' });
+            console.log(response);
+          } catch (error) {
+            console.debug("Content Script not isn't injected.", error);
+          }
         }
       }
 
