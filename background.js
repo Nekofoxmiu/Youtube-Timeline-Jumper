@@ -58,15 +58,12 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   (async () => {
     try {
       console.debug(tabId, changeInfo, tab);
-      if (tab.url) {
-        const videoId = extractVideoId(tab.url);
-        if (videoId) {
-          try {
-            const response = await chrome.tabs.sendMessage(tabId, { action: 'initializePlaylist' });
-            console.log(response);
-          } catch (error) {
-            console.debug("Content Script not isn't injected.", error);
-          }
+      if (changeInfo.status === 'complete') {
+        try {
+          const response = await chrome.tabs.sendMessage(tabId, { action: 'initializePlaylist' });
+          console.log(response);
+        } catch (error) {
+          console.debug("Content Script not isn't injected.", error);
         }
       }
 
@@ -76,37 +73,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   })();
   return true;
 });
-
-// 提取影片ID的函數
-function extractVideoId(url) {
-  const parsedUrl = new URL(url);
-
-  // 檢查標準網址格式
-  const urlParams = new URLSearchParams(parsedUrl.search);
-  let videoId = urlParams.get('v');
-  if (videoId && /^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
-    return videoId;
-  }
-
-  // 檢查短網址格式
-  const pathnameParts = parsedUrl.pathname.split('/');
-  if (parsedUrl.hostname === 'youtu.be' && pathnameParts.length > 1) {
-    videoId = pathnameParts[1];
-    if (/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
-      return videoId;
-    }
-  }
-
-  // 檢查嵌入式影片網址格式
-  if (parsedUrl.hostname === 'www.youtube.com' && pathnameParts[1] === 'embed' && pathnameParts.length > 2) {
-    videoId = pathnameParts[2];
-    if (/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
-      return videoId;
-    }
-  }
-
-  return null;
-}
 
 
 
