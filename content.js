@@ -1,5 +1,5 @@
 'use strict';
-console.log('yt-paj content.js injected');
+console.info('yt-paj content.js injected');
 
 (async () => {
     // 模組變數
@@ -18,7 +18,7 @@ console.log('yt-paj content.js injected');
         themeModule = await import('./lib/theme.js'); // 動態導入 theme 模組
         runtimeHandlerModule = await import('./lib/runtimeHandler.js'); // 動態導入 runtimeHandler 模組
     } catch (error) {
-        console.log('Module loading failed:', error);
+        console.error('Module loading failed:', error);
     }
 
     const { TimeSlot, PlaylistItem, PlaylistState } = dataClassModule;
@@ -97,7 +97,7 @@ console.log('yt-paj content.js injected');
 
     // 讀取本地存儲中的狀態並決定是否啟動應用
     const response = await chrome.runtime.sendMessage({ action: 'getExtensionWorkOrNot' });
-    //console.log('getExtensionWorkOrNot:', response);
+    console.info('getExtensionWorkOrNot:', response);
     let extensionWorkOrNot = response.state || false;
     if (extensionWorkOrNot) {
         appstart();
@@ -166,7 +166,7 @@ console.log('yt-paj content.js injected');
     function createTimeTextElement(startOrEnd) {
         const timeObj = getCurrentVideoTime();
         if (!timeObj) {
-            console.log('No video element found.');
+            console.error('No video element found.');
             return null;
         }
 
@@ -190,8 +190,6 @@ console.log('yt-paj content.js injected');
         const videoUrl = window.location.href;
         const url = new URL(videoUrl);
         const urlParams = new URLSearchParams(url.search);
-
-        console.log(urlParams);
 
         // 檢查標準網址格式
         let videoId = urlParams.get('v');
@@ -282,7 +280,7 @@ console.log('yt-paj content.js injected');
         // 將播放列表容器和按鈕插入側邊欄
         const videoId = getCurrentVideoId();
         if (!videoId) {
-            console.log('No video ID found for initialization.');
+            console.warn('No video ID found for initialization.');
             return;
         }
 
