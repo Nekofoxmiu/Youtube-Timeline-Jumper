@@ -81,12 +81,13 @@ console.log('yt-paj content.js injected');
     }
 
     // 讀取本地存儲中的狀態並決定是否啟動應用
-    chrome.runtime.sendMessage({ action: 'getExtensionWorkOrNot' }, (response) => {
-        let extensionWorkOrNot = response.state || false;
-        if (extensionWorkOrNot) {
-            appstart();
-        }
-    });
+    const response = await chrome.runtime.sendMessage({ action: 'getExtensionWorkOrNot' });
+    console.log('getExtensionWorkOrNot:', response);
+    let extensionWorkOrNot = response.state || false;
+    if (extensionWorkOrNot) {
+        appstart();
+    }
+
 
     
     // 初始化並與 background.js 綁定
@@ -183,10 +184,35 @@ console.log('yt-paj content.js injected');
     * 獲取當前 YouTube 影片 ID。
     * @returns {string|null} 影片 ID 或 null。
     */
+    /**
+    * 獲取當前 YouTube 影片 ID。
+    * @returns {string|null} 影片 ID 或 null。
+    */
     function getCurrentVideoId() {
         const videoUrl = window.location.href;
-        const urlParams = new URLSearchParams((new URL(videoUrl)).search);
-        return urlParams.get('v');
+        const url = new URL(videoUrl);
+        const urlParams = new URLSearchParams(url.search);
+
+        console.log(urlParams);
+
+        // 檢查標準網址格式
+        let videoId = urlParams.get('v');
+        if (videoId) {
+            return videoId;
+        }
+
+        // 檢查短網址格式
+        const pathnameParts = url.pathname.split('/');
+        if (url.hostname === 'youtu.be' && pathnameParts.length > 1) {
+            return pathnameParts[1];
+        }
+
+        // 檢查嵌入式影片網址格式
+        if (url.hostname === 'www.youtube.com' && pathnameParts[1] === 'embed' && pathnameParts.length > 2) {
+            return pathnameParts[2];
+        }
+
+        return null;
     }
 
     async function deleteAppElement() {
@@ -240,6 +266,10 @@ console.log('yt-paj content.js injected');
             if (appPlayListContainer.getAttribute('youtubeID') !== getCurrentVideoId()) {
                 await deleteAppElement();
             }
+            else {
+                return;
+            }
+
         }
 
         initializePlaylist(sidebarElm);
@@ -258,7 +288,7 @@ console.log('yt-paj content.js injected');
             return;
         }
 
-        chrome.storage.sync.get([videoId], async (result) => {
+        await chrome.storage.sync.get([videoId], async (result) => {
             const savedState = result[videoId];
             if (savedState && Array.isArray(savedState)) {
                 savedState.forEach(async itemData => {
