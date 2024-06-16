@@ -1,22 +1,26 @@
-chrome.runtime.onInstalled.addListener(async () => {
-  // 初始化本地存儲中的 extensionWorkOrNot 狀態
-  try {
-    await chrome.storage.sync.set({ extensionWorkOrNot: false }, () => {
-      console.log('ExtensionWorkOrNot state initialized to false.');
-    });
-  } catch (error) {
-    console.log('Error initializing ExtensionWorkOrNot state:', error);
-  }
+chrome.runtime.onInstalled.addListener(() => {
+  (async () => {
+    // 初始化本地存儲中的 extensionWorkOrNot 狀態
+    try {
+      await chrome.storage.sync.set({ extensionWorkOrNot: false }, () => {
+        console.log('ExtensionWorkOrNot state initialized to false.');
+      });
+    } catch (error) {
+      console.log('Error initializing ExtensionWorkOrNot state:', error);
+    }
+  })();
 });
 
-chrome.action.onClicked.addListener(async (tab) => {
-  // 向 content.js 發送消息，通知它啟動
-  try {
-    const response = await chrome.tabs.sendMessage(tab.id, { action: "switchExtensionOnState" });
-    console.log(response);
-  } catch (error) {
-    console.log("Content.js isn't injected.", error);
-  }
+chrome.action.onClicked.addListener((tab) => {
+  (async () => {
+    // 向 content.js 發送消息，通知它啟動
+    try {
+      const response = await chrome.tabs.sendMessage(tab.id, { action: "switchExtensionOnState" });
+      console.log(response);
+    } catch (error) {
+      console.log("Content.js isn't injected.", error);
+    }
+  })();
 });
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -35,7 +39,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       }
       if (request.action === 'updatePlaylistState') {
         const { videoId, state } = request.data;
-        // 儲存資料的邏輯，例如使用 chrome.storage.sync
+        // 儲存資料，使用 chrome.storage.sync
         await chrome.storage.sync.set({ [videoId]: state }, () => {
           sendResponse({ success: true });
         });
@@ -43,24 +47,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     } catch (error) {
       console.log('Error handling runtime message:', error);
     }
-    
+
   })();
   return true;
 });
 
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  try {
-    if (changeInfo.status === 'complete' && tab.url) {
-      const videoId = extractVideoId(tab.url);
-      if (videoId) {
-        const response = await chrome.tabs.sendMessage(tabId, { action: 'initializePlaylist' });
-        console.log(response);
+
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  (async () => {
+    try {
+      //console.log(tabId, changeInfo, tab);
+      if (changeInfo.status === 'complete' && tab.url) {
+        const videoId = extractVideoId(tab.url);
+        if (videoId) {
+          const response = await chrome.tabs.sendMessage(tabId, { action: 'initializePlaylist' });
+          console.log(response);
+        }
       }
+
+    } catch (error) {
+      console.log("Request failed.", error);
     }
-    return true;
-  } catch (error) {
-    console.log("Request failed.", error);
-  }
+  })();
+  return true;
 });
 
 // 提取影片ID的函數
@@ -96,11 +106,19 @@ function extractVideoId(url) {
 
 
 
+
+
 chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
-  if (request.action === 'playPlaylist') {
-    await playPlaylist(request.startIndex, sendResponse);
-    return true; // 保持非同步訊息通道開啟
-  }
+  (async () => {
+    try {
+      if (request.action === 'playPlaylist') {
+        await playPlaylist(request.startIndex, sendResponse);
+      }
+    } catch (error) {
+      console.log('Error handling runtime message:', error);
+    }
+  })();
+  return true; // 保持非同步訊息通道開啟
 });
 
 async function playPlaylist(startIndex, sendResponse) {
@@ -226,15 +244,21 @@ async function playPlaylist(startIndex, sendResponse) {
         await chrome.storage.local.set({ isPlaying: false });
 
       } catch (error) {
-        console.error('Error playing playlist:', error);
+        console.log('Error playing playlist:', error);
       }
     },
     args: [startIndex, thisPlayId]
-  }, async () => {
-    const { currentPlayId } = await chrome.storage.local.get('currentPlayId');
-    if (thisPlayId === currentPlayId) {
-      await chrome.storage.local.set({ isPlaying: false }); // 確保播放結束後的狀態更新
+  }, () => {
+    try {
+      (async () => {
+        const { currentPlayId } = await chrome.storage.local.get('currentPlayId');
+        if (thisPlayId === currentPlayId) {
+          await chrome.storage.local.set({ isPlaying: false }); // 確保播放結束後的狀態更新
+        }
+        sendResponse({ success: true });
+      })();
+    } catch (error) {
+      console.log('Error executing script:', error);
     }
-    sendResponse({ success: true });
   });
 }

@@ -60,6 +60,21 @@ console.log('yt-paj content.js injected');
     mouseEventHandler = new MouseEventHandler(ul, playlistContainer, playlistState);
     playlistTimeManager = new PlaylistTimeManager(playlistContainer, playlistState);
 
+
+    // 初始化並與 background.js 綁定
+    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+        (async () => {
+            await handleRuntimeMessage(request, sender, sendResponse, {
+                deleteAppElement,
+                main,
+                sidebarQuery,
+                appPlayListContainerQuery,
+                document
+            });
+        })();
+        return true; // 返回 true 以保持 sendResponse 的持續狀態
+    });
+
     async function appstart() {
         let sidebarElm = document.querySelector(sidebarQuery);
         if (sidebarElm) {
@@ -82,28 +97,11 @@ console.log('yt-paj content.js injected');
 
     // 讀取本地存儲中的狀態並決定是否啟動應用
     const response = await chrome.runtime.sendMessage({ action: 'getExtensionWorkOrNot' });
-    console.log('getExtensionWorkOrNot:', response);
+    //console.log('getExtensionWorkOrNot:', response);
     let extensionWorkOrNot = response.state || false;
     if (extensionWorkOrNot) {
         appstart();
     }
-
-
-    
-    // 初始化並與 background.js 綁定
-    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-        (async () => {
-            await handleRuntimeMessage(request, sender, sendResponse, {
-                deleteAppElement,
-                main,
-                sidebarQuery,
-                appPlayListContainerQuery,
-                document
-            });
-        })();
-        return true; // 返回 true 以保持 sendResponse 的持續狀態
-    });
-    
 
     // 監聽主題變更
     const observer = new MutationObserver(() => {
