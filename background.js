@@ -52,8 +52,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   return true;
 });
 
-
-
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   (async () => {
     try {
@@ -74,15 +72,12 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   return true;
 });
 
-
-
-
-
 chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
   (async () => {
     try {
       if (request.action === 'playPlaylist') {
-        await playPlaylist(request.startIndex, sendResponse);
+        const tabId = sender.tab.id; // 獲取發送消息的 tab ID
+        await playPlaylist(request.startIndex, sendResponse, tabId);
       }
     } catch (error) {
       console.log('Error handling runtime message:', error);
@@ -91,28 +86,41 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
   return true; // 保持非同步訊息通道開啟
 });
 
-async function playPlaylist(startIndex, sendResponse) {
-  let { currentPlayId } = await chrome.storage.local.get('currentPlayId');
+chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
+  (async () => {
+    try {
+      // 刪除與該 tab ID 相關的狀態資訊
+      await chrome.storage.local.remove(`currentPlayId_${tabId}`);
+      await chrome.storage.local.remove(`isPlaying_${tabId}`);
+      console.log(`Removed state for tab ID ${tabId}`);
+    } catch (error) {
+      console.log('Error removing state for closed tab:', error);
+    }
+  })();
+});
+
+async function playPlaylist(startIndex, sendResponse, tabId) {
+  let { currentPlayId } = await chrome.storage.local.get(`currentPlayId_${tabId}`);
   if (typeof currentPlayId === 'undefined') {
     currentPlayId = 0;
   }
   currentPlayId++;
-  await chrome.storage.local.set({ currentPlayId });
+  await chrome.storage.local.set({ [`currentPlayId_${tabId}`]: currentPlayId });
 
   const thisPlayId = currentPlayId;
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab) {
-    await chrome.storage.local.set({ isPlaying: false });
+    await chrome.storage.local.set({ [`isPlaying_${tabId}`]: false });
     sendResponse({ success: false, message: 'No active tab found.' });
     return;
   }
 
   chrome.scripting.executeScript({
     target: { tabId: tab.id },
-    function: async (startIndex, thisPlayId) => {
+    function: async (startIndex, thisPlayId, tabId) => {
       try {
-        const { isPlaying } = await chrome.storage.local.get('isPlaying');
+        const { [`isPlaying_${tabId}`]: isPlaying } = await chrome.storage.local.get(`isPlaying_${tabId}`);
 
         async function stopCurrentPlayback() {
           const video = document.querySelector('video');
@@ -135,7 +143,7 @@ async function playPlaylist(startIndex, sendResponse) {
 
         function updateStyles(item, add) {
           return new Promise((resolve) => {
-            requestAnimationFrame(() => {
+            setTimeout(() => {
               if (add) {
                 item.classList.add('ytj-playing-item');
                 item.querySelector('.ytj-drag-handle').classList.add('playing');
@@ -144,17 +152,18 @@ async function playPlaylist(startIndex, sendResponse) {
                 item.querySelector('.ytj-drag-handle').classList.remove('playing');
               }
               resolve();
-            });
+            }, 0); // 使用0毫秒的延遲確保操作排入事件隊列
           });
         }
+        
 
         // 停止當前播放
         if (isPlaying) {
           await stopCurrentPlayback();
-          await chrome.storage.local.set({ isPlaying: false });
+          await chrome.storage.local.set({ [`isPlaying_${tabId}`]: false });
         }
 
-        await chrome.storage.local.set({ isPlaying: true });
+        await chrome.storage.local.set({ [`isPlaying_${tabId}`]: true });
 
         const playlistContainer = document.querySelector('.ytj-playlist-container');
         const video = document.querySelector('video');
@@ -170,7 +179,7 @@ async function playPlaylist(startIndex, sendResponse) {
         let retryTolerance = 0;
 
         for (let i = startIndex; i < playlistState.length; i++) {
-          const { currentPlayId } = await chrome.storage.local.get('currentPlayId');
+          const { [`currentPlayId_${tabId}`]: currentPlayId } = await chrome.storage.local.get(`currentPlayId_${tabId}`);
           if (thisPlayId !== currentPlayId) break;
 
           const item = playlistState[i];
@@ -184,7 +193,7 @@ async function playPlaylist(startIndex, sendResponse) {
 
           await new Promise((resolve) => {
             const checkTime = setInterval(async () => {
-              const { currentPlayId } = await chrome.storage.local.get('currentPlayId');
+              const { [`currentPlayId_${tabId}`]: currentPlayId } = await chrome.storage.local.get(`currentPlayId_${tabId}`);
               if (thisPlayId !== currentPlayId) {
                 //console.log(thisPlayId, currentPlayId);
                 //console.log('Playback stopped. by thisPlayId !== currentPlayId');
@@ -205,25 +214,25 @@ async function playPlaylist(startIndex, sendResponse) {
           await updateStyles(item, false);
         }
 
-        const { currentPlayId } = await chrome.storage.local.get('currentPlayId');
+        const { [`currentPlayId_${tabId}`]: currentPlayId } = await chrome.storage.local.get(`currentPlayId_${tabId}`);
         if (thisPlayId === currentPlayId) {
           playButton.classList.remove('playing'); // 播放按鈕恢復為播放按鈕
           video.pause();
-          await chrome.storage.local.set({ currentPlayId: 0 });
+          await chrome.storage.local.set({ [`currentPlayId_${tabId}`]: 0 });
         }
-        await chrome.storage.local.set({ isPlaying: false });
+        await chrome.storage.local.set({ [`isPlaying_${tabId}`]: false });
 
       } catch (error) {
         console.log('Error playing playlist:', error);
       }
     },
-    args: [startIndex, thisPlayId]
+    args: [startIndex, thisPlayId, tabId]
   }, () => {
     try {
       (async () => {
-        const { currentPlayId } = await chrome.storage.local.get('currentPlayId');
+        const { [`currentPlayId_${tabId}`]: currentPlayId } = await chrome.storage.local.get(`currentPlayId_${tabId}`);
         if (thisPlayId === currentPlayId) {
-          await chrome.storage.local.set({ isPlaying: false }); // 確保播放結束後的狀態更新
+          await chrome.storage.local.set({ [`isPlaying_${tabId}`]: false }); // 確保播放結束後的狀態更新
         }
         sendResponse({ success: true });
       })();
