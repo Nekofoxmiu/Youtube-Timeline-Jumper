@@ -280,7 +280,7 @@ console.info('yt-paj content.js injected');
         // 將播放列表容器和按鈕插入側邊欄
         const videoId = getCurrentVideoId();
         if (!videoId) {
-            console.debuf('No video ID found for initialization.');
+            console.debug('No video ID found for initialization.');
             return;
         }
 
