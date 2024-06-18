@@ -92,7 +92,7 @@ chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
       // 刪除與該 tab ID 相關的狀態資訊
       await chrome.storage.local.remove(`currentPlayId_${tabId}`);
       await chrome.storage.local.remove(`isPlaying_${tabId}`);
-      console.log(`Removed state for tab ID ${tabId}`);
+      console.debug(`Removed state for tab ID ${tabId}`);
     } catch (error) {
       console.log('Error removing state for closed tab:', error);
     }
