@@ -8,8 +8,7 @@
     "activeTab"
     ],
   "background": {
-    "service_worker": "background.js",
-    "type": "module"
+    "scripts": ["background.js"]
   },
   "action": {
     "default_icon": {
@@ -47,9 +46,15 @@
         "*://youtu.be/*"
       ],
       "resources": [
-        "images/ui/*",
-        "lib/*"
+        "images/ui/*"
       ]
     }
-  ]
+  ],
+  "browser_specific_settings": {
+  "gecko": {
+    "id": "Youtube-Timeline-Jumper@github.com",
+    "strict_min_version": "42.0"
+  }
+}
+
 }
