@@ -1,55 +1,32 @@
 # YouTube Playlist Manager Chrome Extension
   \
-![Snipaste_2024-06-14_17-42-59](https://github.com/Nekofoxmiu/Youtube-Timeline-Jumper/assets/76677660/2d262c7f-28de-4998-8fd1-18a0a3873d50)  
-  \
-From: 【歌回】響到什麼唱什麼｜響Hibiki  
-Owner: [@HibikiVtuber](https://www.youtube.com/@HibikiVtuber)  
-Playlist from: [@MATAT_EX](https://www.youtube.com/@MATAT_EX) in comments  
+![image](https://github.com/Nekofoxmiu/Youtube-Timeline-Jumper/assets/76677660/189c5d99-d79b-495e-ba7b-5a84c56a949f)
+![image](https://github.com/Nekofoxmiu/Youtube-Timeline-Jumper/assets/76677660/a22945b0-f9c0-4d61-82a5-372b6d64a76e)
 
-## Introduction
-This project is a Chrome extension designed to enhance the YouTube experience by providing playlist management capabilities. The extension allows users to create, edit, import, and export playlists directly within the YouTube interface.
+  \
+From: [【歌回】響到什麼唱什麼｜響Hibiki](https://www.youtube.com/watch?v=2ciq2BUuuUI)  
+Owner: [@HibikiVtuber](https://www.youtube.com/@HibikiVtuber)  
+# YouTube Playlist Management Extension
+
+## Overview
+This project is a Chrome extension designed to enhance YouTube's playlist management capabilities. The extension provides functionalities such as creating, editing, importing, exporting, and playing custom playlists directly within the YouTube interface.
 
 ## Features
-- **Dark Theme Detection**: Automatically applies a dark or light theme based on YouTube's current theme.
-- **Playlist Management**: Create and manage playlists, including adding, editing, and removing items.
-- **Drag-and-Drop Interface**: Rearrange playlist items using an intuitive drag-and-drop interface.
-- **Import/Export Playlists**: Import playlists from text or export current playlists to share with others.
+- **Dark Theme Detection**: Automatically apply the correct CSS theme based on YouTube's dark or light theme.
+- **Playlist Management**: Add, edit, and delete items in your custom playlists.
+- **Video Info Retrieval**: Get the current video ID and playtime.
+- **State Management**: Synchronize and update the playlist state with the background script.
+- **User Interaction**: Enable editable text fields and handle drag-and-drop for playlist items.
 
-
-## Files Overview
-
-### `content.js`
-This file is the main entry point for the extension's content script. It initializes the playlist manager, sets up the UI elements, and handles interactions between the user and the YouTube page.
-
-### `background.js`
-Handles the background processes, including managing the extension's state, listening for messages from the content script, and performing tasks such as initializing the extension and updating the playlist state.
-
-### `theme.js`
-Contains functions for detecting YouTube's theme (dark or light) and applying the corresponding styles to the extension's elements.
-
-### `sendPlaylistStateToBackground.js`
-Handles sending the current playlist state to the background script for storage and updates.
-
-### `runtimeHandler.js`
-Manages runtime messages and performs actions such as switching the extension's state, initializing playlists, and starting playlist playback.
-
-### `ui.js`
-Provides functions for creating various UI components, such as playlist containers, buttons, and pop-up text boxes.
-
-### `mouseEventHandler.js`
-Implements the drag-and-drop functionality for rearranging playlist items within the UI.
-
-### `playlistTool.js`
-Contains the core logic for managing playlists, including creating new items, updating time texts, and checking the validity of start and end times.
-
-### `dataclass.js`
-Defines data structures used throughout the extension, such as `TimeSlot`, `PlaylistItem`, and `PlaylistState`.
 
 ## Installation
-1. Clone or download the repository to your local machine.
-2. Open Chrome and navigate to `chrome://extensions/`.
-3. Enable "Developer mode" using the toggle in the upper right corner.
-4. Click "Load unpacked" and select the directory containing the extension files.
+### 1. check chrome extention store
+[store link](https://chromewebstore.google.com/detail/youtube-auto-jump/afnhppglcmibpbelgjbphhfcjndnmhhb)
+### 2. Install manually
+1. Clone the repository.
+2. Navigate to `chrome://extensions/` in your Chrome browser.
+3. Enable "Developer mode".
+4. Click "Load unpacked" and select the cloned repository folder.
 
 ## Usage
 1. Navigate to a YouTube video.
@@ -57,16 +34,99 @@ Defines data structures used throughout the extension, such as `TimeSlot`, `Play
 3. Drag and drop items to rearrange them.
 4. Import or export playlists using the provided buttons to share your playlists with others.
 
-## Development
-### Prerequisites
-- Chrome browser
+## File Descriptions
 
-### Run
-Load the extension in Chrome as described in the Installation section.
+### runtimeHandler.js
+Handles runtime messages and manages the state of the extension (on/off) and playlist initialization. It also handles messages to start playing the playlist.
+- **Functions**:
+  - `handleRuntimeMessage(request, sender, sendResponse, context)`: Main function to process incoming messages and take appropriate actions.
 
-### Testing
-- Use the Chrome Developer Tools to inspect and debug the extension.
-- Test the extension on different YouTube pages to ensure compatibility and functionality.
+### sendPlaylistStateToBackground.js
+Sends the current playlist state to the background script for persistence.
+- **Functions**:
+  - `sendPlaylistStateToBackground(nowPlaylistState)`: Sends the current playlist state to `background.js`.
+
+### getVideoInfo.js
+Provides functions to retrieve information about the current YouTube video.
+- **Functions**:
+  - `getCurrentVideoId()`: Retrieves the current video ID from the URL.
+  - `getCurrentVideoTime()`: Retrieves the current playback time of the video and converts it to a `TimeSlot` object.
+
+### editModule.js
+Enables editing mode for playlist items and handles save and cancel actions.
+- **Functions**:
+  - `enableEditMode(editableElement, playlistState, playlistTimeManager)`: Enables editing mode for a given element.
+  - `handleBlur(editableElement, originalAttr, playlistState, playlistTimeManager)`: Handles actions when an editable element loses focus.
+  - `handleKeydown(event, editableElement, originalText)`: Handles keydown events to save or cancel edits.
+
+### theme.js
+Applies the appropriate CSS theme based on YouTube's current theme.
+- **Functions**:
+  - `isYouTubeDarkTheme()`: Checks if YouTube is in dark mode.
+  - `applyTheme()`: Applies the dark or light theme CSS classes to the document body.
+
+### dataclass.js
+Contains data classes to manage playlist items and states.
+- **Classes**:
+  - `TimeSlot`: Represents a time slot with hours, minutes, and seconds.
+  - `PlaylistItem`: Represents a playlist item with start time, end time, and title.
+  - `PlaylistState`: Manages the state of the playlist.
+
+### mouseEventHandler.js
+Handles drag-and-drop operations for playlist items.
+- **Classes**:
+  - `MouseEventHandler`: Manages the drag-and-drop events and updates the playlist state.
+
+### playlistTool.js
+Provides utility functions and classes for managing playlists and time slots.
+- **Classes**:
+  - `PlaylistTimeManager`: Manages playlist time slots and ensures start times do not exceed end times.
+- **Functions**:
+  - `equalsCheck(a, b)`: Checks if two objects are equal.
+  - `getandUpdatePlaylistState(sharedState)`: Retrieves and updates the current playlist state.
+
+### ui.js
+Creates and manages UI components for the extension.
+- **Functions**:
+  - `createPlaylistContainer(videoId)`: Creates a container for the playlist.
+  - `createButtonContainer()`: Creates a container for action buttons.
+  - `createImportExportContainer()`: Creates a container for import/export buttons.
+  - `createPlaylistItemsContainer()`: Creates a container for playlist items.
+  - `createTimeTextElements(startTime, endTime)`: Creates start and end time text elements.
+  - `createAddToPlaylistButton()`: Creates an "Add to Playlist" button.
+  - `createImportPlaylistButton(importPlaylistFromText)`: Creates an "Import Playlist" button.
+  - `createExportPlaylistButton(exportPlaylist)`: Creates an "Export Playlist" button.
+  - `createPlayButton()`: Creates a "Play Playlist" button.
+  - `createPopupTextBox(title, onSave)`: Creates a popup text box for user input.
+
+### playPlaylist.js
+Controls the playback of the custom playlist.
+- **Functions**:
+  - `playPlaylist(startIndex, sendResponse, tabId)`: Plays the playlist starting from the specified index.
+  - `stopCurrentPlayback()`: Stops the current video playback.
+  - `updateStyles(item, add)`: Updates the styles of the current playing item.
+
+### background.js
+Manages the background operations of the extension, including communication with content scripts and handling state changes.
+- **Listeners**:
+  - `chrome.runtime.onInstalled.addListener`: Initializes the extension state upon installation.
+  - `chrome.action.onClicked.addListener`: Toggles the extension on/off state.
+  - `chrome.runtime.onMessage.addListener`: Handles messages for updating playlist state and controlling playback.
+  - `chrome.tabs.onUpdated.addListener`: Initializes the playlist when a YouTube tab is updated.
+  - `chrome.tabs.onRemoved.addListener`: Cleans up state when a tab is closed.
+
+### content.js
+Handles the content script operations, including injecting UI components, handling user interactions, and communicating with the background script.
+- **Modules Loaded**:
+  - `dataclass.js`, `playlistTool.js`, `mouseEventHandler.js`, `ui.js`, `theme.js`, `runtimeHandler.js`, `editModule.js`, `getVideoInfo.js`
+- **Functions**:
+  - `appstart()`: Starts the application by initializing UI components.
+  - `initializePlaylist(sidebarElm)`: Initializes the playlist in the YouTube sidebar.
+  - `addToPlaylist()`: Adds a new item to the playlist.
+  - `createPlaylistItem(startTime, endTime, title)`: Creates a new playlist item element.
+  - `playPlaylist(startIndex)`: Sends a message to start playing the playlist from a specified index.
+  - `importPlaylistFromText()`: Imports a playlist from a text input.
+  - `exportPlaylist()`: Exports the playlist to a text output.
 
 ## Contribution
 Contributions are welcome! Please open an issue or submit a pull request with your changes.
