@@ -1,5 +1,8 @@
 # YouTube Playlist Manager Chrome Extension
   \
+Youtube auto jumper tutorial  
+https://youtu.be/2zfVeA279d0  
+  
 ![image](https://github.com/Nekofoxmiu/Youtube-Timeline-Jumper/assets/76677660/189c5d99-d79b-495e-ba7b-5a84c56a949f)
 ![image](https://github.com/Nekofoxmiu/Youtube-Timeline-Jumper/assets/76677660/a22945b0-f9c0-4d61-82a5-372b6d64a76e)
 
@@ -20,8 +23,9 @@ This project is a Chrome extension designed to enhance YouTube's playlist manage
 
 
 ## Installation
-### 1. check chrome extention store
-[store link](https://chromewebstore.google.com/detail/youtube-auto-jump/afnhppglcmibpbelgjbphhfcjndnmhhb)
+### 1. check extention store
+[Chrome store link](https://chromewebstore.google.com/detail/youtube-auto-jump/afnhppglcmibpbelgjbphhfcjndnmhhb)  
+[Firefox store link](https://addons.mozilla.org/zh-TW/firefox/addon/youtube-auto-jump)
 ### 2. Install manually
 1. Clone the repository.
 2. Navigate to `chrome://extensions/` in your Chrome browser.
