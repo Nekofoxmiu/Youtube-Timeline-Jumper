@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Auto Jump",
-  "version": "1.1",
+  "version": "1.2",
   "description": "Automatically jump to a specific time on YouTube videos.",
   "permissions": [
     "storage",

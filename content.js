@@ -324,6 +324,13 @@ console.info('yt-paj content.js injected');
             this.sharedState.playlistItems = Array.from(this.playlistContainer.querySelectorAll('.ytj-playlist-item'));
             this.sharedState.state = getandUpdatePlaylistState(this.sharedState);
         }
+
+        deleteAllPlaylistItems() {
+            Array.from(this.playlistContainer.querySelectorAll('.ytj-playlist-item')).map(item => item.remove());
+            //修改sharedState
+            this.sharedState.playlistItems = [];
+            this.sharedState.state = getandUpdatePlaylistState(this.sharedState);
+        }
     }
 
     class MouseEventHandler {
@@ -440,6 +447,7 @@ console.info('yt-paj content.js injected');
     const equalsCheck = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
     const getandUpdatePlaylistState = (sharedState) => {
+        console.debug(sharedState.playlistItems);
         const nowPlaylistState = sharedState.playlistItems.map(
             item => {
                 const startTime = TimeSlot.fromTotalseconds(Number(item.querySelector('.ytj-playlist-item-text-start').getAttribute('timeat')));
@@ -502,8 +510,8 @@ console.info('yt-paj content.js injected');
         console.debug('Playback stopped');
     }
 
-    async function playPlaylist(startIndex, sendResponse, tabId) {
-        console.debug(`Starting playlist from index: ${startIndex}, tabId: ${tabId}`);
+    async function playPlaylist(startIndex, endIndex, sendResponse, tabId) {
+        console.debug(`Starting playlist from index: ${startIndex}, to ${endIndex}, tabId: ${tabId}`);
         let { [`currentPlayId_${tabId}`]: currentPlayId } = await chrome.storage.local.get(`currentPlayId_${tabId}`);
         console.debug(currentPlayId);
         if (typeof currentPlayId === 'undefined') {
@@ -542,7 +550,7 @@ console.info('yt-paj content.js injected');
                 console.debug('Play button set to playing');
             }
 
-            for (let i = startIndex; i < playlistState.length; i++) {
+            for (let i = startIndex; i < playlistState.length && i < endIndex; i++) {
                 const currentPlayId = (await chrome.storage.local.get(`currentPlayId_${tabId}`))[`currentPlayId_${tabId}`];
                 console.debug(`Loop iteration ${i}, currentPlayId: ${currentPlayId}, thisPlayId: ${thisPlayId}`);
                 if (thisPlayId !== currentPlayId) break;
@@ -722,8 +730,10 @@ console.info('yt-paj content.js injected');
     let importexportContainer;
     let addToPlaylistButton;
     let importPlaylistButton;
+    let editPlaylistButton;
     let exportPlaylistButton;
     let playButton;
+    let toggleSwitch;
     let ul;
 
     // 狀態變數
@@ -741,8 +751,10 @@ console.info('yt-paj content.js injected');
     importexportContainer = createImportExportContainer();
     addToPlaylistButton = createAddToPlaylistButton();
     importPlaylistButton = createImportPlaylistButton(importPlaylistFromText);
+    editPlaylistButton = createEditPlaylistButton(editPlaylistFromText);
     exportPlaylistButton = createExportPlaylistButton(exportPlaylist);
     playButton = createPlayButton();
+    toggleSwitch = createToggleSwitch();
     ul = createPlaylistItemsContainer();
 
     mouseEventHandler = new MouseEventHandler(ul, playlistContainer, playlistState);
@@ -828,7 +840,7 @@ console.info('yt-paj content.js injected');
             if (request.action === 'playPlaylist') {
                 const tabId = request.tabId; // 獲取傳入的 tab ID
                 console.info('Playing playlist...');
-                await playPlaylist(request.startIndex, sendResponse, tabId);
+                await playPlaylist(request.startIndex, request.endIndex, sendResponse, tabId);
             }
         } catch (error) {
             console.error('Error handling runtime message:', error);
@@ -914,6 +926,15 @@ console.info('yt-paj content.js injected');
         return button;
     }
 
+    function createEditPlaylistButton(editPlaylistFromText) {
+        const button = document.createElement('button');
+        button.id = 'ytj-edit-playlist-text';
+        button.className = 'ytj-edit-playlist-text';
+        button.innerText = 'Edit Playlist';
+        button.addEventListener('click', editPlaylistFromText);
+        return button;
+    }
+
     function createExportPlaylistButton(exportPlaylist) {
         const button = document.createElement('button');
         button.id = 'ytj-export-playlist';
@@ -970,6 +991,114 @@ console.info('yt-paj content.js injected');
         return overlay;
     }
 
+/**
+ * Creates a toggle switch UI element.
+ * @param {string} label - The description text to display next to the toggle switch.
+ * @returns {Object} An object containing the toggle switch element and related functions.
+ */
+function createToggleSwitch(label = 'Single Playback') {
+    // Create container
+    const container = document.createElement('div');
+    container.style.display = 'flex';
+    container.style.alignItems = 'center';
+
+    // Create shadow root
+    const shadow = container.attachShadow({ mode: 'open' });
+
+    // Create styles
+    const style = document.createElement('style');
+    //https://www.tpisoftware.com/tpu/articleDetails/2744
+    style.textContent = `
+    input[type=checkbox]{
+        height: 0;
+        width: 0;
+        visibility: hidden;
+    }
+    
+    label {
+        cursor: pointer;
+        width: 40px;
+        height: 20px;
+        background: grey;
+        display: block;
+        border-radius: 10px;
+        position: relative;
+        margin-bottom: 10px;
+        margin-left: 10px;
+    }
+    
+    label:after {
+        content: '';
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 16px;
+        height: 16px;
+        background: #fff;
+        border-radius: 50%;
+        transition: 0.3s ease-in-out, background-color 0.3s ease-in-out;
+        will-change: left;
+    }
+    
+    input:checked + label {
+        background: #0462a1;
+    }
+    
+    label:active:after {
+        width: 16px;
+    }
+    
+    input:checked + label:after {
+        left: calc(100% - 2px);
+        transform: translateX(-100%);
+    }
+    `;
+    shadow.appendChild(style);
+
+    // Create toggle switch HTML structure
+    const template = document.createElement('div');
+    template.innerHTML = `
+        <input type="checkbox" id="toggle-switch"/>
+        <label for="toggle-switch" class="switch-button"></label>
+    `;
+    shadow.appendChild(template);
+
+    // Set up state change listener
+    const checkbox = shadow.getElementById('toggle-switch');
+    checkbox.addEventListener('change', () => {
+        console.log(`Switch is ${checkbox.checked ? 'ON' : 'OFF'}`);
+    });
+
+    // Create description text
+    const description = document.createElement('span');
+    description.className = 'ytj-toggle-description';
+    description.textContent = label;
+    description.style.fontFamily = 'Roboto, Arial, sans-serif';
+    description.style.marginLeft = '10px';
+    description.style.fontSize = '12px';
+
+    // Append description to container
+    shadow.appendChild(description);
+
+    // Return container and related functions
+    return {
+        element: container,
+        /**
+         * Get the current state of the toggle switch.
+         * @returns {boolean} The state of the toggle switch (true for ON, false for OFF).
+         */
+        getSwitchState: () => checkbox.checked,
+        /**
+         * Set the state of the toggle switch.
+         * @param {boolean} state - The state to set (true for ON, false for OFF).
+         */
+        setSwitchState: (state) => {
+            checkbox.checked = state;
+            checkbox.dispatchEvent(new Event('change'));
+        }
+    };
+}
+
     async function appstart() {
         let sidebarElm = document.querySelector(sidebarQuery);
         if (sidebarElm) {
@@ -1009,7 +1138,7 @@ console.info('yt-paj content.js injected');
     function createStartFromHereButton(listItem) {
         const button = document.createElement('button');
         button.classList.add('ytj-start-from-here');
-        button.addEventListener('click', async () => {
+        button.addEventListener('click', async (event) => {
             try {
                 const video = document.querySelector('video');
                 if (!video) return;
@@ -1027,7 +1156,11 @@ console.info('yt-paj content.js injected');
 
                 await Promise.all(styleModificationPromises);
                 styleModificationPromises.length = 0;
-                await sendPlayPlaylist(index);
+                if (event.ctrlKey === true || toggleSwitch.getSwitchState() === true) {
+                    await sendPlayPlaylist(index, index + 1);
+                } else {
+                    await sendPlayPlaylist(index, playlistState.getPlaylistStateLength());
+                }
             } catch (error) {
                 console.debug('Error occurred while trying to start from here:', error);
             }
@@ -1044,6 +1177,7 @@ console.info('yt-paj content.js injected');
         const oldAddToPlaylistButton = document.querySelector('.ytj-add-to-playlist');
         const oldPlayButton = document.querySelector('.ytj-play-playlist');
         const oldImportPlaylistButton = document.querySelector('.ytj-import-playlist-text');
+        const oldEditPlaylistButton = document.querySelector('.ytj-edit-playlist-text');
         const oldExportPlaylistButton = document.querySelector('.ytj-export-playlist');
         const oldUl = document.querySelector('.ytj-playlist-items');
 
@@ -1053,39 +1187,54 @@ console.info('yt-paj content.js injected');
         if (oldAddToPlaylistButton) oldAddToPlaylistButton.remove();
         if (oldPlayButton) oldPlayButton.remove();
         if (oldImportPlaylistButton) oldImportPlaylistButton.remove();
+        if (oldEditPlaylistButton) oldEditPlaylistButton.remove();
         if (oldExportPlaylistButton) oldExportPlaylistButton.remove();
         if (oldUl) oldUl.remove();
 
+        // 清空容器內容
         playlistContainer.innerHTML = '';
         ul.innerHTML = '';
 
+        // 重新創建容器和按鈕
         playlistContainer = createPlaylistContainer(getCurrentVideoId());
         buttonContainer = createButtonContainer();
         importexportContainer = createImportExportContainer();
         addToPlaylistButton = createAddToPlaylistButton();
         playButton = createPlayButton();
+        toggleSwitch = createToggleSwitch();
         importPlaylistButton = createImportPlaylistButton(importPlaylistFromText);
+        editPlaylistButton = createEditPlaylistButton(editPlaylistFromText);
         exportPlaylistButton = createExportPlaylistButton(exportPlaylist);
         ul = createPlaylistItemsContainer();
 
+        // 重新創建事件處理程序
         mouseEventHandler = new MouseEventHandler(ul, playlistContainer, playlistState);
         playlistTimeManager = new PlaylistTimeManager(playlistContainer, playlistState);
     }
 
+    /**
+     * 主程式入口
+     * @param {HTMLElement} sidebarElm - 側邊欄元素
+     */
     async function main(sidebarElm) {
         const appPlayListContainer = document.querySelector(appPlayListContainerQuery);
         if (appPlayListContainer) {
             if (appPlayListContainer.getAttribute('youtubeID') !== getCurrentVideoId()) {
                 await deleteAppElement();
-            } else {
+            }
+            else {
                 return;
             }
         }
-
-        initializePlaylist(sidebarElm);
+        await initializePlaylist(sidebarElm);
     }
 
+    /**
+     * 初始化播放列表
+     * @param {HTMLElement} sidebarElm - 側邊欄元素
+     */
     async function initializePlaylist(sidebarElm) {
+        // 將播放列表容器和按鈕插入側邊欄
         const videoId = getCurrentVideoId();
         if (!videoId) {
             console.debug('No video ID found for initialization.');
@@ -1103,10 +1252,12 @@ console.info('yt-paj content.js injected');
                     ul.appendChild(newItem);
                 });
                 playlistContainer.appendChild(ul);
+                playlistState.state = savedState;
             }
         });
 
         importexportContainer.appendChild(importPlaylistButton);
+        importexportContainer.appendChild(editPlaylistButton);
         importexportContainer.appendChild(exportPlaylistButton);
         sidebarElm.insertBefore(importexportContainer, sidebarElm.firstChild);
 
@@ -1114,21 +1265,31 @@ console.info('yt-paj content.js injected');
 
         buttonContainer.appendChild(addToPlaylistButton);
         buttonContainer.appendChild(playButton);
-        sidebarElm.insertBefore(buttonContainer, sidebarElm.firstChild);
+        buttonContainer.appendChild(toggleSwitch.element);
+        sidebarElm.insertBefore(buttonContainer, sidebarElm.firstChild); // 插入按鈕容器
 
+        // 使用事件委派來處理所有子項目的 mousedown 事件
         ul.addEventListener('mousedown', handleMouseDown);
+
+        // 使用事件委派來處理所有子項目的點擊、編輯和保存邏輯
         playlistContainer.addEventListener('click', handleClick);
+
+        // 監聽添加到播放列表按鈕的點擊事件
         addToPlaylistButton.addEventListener('click', await addToPlaylist);
 
+        // 在播放按鈕的點擊事件中調用 clearPlayingStyles
+        // 播放按鈕點擊事件
         playButton.addEventListener('click', async () => {
             if (!playButton.classList.contains('playing')) {
                 await Promise.all(styleModificationPromises);
                 styleModificationPromises.length = 0;
-                await sendPlayPlaylist();
+                await sendPlayPlaylist(0, playlistState.getPlaylistStateLength());
             } else {
                 const video = document.querySelector('video');
                 if (video) {
+
                     if (playButton.classList.contains('playing')) {
+                        // 如果 playButton 是 playing 狀態，則恢復按鈕樣式
                         const styleModificationPromise = new Promise(resolve => {
                             document.querySelectorAll('.ytj-playing-item').forEach(item => item.classList.remove('ytj-playing-item'));
                             document.querySelectorAll('.ytj-drag-handle.playing').forEach(handle => handle.classList.remove('playing'));
@@ -1138,8 +1299,9 @@ console.info('yt-paj content.js injected');
                         await styleModificationPromise;
                     }
 
+                    // 確保所有樣式修改操作都完成後再繼續
                     await Promise.all(styleModificationPromises);
-                    styleModificationPromises.length = 0;
+                    styleModificationPromises.length = 0; // 清空已完成的 promise 列表
                     playButton.classList.remove('playing');
                     video.pause();
                     await chrome.storage.local.set({ currentPlayId: 0 });
@@ -1147,12 +1309,17 @@ console.info('yt-paj content.js injected');
             }
         });
 
+        // 監聽文本區域按鈕的點擊事件
         const importButton = document.querySelector('#ytj-import-playlist-text');
         const exportButton = document.querySelector('#ytj-export-playlist');
         if (importButton) importButton.addEventListener('click', importPlaylistFromText);
         if (exportButton) exportButton.addEventListener('click', exportPlaylist);
     }
 
+    /**
+     * 處理 mousedown 事件
+     * @param {Event} event - 事件物件
+     */
     function handleMouseDown(event) {
         const dragHandle = event.target.closest('.ytj-drag-handle');
         if (dragHandle) {
@@ -1160,6 +1327,10 @@ console.info('yt-paj content.js injected');
         }
     }
 
+    /**
+     * 處理點擊事件
+     * @param {Event} event - 事件物件
+     */
     function handleClick(event) {
         const editableElement = event.target.closest('.ytj-playlist-item-text-start, .ytj-playlist-item-text-end, .ytj-playlist-item-title');
 
@@ -1170,6 +1341,9 @@ console.info('yt-paj content.js injected');
         }
     }
 
+    /**
+     * 添加一個新的項目到播放列表並更新顯示
+     */
     async function addToPlaylist() {
         const newItem = createPlaylistItem();
         playlistState.playlistItems.push(newItem);
@@ -1178,6 +1352,13 @@ console.info('yt-paj content.js injected');
         playlistState.state = getandUpdatePlaylistState(playlistState);
     }
 
+    /**
+    * 創建一個新的播放列表項目元素，包含拖拽處理和時間顯示
+    * @param {TimeSlot} [startTime] - 項目開始時間（可選）
+    * @param {TimeSlot} [endTime] - 項目結束時間（可選）
+    * @param {string} [title] - 項目標題（可選）
+    * @returns {HTMLElement} 一個代表播放列表項目的新元素
+    */
     function createPlaylistItem(startTime, endTime, title) {
         if (startTime !== undefined && endTime !== undefined) {
             const timeObj = PlaylistTimeManager.checkStartAndEnd(startTime, endTime);
@@ -1279,8 +1460,8 @@ console.info('yt-paj content.js injected');
         return input;
     }
 
-    async function sendPlayPlaylist(startIndex = 0) {
-        await chrome.runtime.sendMessage({ action: 'playPlaylist', startIndex: startIndex, videoId: getCurrentVideoId() });
+    async function sendPlayPlaylist(startIndex = 0, endIndex = 0) {
+        await chrome.runtime.sendMessage({ action: 'playPlaylist', startIndex: startIndex, endIndex: endIndex, videoId: getCurrentVideoId() });
     }
 
     async function importPlaylistFromText() {
@@ -1288,7 +1469,7 @@ console.info('yt-paj content.js injected');
             if (!text) return;
 
             const lines = text.split('\n');
-            const regex = /(\d{1,2}:\d{2}(?::\d{2})?)\s*(\d{1,2}:\d{2}(?::\d{2})?)?\s*(.*)/;
+            const regex = /(\d{1,3}:\d{2}(?::\d{2})?)\s*(?:\D*\s*(\d{1,3}:\d{2}(?::\d{2})?))?\s*(.*)/;
 
             for (const line of lines) {
                 const match = line.match(regex);
@@ -1304,6 +1485,43 @@ console.info('yt-paj content.js injected');
             playlistContainer.appendChild(ul);
             playlistState.state = getandUpdatePlaylistState(playlistState);
         });
+    }
+
+    /**
+    * 將文本解析並編輯到播放列表的函數
+    */
+    async function editPlaylistFromText() {
+        const items = playlistState.playlistItems.map(item => {
+            const start = item.querySelector('.ytj-playlist-item-text-start').innerText;
+            const end = item.querySelector('.ytj-playlist-item-text-end').innerText;
+            const title = item.querySelector('.ytj-playlist-item-title').value;
+            return `${start} ${end !== start ? end : ''} ${title}`.trim();
+        });
+        const originText = items.join('\n');
+
+        createPopupTextBox('Edit Playlist', async (text) => {
+            if (!text) return;
+
+            const lines = text.split('\n');
+            const regex = /(\d{1,3}:\d{2}(?::\d{2})?)\s*(?:\D*\s*(\d{1,3}:\d{2}(?::\d{2})?))?\s*(.*)/;
+
+            playlistTimeManager.deleteAllPlaylistItems();
+            playlistState.state = getandUpdatePlaylistState(playlistState);
+
+            for (const line of lines) {
+                const match = line.match(regex);
+                if (match) {
+                    const [, startTime, endTime, title] = match;
+                    const start = TimeSlot.fromString(startTime);
+                    const end = endTime ? TimeSlot.fromString(endTime) : start;
+                    const newItem = createPlaylistItem(start, end, title);
+                    playlistState.playlistItems.push(newItem);
+                    ul.appendChild(newItem);
+                }
+            }
+            playlistContainer.appendChild(ul);
+            playlistState.state = getandUpdatePlaylistState(playlistState);
+        }).querySelector('textarea').value = originText;
     }
 
     function exportPlaylist() {
