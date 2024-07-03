@@ -997,6 +997,7 @@ console.info('yt-paj content.js injected');
  * @returns {Object} An object containing the toggle switch element and related functions.
  */
 function createToggleSwitch(label = 'Single Playback') {
+
     // Create container
     const container = document.createElement('div');
     container.style.display = 'flex';
@@ -1076,6 +1077,27 @@ function createToggleSwitch(label = 'Single Playback') {
     description.style.fontFamily = 'Roboto, Arial, sans-serif';
     description.style.marginLeft = '10px';
     description.style.fontSize = '12px';
+
+    function applyTextTheme() {
+        if (isYouTubeDarkTheme()) {
+            description.style.color = 'white';
+        } else {
+            description.style.color = 'black';
+        }
+    }
+    
+    // 監聽主題變更
+    const observer = new MutationObserver(() => {
+        applyTextTheme();
+    });
+    
+    const ytdApp = document.querySelector('ytd-app');
+    if (ytdApp) {
+        observer.observe(ytdApp, { attributes: true, attributeFilter: ['style'] });
+    }
+
+    // 初始化時應用主題
+    applyTextTheme();
 
     // Append description to container
     shadow.appendChild(description);
