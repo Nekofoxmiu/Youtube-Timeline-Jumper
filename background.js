@@ -77,7 +77,7 @@ chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
     try {
       if (request.action === 'playPlaylist') {
         const tabId = sender.tab.id; // 獲取發送消息的 tab ID
-        chrome.tabs.sendMessage(tabId, { action: 'playPlaylist', startIndex: request.startIndex, tabId: tabId }, (response) => {
+        chrome.tabs.sendMessage(tabId, { action: 'playPlaylist', startIndex: request.startIndex, endIndex: request.endIndex, tabId: tabId }, (response) => {
           if (response.success) {
             console.log('Playlist started successfully');
           } else {

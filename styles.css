@@ -347,9 +347,10 @@ body.light-theme .ytj-popup {
     color: var(--text-color-light);
 }
 
-.ytj-import-playlist-text, .ytj-export-playlist{
+.ytj-import-playlist-text, .ytj-export-playlist, .ytj-edit-playlist-text{
     font-family: Roboto, Arial, sans-serif;
     margin-right: 5px;
+    margin-bottom: 5px;
     font-size: 12px;
     background: none;
     border: 1px solid var(--border-color);

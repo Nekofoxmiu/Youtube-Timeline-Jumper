@@ -28,7 +28,7 @@ console.info('yt-paj content.js injected');
     const { TimeSlot, PlaylistState } = dataClassModule;
     const { getandUpdatePlaylistState, PlaylistTimeManager } = playlistToolModule;
     const { MouseEventHandler } = mouseEventHandlerModule;
-    const { createPlaylistContainer, createButtonContainer, createImportExportContainer, createAddToPlaylistButton, createImportPlaylistButton, createExportPlaylistButton, createPlayButton, createPlaylistItemsContainer, createPopupTextBox, createTimeTextElements } = uiModule;
+    const { createPlaylistContainer, createButtonContainer, createImportExportContainer, createAddToPlaylistButton, createImportPlaylistButton, createEditPlaylistButton, createExportPlaylistButton, createPlayButton, createPlaylistItemsContainer, createPopupTextBox, createTimeTextElements, createToggleSwitch } = uiModule;
     const { applyTheme } = themeModule;
     const { handleRuntimeMessage } = runtimeHandlerModule;
     const { getCurrentVideoId, getCurrentVideoTime } = getVideoInfoModule;
@@ -40,8 +40,10 @@ console.info('yt-paj content.js injected');
     let importexportContainer;
     let addToPlaylistButton;
     let importPlaylistButton;
+    let editPlaylistButton;
     let exportPlaylistButton;
     let playButton;
+    let toggleSwitch;
     let ul;
 
     // 狀態變數
@@ -59,8 +61,10 @@ console.info('yt-paj content.js injected');
     importexportContainer = createImportExportContainer();
     addToPlaylistButton = createAddToPlaylistButton();
     importPlaylistButton = createImportPlaylistButton(importPlaylistFromText);
+    editPlaylistButton = createEditPlaylistButton(editPlaylistFromText);
     exportPlaylistButton = createExportPlaylistButton(exportPlaylist);
     playButton = createPlayButton();
+    toggleSwitch = createToggleSwitch();
     ul = createPlaylistItemsContainer();
 
     mouseEventHandler = new MouseEventHandler(ul, playlistContainer, playlistState);
@@ -128,7 +132,7 @@ console.info('yt-paj content.js injected');
     function createStartFromHereButton(listItem) {
         const button = document.createElement('button');
         button.classList.add('ytj-start-from-here');
-        button.addEventListener('click', async () => {
+        button.addEventListener('click', async (event) => {
             try {
                 const video = document.querySelector('video');
                 if (!video) return;
@@ -148,8 +152,12 @@ console.info('yt-paj content.js injected');
                 // 確保所有樣式修改操作都完成後再繼續
                 await Promise.all(styleModificationPromises);
                 styleModificationPromises.length = 0; // 清空已完成的 promise 列表
+                if (event.ctrlKey === true || toggleSwitch.getSwitchState() === true) {
+                    await playPlaylist(index, index + 1);
+                } else {
+                    await playPlaylist(index, playlistState.getPlaylistStateLength());
+                }
 
-                await playPlaylist(index);
             } catch (error) {
                 console.debug('Error occurred while trying to start from here:', error);
             }
@@ -166,6 +174,7 @@ console.info('yt-paj content.js injected');
         const oldAddToPlaylistButton = document.querySelector('.ytj-add-to-playlist');
         const oldPlayButton = document.querySelector('.ytj-play-playlist');
         const oldImportPlaylistButton = document.querySelector('.ytj-import-playlist-text');
+        const oldEditPlaylistButton = document.querySelector('.ytj-edit-playlist-text');
         const oldExportPlaylistButton = document.querySelector('.ytj-export-playlist');
         const oldUl = document.querySelector('.ytj-playlist-items');
 
@@ -175,6 +184,7 @@ console.info('yt-paj content.js injected');
         if (oldAddToPlaylistButton) oldAddToPlaylistButton.remove();
         if (oldPlayButton) oldPlayButton.remove();
         if (oldImportPlaylistButton) oldImportPlaylistButton.remove();
+        if (oldEditPlaylistButton) oldEditPlaylistButton.remove();
         if (oldExportPlaylistButton) oldExportPlaylistButton.remove();
         if (oldUl) oldUl.remove();
 
@@ -188,7 +198,9 @@ console.info('yt-paj content.js injected');
         importexportContainer = createImportExportContainer();
         addToPlaylistButton = createAddToPlaylistButton();
         playButton = createPlayButton();
+        toggleSwitch = createToggleSwitch();
         importPlaylistButton = createImportPlaylistButton(importPlaylistFromText);
+        editPlaylistButton = createEditPlaylistButton(editPlaylistFromText);
         exportPlaylistButton = createExportPlaylistButton(exportPlaylist);
         ul = createPlaylistItemsContainer();
 
@@ -213,7 +225,7 @@ console.info('yt-paj content.js injected');
 
         }
 
-        initializePlaylist(sidebarElm);
+        await initializePlaylist(sidebarElm);
     }
 
     /**
@@ -239,10 +251,12 @@ console.info('yt-paj content.js injected');
                     ul.appendChild(newItem);
                 });
                 playlistContainer.appendChild(ul);
+                playlistState.state = savedState;
             }
         });
 
         importexportContainer.appendChild(importPlaylistButton);
+        importexportContainer.appendChild(editPlaylistButton);
         importexportContainer.appendChild(exportPlaylistButton);
         sidebarElm.insertBefore(importexportContainer, sidebarElm.firstChild);
 
@@ -250,6 +264,7 @@ console.info('yt-paj content.js injected');
 
         buttonContainer.appendChild(addToPlaylistButton);
         buttonContainer.appendChild(playButton);
+        buttonContainer.appendChild(toggleSwitch.element);
         sidebarElm.insertBefore(buttonContainer, sidebarElm.firstChild); // 插入按鈕容器
 
         // 使用事件委派來處理所有子項目的 mousedown 事件
@@ -267,7 +282,7 @@ console.info('yt-paj content.js injected');
             if (!playButton.classList.contains('playing')) {
                 await Promise.all(styleModificationPromises);
                 styleModificationPromises.length = 0; // 清空已完成的 promise 列表
-                await playPlaylist();
+                await playPlaylist(0, playlistState.getPlaylistStateLength());
             } else {
                 const video = document.querySelector('video');
                 if (video) {
@@ -449,8 +464,8 @@ console.info('yt-paj content.js injected');
     }
 
 
-    async function playPlaylist(startIndex = 0) {
-        await chrome.runtime.sendMessage({ action: 'playPlaylist', startIndex: startIndex, videoId: getCurrentVideoId() });
+    async function playPlaylist(startIndex = 0, endIndex = 0) {
+        await chrome.runtime.sendMessage({ action: 'playPlaylist', startIndex: startIndex, endIndex: endIndex, videoId: getCurrentVideoId() });
     }
 
     /**
@@ -461,7 +476,7 @@ console.info('yt-paj content.js injected');
             if (!text) return;
 
             const lines = text.split('\n');
-            const regex = /(\d{1,2}:\d{2}(?::\d{2})?)\s*(\d{1,2}:\d{2}(?::\d{2})?)?\s*(.*)/;
+            const regex = /(\d{1,3}:\d{2}(?::\d{2})?)\s*(?:\D*\s*(\d{1,3}:\d{2}(?::\d{2})?))?\s*(.*)/;
 
             for (const line of lines) {
                 const match = line.match(regex);
@@ -477,6 +492,43 @@ console.info('yt-paj content.js injected');
             playlistContainer.appendChild(ul);
             playlistState.state = getandUpdatePlaylistState(playlistState);
         });
+    }
+
+    /**
+    * 將文本解析並編輯到播放列表的函數
+    */
+    async function editPlaylistFromText() {
+        const items = playlistState.playlistItems.map(item => {
+            const start = item.querySelector('.ytj-playlist-item-text-start').innerText;
+            const end = item.querySelector('.ytj-playlist-item-text-end').innerText;
+            const title = item.querySelector('.ytj-playlist-item-title').value;
+            return `${start} ${end !== start ? end : ''} ${title}`.trim();
+        });
+        const originText = items.join('\n');
+
+        createPopupTextBox('Edit Playlist', async (text) => {
+            if (!text) return;
+
+            const lines = text.split('\n');
+            const regex = /(\d{1,3}:\d{2}(?::\d{2})?)\s*(?:\D*\s*(\d{1,3}:\d{2}(?::\d{2})?))?\s*(.*)/;
+
+            playlistTimeManager.deleteAllPlaylistItems();
+            playlistState.state = getandUpdatePlaylistState(playlistState);
+
+            for (const line of lines) {
+                const match = line.match(regex);
+                if (match) {
+                    const [, startTime, endTime, title] = match;
+                    const start = TimeSlot.fromString(startTime);
+                    const end = endTime ? TimeSlot.fromString(endTime) : start;
+                    const newItem = createPlaylistItem(start, end, title);
+                    playlistState.playlistItems.push(newItem);
+                    ul.appendChild(newItem);
+                }
+            }
+            playlistContainer.appendChild(ul);
+            playlistState.state = getandUpdatePlaylistState(playlistState);
+        }).querySelector('textarea').value = originText;
     }
 
     /**
