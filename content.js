@@ -507,13 +507,13 @@ console.info('yt-paj content.js injected');
         const originText = items.join('\n');
 
         createPopupTextBox('Edit Playlist', async (text) => {
+            playlistTimeManager.deleteAllPlaylistItems();
+            playlistState.state = getandUpdatePlaylistState(playlistState);
+
             if (!text) return;
 
             const lines = text.split('\n');
             const regex = /(\d{1,3}:\d{2}(?::\d{2})?)\s*(?:\D*\s*(\d{1,3}:\d{2}(?::\d{2})?))?\s*(.*)/;
-
-            playlistTimeManager.deleteAllPlaylistItems();
-            playlistState.state = getandUpdatePlaylistState(playlistState);
 
             for (const line of lines) {
                 const match = line.match(regex);
@@ -526,6 +526,7 @@ console.info('yt-paj content.js injected');
                     ul.appendChild(newItem);
                 }
             }
+            
             playlistContainer.appendChild(ul);
             playlistState.state = getandUpdatePlaylistState(playlistState);
         }).querySelector('textarea').value = originText;
