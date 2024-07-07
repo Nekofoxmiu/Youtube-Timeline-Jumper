@@ -1522,6 +1522,9 @@ function createToggleSwitch(label = 'Single Playback') {
         const originText = items.join('\n');
 
         createPopupTextBox('Edit Playlist', async (text) => {
+            playlistTimeManager.deleteAllPlaylistItems();
+            playlistState.state = getandUpdatePlaylistState(playlistState);
+
             if (!text) return;
 
             const lines = text.split('\n');
