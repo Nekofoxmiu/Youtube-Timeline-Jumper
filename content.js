@@ -775,13 +775,13 @@ console.info('yt-paj content.js injected');
     async function handleRuntimeMessage(request, sender, sendResponse, context) {
         try {
             let { deleteAppElement, main, sidebarQuery, appPlayListContainerQuery, document } = context;
-            let { extensionWorkOrNot } = await chrome.storage.sync.get('extensionWorkOrNot');
+            let { extensionWorkOrNot } = await chrome.storage.local.get('extensionWorkOrNot');
             let sidebarElm = document.querySelector(sidebarQuery);
 
             console.info('runtimeHandler.js:', request);
             if (request.action === 'switchExtensionOnState') {
                 extensionWorkOrNot = !extensionWorkOrNot;
-                await chrome.storage.sync.set({ extensionWorkOrNot: extensionWorkOrNot }, () => {
+                await chrome.storage.local.set({ extensionWorkOrNot: extensionWorkOrNot }, () => {
                     console.info('Extension state saved:', extensionWorkOrNot);
                 });
 
@@ -1263,7 +1263,7 @@ function createToggleSwitch(label = 'Single Playback') {
             return;
         }
 
-        await chrome.storage.sync.get([videoId], async (result) => {
+        await chrome.storage.local.get([videoId], async (result) => {
             const savedState = result[videoId];
             if (savedState && Array.isArray(savedState)) {
                 savedState.forEach(async itemData => {
