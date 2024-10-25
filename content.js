@@ -240,7 +240,7 @@ console.info('yt-paj content.js injected');
             return;
         }
 
-        await chrome.storage.sync.get([videoId], async (result) => {
+        await chrome.storage.local.get([videoId], async (result) => {
             const savedState = result[videoId];
             if (savedState && Array.isArray(savedState)) {
                 savedState.forEach(async itemData => {

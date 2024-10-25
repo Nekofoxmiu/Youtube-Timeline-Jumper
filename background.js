@@ -2,7 +2,7 @@ chrome.runtime.onInstalled.addListener(() => {
   (async () => {
     // 初始化本地存儲中的 extensionWorkOrNot 狀態
     try {
-      await chrome.storage.sync.set({ extensionWorkOrNot: false }, () => {
+      await chrome.storage.local.set({ extensionWorkOrNot: false }, () => {
         console.log('ExtensionWorkOrNot state initialized to false.');
       });
     } catch (error) {
@@ -27,20 +27,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   (async () => {
     try {
       if (request.action === 'switchExtensionOnState') {
-        let { extensionWorkOrNot } = await chrome.storage.sync.get('extensionWorkOrNot')
+        let { extensionWorkOrNot } = await chrome.storage.local.get('extensionWorkOrNot')
         const newState = !extensionWorkOrNot;
-        await chrome.storage.sync.set({ extensionWorkOrNot: newState });
+        await chrome.storage.local.set({ extensionWorkOrNot: newState });
         console.log('ExtensionWorkOrNot state switched to:', newState);
         sendResponse({ state: newState });
       }
       if (request.action === 'getExtensionWorkOrNot') {
-        let { extensionWorkOrNot } = await chrome.storage.sync.get('extensionWorkOrNot');
+        let { extensionWorkOrNot } = await chrome.storage.local.get('extensionWorkOrNot');
         sendResponse({ state: extensionWorkOrNot });
       }
       if (request.action === 'updatePlaylistState') {
         const { videoId, state } = request.data;
-        // 儲存資料，使用 chrome.storage.sync
-        await chrome.storage.sync.set({ [videoId]: state }, () => {
+        // 儲存資料，使用 chrome.storage.local
+        await chrome.storage.local.set({ [videoId]: state }, () => {
           sendResponse({ success: true });
         });
       }
