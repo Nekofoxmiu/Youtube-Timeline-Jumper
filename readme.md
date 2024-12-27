@@ -20,6 +20,11 @@ This project is a Chrome extension designed to enhance YouTube's playlist manage
 - **Video Info Retrieval**: Get the current video ID and playtime.
 - **State Management**: Synchronize and update the playlist state with the background script.
 - **User Interaction**: Enable editable text fields and handle drag-and-drop for playlist items.
+### 1.2.2
+- move sync to local
+- **Single Playback**: Now you can play song separately and this also benefit you to edit playlist. (By the toggle switch or ctrl + left click)
+### 1.2.3
+- You can set the default add time now. (If the end time doesn't exist.)
 
 
 ## Installation
