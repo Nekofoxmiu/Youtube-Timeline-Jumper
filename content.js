@@ -991,6 +991,61 @@ console.info('yt-paj content.js injected');
         return overlay;
     }
 
+    /**
+ * 建立彈出文本框的函數
+ * @param {string} title - 彈出框的標題
+ * @param {function} onSave - 當保存按鈕被點擊時的回調函數
+ * @returns {HTMLElement} 彈出文本框元素
+ */
+function createImportPopupTextBox(title, onSave) {
+    const overlay = document.createElement('div');
+    overlay.className = 'ytj-overlay';
+
+    const popup = document.createElement('div');
+    popup.className = 'ytj-popup';
+
+    const popupTitle = document.createElement('h2');
+    popupTitle.innerText = title;
+
+    const textArea = document.createElement('textarea');
+    textArea.className = 'ytj-popup-textarea';
+
+    const additionalSecondsLabel = document.createElement('label');
+    additionalSecondsLabel.innerText = 'Default add Seconds: ';
+    const additionalSecondsInput = document.createElement('input');
+    additionalSecondsInput.type = 'number';
+    additionalSecondsInput.placeholder = 'e.g., 30';
+
+    const buttonContainer = document.createElement('div');
+    buttonContainer.className = 'ytj-popup-button-container';
+
+    const saveButton = document.createElement('button');
+    saveButton.innerText = 'Save';
+    saveButton.addEventListener('click', () => {
+        const additionalSeconds = parseInt(additionalSecondsInput.value, 10);
+        onSave(textArea.value, additionalSeconds);
+        document.body.removeChild(overlay);
+    });
+
+    const cancelButton = document.createElement('button');
+    cancelButton.innerText = 'Cancel';
+    cancelButton.addEventListener('click', () => {
+        document.body.removeChild(overlay);
+    });
+
+    buttonContainer.appendChild(saveButton);
+    buttonContainer.appendChild(cancelButton);
+    popup.appendChild(popupTitle);
+    popup.appendChild(textArea);
+    popup.appendChild(additionalSecondsLabel);
+    popup.appendChild(additionalSecondsInput);
+    popup.appendChild(buttonContainer);
+    overlay.appendChild(popup);
+    document.body.appendChild(overlay);
+
+    return overlay;
+}
+
 /**
  * Creates a toggle switch UI element.
  * @param {string} label - The description text to display next to the toggle switch.
@@ -1487,10 +1542,16 @@ function createToggleSwitch(label = 'Single Playback') {
     }
 
     async function importPlaylistFromText() {
-        createPopupTextBox('Import Playlist', async (text) => {
+        createImportPopupTextBox('Import Playlist', async (text, additionalSeconds) => {
             if (!text) return;
 
+            if (isNaN(additionalSeconds) || additionalSeconds <= 0) {
+                additionalSeconds = 0;
+                return;
+            }
+
             const lines = text.split('\n');
+            // 格式範例： "1:00 2:00 Title"
             const regex = /(\d{1,3}:\d{2}(?::\d{2})?)\s*(?:\D*\s*(\d{1,3}:\d{2}(?::\d{2})?))?\s*(.*)/;
 
             for (const line of lines) {
@@ -1498,7 +1559,7 @@ function createToggleSwitch(label = 'Single Playback') {
                 if (match) {
                     const [, startTime, endTime, title] = match;
                     const start = TimeSlot.fromString(startTime);
-                    const end = endTime ? TimeSlot.fromString(endTime) : start;
+                    const end   = endTime ? TimeSlot.fromString(endTime) : TimeSlot.fromTotalseconds(start.getTotalseconds() + additionalSeconds);
                     const newItem = createPlaylistItem(start, end, title);
                     playlistState.playlistItems.push(newItem);
                     ul.appendChild(newItem);
