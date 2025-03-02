@@ -227,6 +227,15 @@
 
         // 4) 播放按鈕點擊事件
         playButton.addEventListener('click', async () => {
+            const tabId = await chrome.runtime.sendMessage({ action: 'getTabId' });
+            if (!tabId) {
+                console.error('Failed to retrieve tabId');
+                return;
+            }
+
+            const video = document.querySelector('video');
+            if (!video) return;
+            
             if (!playButton.classList.contains('playing')) {
                 // 尚未在播放，開始播放
                 await Promise.all(styleModificationPromises);
@@ -234,27 +243,26 @@
                 await playPlaylist(0, playlistState.getPlaylistStateLength());
             } else {
                 // 已在播放中，點擊後停止
-                const video = document.querySelector('video');
-                if (video) {
-                    if (playButton.classList.contains('playing')) {
-                        // 恢復 UI 樣式
-                        const styleModificationPromise = new Promise(resolve => {
-                            document.querySelectorAll('.ytj-playing-item')
-                                    .forEach(item => item.classList.remove('ytj-playing-item'));
-                            document.querySelectorAll('.ytj-drag-handle.playing')
-                                    .forEach(handle => handle.classList.remove('playing'));
-                            resolve();
-                        });
-                        styleModificationPromises.push(styleModificationPromise);
-                        await styleModificationPromise;
-                    }
-                    await Promise.all(styleModificationPromises);
-                    styleModificationPromises.length = 0;
-
-                    playButton.classList.remove('playing');
-                    video.pause();
-                    await chrome.storage.local.set({ currentPlayId: 0 });
+                if (playButton.classList.contains('playing')) {
+                    // 恢復 UI 樣式
+                    const styleModificationPromise = new Promise(resolve => {
+                        document.querySelectorAll('.ytj-playing-item')
+                                .forEach(item => item.classList.remove('ytj-playing-item'));
+                        document.querySelectorAll('.ytj-drag-handle.playing')
+                                .forEach(handle => handle.classList.remove('playing'));
+                        resolve();
+                    });
+                    styleModificationPromises.push(styleModificationPromise);
+                    await styleModificationPromise;
                 }
+                await Promise.all(styleModificationPromises);
+                styleModificationPromises.length = 0;
+
+                playButton.classList.remove('playing');
+                video.pause();
+                //console.log(tabId)
+                await chrome.storage.local.set({ [`currentPlayId_${tabId}`]: 0 });
+                
             }
         });
 
@@ -479,7 +487,7 @@
     function createSetEndTimeButton() {
         const button = document.createElement('button');
         button.classList.add('ytj-set-end-time');
-        button.addEventListener('click', () => {
+        button.addEventListener('click', (event) => {
             try {
                 const listItem     = event.target.closest('.ytj-playlist-item');
                 const endTimeText  = listItem.querySelector('.ytj-playlist-item-text-end');
