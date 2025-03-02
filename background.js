@@ -1,15 +1,16 @@
 chrome.runtime.onInstalled.addListener(() => {
   (async () => {
-    // 初始化本地存儲中的 extensionWorkOrNot 狀態
     try {
-      await chrome.storage.local.set({ extensionWorkOrNot: false }, () => {
-        //console.log('ExtensionWorkOrNot state initialized to false.');
-      });
+      let data = await chrome.storage.local.get('extensionWorkOrNot');
+      if (data.extensionWorkOrNot === undefined) {
+        await chrome.storage.local.set({ extensionWorkOrNot: false });
+      }
     } catch (error) {
-      console.log('Error initializing ExtensionWorkOrNot state:', error);
+      console.log('Error checking ExtensionWorkOrNot state:', error);
     }
   })();
 });
+
 
 chrome.action.onClicked.addListener((tab) => {
   (async () => {
@@ -44,6 +45,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           sendResponse({ success: true });
         });
       }
+      if (request.action === 'playPlaylist') {
+        const tabId = sender.tab.id; // 獲取發送消息的 tab ID
+        chrome.tabs.sendMessage(tabId, { action: 'playPlaylist', startIndex: request.startIndex, endIndex: request.endIndex, tabId: tabId }, (response) => {
+          if (response.success) {
+            //console.log('Playlist started successfully');
+          } else {
+            console.log('Failed to start playlist:', response.message);
+          }
+        });
+      }
+      if (request.action === "getTabId") {
+        sendResponse(sender.tab.id); // 傳回目前的 tabId
+      }
     } catch (error) {
       console.log('Error handling runtime message:', error);
     }
@@ -72,25 +86,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   return true;
 });
 
-chrome.runtime.onMessage.addListener(async (request, sender, sendResponse) => {
-  (async () => {
-    try {
-      if (request.action === 'playPlaylist') {
-        const tabId = sender.tab.id; // 獲取發送消息的 tab ID
-        chrome.tabs.sendMessage(tabId, { action: 'playPlaylist', startIndex: request.startIndex, endIndex: request.endIndex, tabId: tabId }, (response) => {
-          if (response.success) {
-            //console.log('Playlist started successfully');
-          } else {
-            console.log('Failed to start playlist:', response.message);
-          }
-        });
-      }
-    } catch (error) {
-      console.log('Error handling runtime message:', error);
-    }
-  })();
-  return true; // 保持非同步訊息通道開啟
-});
 
 chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
   (async () => {
