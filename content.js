@@ -225,7 +225,7 @@
         playlistContainer.addEventListener('click', handleClick);
 
         // 3) 監聽「新增到播放列表」按鈕點擊
-        addToPlaylistButton.addEventListener('click', await addToPlaylist);
+        addToPlaylistButton.addEventListener('click', addToPlaylist);
 
         // 4) 播放按鈕點擊事件
         playButton.addEventListener('click', async () => {
@@ -355,7 +355,7 @@
     /**
      * 新增一個播放列表項目
      */
-    async function addToPlaylist() {
+    function addToPlaylist() {
         const newItem = createPlaylistItem();
         playlistState.playlistItems.push(newItem);
         ul.appendChild(newItem);
