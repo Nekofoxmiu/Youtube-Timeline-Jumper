@@ -188,20 +188,19 @@
             return;
         }
 
-        await chrome.storage.local.get([videoId], async (result) => {
-            const savedState = result[videoId];
-            if (savedState && Array.isArray(savedState)) {
-                savedState.forEach(async itemData => {
-                    const startTime = TimeSlot.fromObject(itemData.start);
-                    const endTime   = TimeSlot.fromObject(itemData.end);
-                    const newItem   = createPlaylistItem(startTime, endTime, itemData.title);
-                    playlistState.playlistItems.push(newItem);
-                    ul.appendChild(newItem);
-                });
-                playlistContainer.appendChild(ul);
-                playlistState.state = savedState;
-            }
-        });
+        const result = await chrome.storage.local.get(videoId);
+        const savedState = result[videoId];
+        if (Array.isArray(savedState)) {
+            savedState.forEach(itemData => {
+                const startTime = TimeSlot.fromObject(itemData.start);
+                const endTime   = TimeSlot.fromObject(itemData.end);
+                const newItem   = createPlaylistItem(startTime, endTime, itemData.title);
+                playlistState.playlistItems.push(newItem);
+                ul.appendChild(newItem);
+            });
+            playlistContainer.appendChild(ul);
+            playlistState.state = savedState;
+        }
 
         // 將 import/export/編輯 按鈕加入到 importexportContainer
         importexportContainer.appendChild(importPlaylistButton);
