@@ -115,27 +115,30 @@
 
     // === [ 六、主執行流程：appstart / main / initializePlaylist ] ===================
     /**
-     * 如果 YouTube 的側邊欄已加載，插入本插件 UI；否則等待一段時間後再嘗試。
+     * 如果 YouTube 的側邊欄已加載，插入本插件 UI；用 MutationObserver偵測。
      */
     async function appstart() {
-        let sidebarElm = document.querySelector(sidebarQuery);
+        // 先嘗試立即取得側邊欄
+        const sidebarElm = document.querySelector(sidebarQuery);
         if (sidebarElm) {
             main(sidebarElm);
-        } else {
-            // 不斷檢查直到找到側邊欄或超過指定次數
-            let loopCount = 0;
-            const loop = setInterval(() => {
-                loopCount++;
-                sidebarElm = document.querySelector(sidebarQuery);
-                if (sidebarElm) {
-                    clearInterval(loop);
-                    main(sidebarElm);
-                } else if (loopCount > 100) {
-                    clearInterval(loop);
-                }
-            }, 100);
+            return;
         }
+        // 如果還沒載入，就觀察 body 底下所有子孫節點 (subtree)
+        const observer = new MutationObserver((mutations, obs) => {
+            const elm = document.querySelector(sidebarQuery);
+            if (elm) {
+                // 偵測到側邊欄後，停止觀察並呼叫 main
+                obs.disconnect();
+                main(elm);
+            }
+        });
+        observer.observe(document.body, {
+            childList: true,    // 監聽新增／移除子節點
+            subtree: true       // 包含所有子孫節點
+        });
     }
+
 
     /**
      * 主程式入口：檢查是否已經有此容器，若沒有就進行初始化。
@@ -557,29 +560,70 @@
         createImportPopupTextBox('Import Playlist', async (text, additionalSeconds) => {
             if (!text) return;
 
+            // 檢查 additionalSeconds
             if (isNaN(additionalSeconds) || additionalSeconds <= 0) {
                 additionalSeconds = 0;
             }
 
             const lines = text.split('\n');
-            // 格式範例： "1:00 2:00 Title"
-            const regex = /(\d{1,3}:\d{2}(?::\d{2})?)\s*(?:\D*\s*(\d{1,3}:\d{2}(?::\d{2})?))?\s*(.*)/;
 
-            for (const line of lines) {
-                const match = line.match(regex);
-                if (match) {
-                    const [, startTime, endTime, title] = match;
-                    const start = TimeSlot.fromString(startTime);
-                    const end   = endTime ? TimeSlot.fromString(endTime) : TimeSlot.fromTotalseconds(start.getTotalseconds() + additionalSeconds);
-                    const newItem = createPlaylistItem(start, end, title);
-                    playlistState.playlistItems.push(newItem);
-                    ul.appendChild(newItem);
+            // === 小工具函式 ===
+            const isTimeToken = tok => {
+                // 允許 1:23 或 1:23:45；全部都是數字與冒號
+                const parts = tok.split(':');
+                if (parts.length < 2 || parts.length > 3) return false;
+                return parts.every(p => /^\d+$/.test(p));
+            };
+
+            const timeTokenToSeconds = tok => {
+                const nums = tok.split(':').map(Number); // [m,s] 或 [h,m,s]
+                if (nums.length === 2) {               // mm:ss  or m:ss
+                    return nums[0] * 60 + nums[1];
+                } else {                               // h:mm:ss
+                    return nums[0] * 3600 + nums[1] * 60 + nums[2];
                 }
+            };
+            // === 迴圈解析 ===
+            for (const rawLine of lines) {
+                const line = rawLine.trim();
+                if (!line) continue;
+
+                // 以空白分割並去掉連續空白
+                const tokens = line.split(/\s+/);
+                if (tokens.length === 0) continue;
+
+                // 解析起始時間
+                const first = tokens[0];
+                if (!isTimeToken(first)) continue;             // 無合法時間碼 → 跳過
+
+                const startSec = timeTokenToSeconds(first);
+                let endSec   = null;
+                let titleIdx = 1;
+
+                // 檢查第二個 token 是否也是時間碼
+                if (tokens.length > 1 && isTimeToken(tokens[1])) {
+                    endSec   = timeTokenToSeconds(tokens[1]);
+                    titleIdx = 2;
+                } else {
+                    endSec = startSec + additionalSeconds;
+                }
+
+                const title = tokens.slice(titleIdx).join(' ').trim();
+
+                // 建立 TimeSlot 與 playlist item
+                const start = TimeSlot.fromTotalseconds(startSec);
+                const end   = TimeSlot.fromTotalseconds(endSec);
+                const newItem = createPlaylistItem(start, end, title);
+
+                playlistState.playlistItems.push(newItem);
+                ul.appendChild(newItem);
             }
+
             playlistContainer.appendChild(ul);
             playlistState.state = getandUpdatePlaylistState(playlistState);
         });
     }
+
 
     /**
      * 使用者可直接編輯整段播放列表文本，再一次性套用
