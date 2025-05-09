@@ -559,7 +559,6 @@
 
             if (isNaN(additionalSeconds) || additionalSeconds <= 0) {
                 additionalSeconds = 0;
-                return;
             }
 
             const lines = text.split('\n');
