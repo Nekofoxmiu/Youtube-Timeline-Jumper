@@ -84,15 +84,20 @@ Contains data classes to manage playlist items and states.
 ### mouseEventHandler.js
 Handles drag-and-drop operations for playlist items.
 - **Classes**:
-  - `MouseEventHandler`: Manages the drag-and-drop events and updates the playlist state.
+  - `MouseEventHandler`: Manages the drag-and-drop events and updates the playlist state. Accepts a `PlaylistStateManager` to persist changes.
 
 ### playlistTool.js
 Provides utility functions and classes for managing playlists and time slots.
 - **Classes**:
-  - `PlaylistTimeManager`: Manages playlist time slots and ensures start times do not exceed end times.
+  - `PlaylistTimeManager`: Manages playlist time slots and ensures start times do not exceed end times. Requires a `PlaylistStateManager` to sync state.
 - **Functions**:
   - `equalsCheck(a, b)`: Checks if two objects are equal.
   - `getandUpdatePlaylistState(sharedState)`: Retrieves and updates the current playlist state.
+
+### stateManager.js
+Manages persistent playlist state separately from the DOM.
+- **Classes**:
+  - `PlaylistStateManager`: Loads and saves playlist data for a specific video.
 
 ### ui.js
 Creates and manages UI components for the extension.
