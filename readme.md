@@ -92,6 +92,7 @@ Provides utility functions and classes for managing playlists and time slots.
   - `PlaylistTimeManager`: Manages playlist time slots and ensures start times do not exceed end times. Requires a `PlaylistStateManager` to sync state.
 - **Functions**:
   - `equalsCheck(a, b)`: Checks if two objects are equal.
+  - `extractPlaylistState(items)`: Converts playlist DOM elements to state.
   - `getandUpdatePlaylistState(sharedState)`: Retrieves and updates the current playlist state.
 
 ### stateManager.js
