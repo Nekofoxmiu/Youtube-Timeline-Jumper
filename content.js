@@ -364,15 +364,14 @@
     /**
      * 新增一個播放列表項目
      */
-    function addToPlaylist() {
+    async function addToPlaylist() {
         const newItem = createPlaylistItem();
         playlistState.playlistItems.push(newItem);
         ul.appendChild(newItem);
         playlistContainer.appendChild(ul);
         playlistState.state = getandUpdatePlaylistState(playlistState);
         if (stateManager) {
-            stateManager.setState(playlistState.state);
-            stateManager.save();
+            await stateManager.updateState(playlistState.state);
         }
     }
 
@@ -478,7 +477,7 @@
     function createSetStartTimeButton() {
         const button = document.createElement('button');
         button.classList.add('ytj-set-start-time');
-        button.addEventListener('click', (event) => {
+        button.addEventListener('click', async (event) => {
             const listItem      = event.target.closest('.ytj-playlist-item');
             const startTimeText = listItem.querySelector('.ytj-playlist-item-text-start');
             const originalTime  = Number(startTimeText.getAttribute('timeat'));
@@ -492,8 +491,7 @@
                 playlistTimeManager.updateTimeText(startTimeText, originalTime);
                 playlistState.state = getandUpdatePlaylistState(playlistState);
                 if (stateManager) {
-                    stateManager.setState(playlistState.state);
-                    stateManager.save();
+                    await stateManager.updateState(playlistState.state);
                 }
             }
         });
@@ -506,7 +504,7 @@
     function createSetEndTimeButton() {
         const button = document.createElement('button');
         button.classList.add('ytj-set-end-time');
-        button.addEventListener('click', (event) => {
+        button.addEventListener('click', async (event) => {
             try {
                 const listItem     = event.target.closest('.ytj-playlist-item');
                 const endTimeText  = listItem.querySelector('.ytj-playlist-item-text-end');
@@ -519,8 +517,7 @@
                     playlistTimeManager.updateTimeText(endTimeText, originalTime);
                     playlistState.state = getandUpdatePlaylistState(playlistState);
                     if (stateManager) {
-                        stateManager.setState(playlistState.state);
-                        stateManager.save();
+                        await stateManager.updateState(playlistState.state);
                     }
                 }
             } catch (error) {
@@ -536,13 +533,12 @@
     function createDeleteButton(listItem) {
         const button = document.createElement('button');
         button.classList.add('ytj-delete-item');
-        button.addEventListener('click', () => {
+        button.addEventListener('click', async () => {
             try {
                 playlistTimeManager.deletePlaylistItem(listItem);
                 playlistState.state = getandUpdatePlaylistState(playlistState);
                 if (stateManager) {
-                    stateManager.setState(playlistState.state);
-                    stateManager.save();
+                    await stateManager.updateState(playlistState.state);
                 }
             } catch (error) {
                 console.debug('Error occurred while trying to delete playlist item:', error);
@@ -646,8 +642,7 @@
             playlistContainer.appendChild(ul);
             playlistState.state = getandUpdatePlaylistState(playlistState);
             if (stateManager) {
-                stateManager.setState(playlistState.state);
-                stateManager.save();
+                await stateManager.updateState(playlistState.state);
             }
         });
     }
@@ -672,8 +667,7 @@
             playlistTimeManager.deleteAllPlaylistItems();
             playlistState.state = getandUpdatePlaylistState(playlistState);
             if (stateManager) {
-                stateManager.setState(playlistState.state);
-                stateManager.save();
+                await stateManager.updateState(playlistState.state);
             }
 
             if (!text) return;
@@ -695,8 +689,7 @@
             playlistContainer.appendChild(ul);
             playlistState.state = getandUpdatePlaylistState(playlistState);
             if (stateManager) {
-                stateManager.setState(playlistState.state);
-                stateManager.save();
+                await stateManager.updateState(playlistState.state);
             }
         }).querySelector('textarea').value = originText;
     }

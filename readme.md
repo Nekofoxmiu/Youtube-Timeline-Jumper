@@ -98,6 +98,7 @@ Provides utility functions and classes for managing playlists and time slots.
 Manages persistent playlist state separately from the DOM.
 - **Classes**:
   - `PlaylistStateManager`: Loads and saves playlist data for a specific video.
+    - `updateState(state)`: Sets the state and immediately persists it.
 
 ### ui.js
 Creates and manages UI components for the extension.
