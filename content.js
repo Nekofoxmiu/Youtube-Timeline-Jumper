@@ -16,6 +16,7 @@
     let runtimeHandlerModule;
     let getVideoInfoModule;
     let editModule;
+    let stateManagerModule;
 
     try {
         dataClassModule            = await import('./lib/dataclass.js');
@@ -26,6 +27,7 @@
         runtimeHandlerModule       = await import('./lib/runtimeHandler.js');
         editModule                 = await import('./lib/editModule.js');
         getVideoInfoModule         = await import('./lib/getVideoInfo.js');
+        stateManagerModule         = await import('./lib/stateManager.js');
     } catch (error) {
         console.error('Module loading failed:', error);
     }
@@ -53,6 +55,7 @@
     const { handleRuntimeMessage }                          = runtimeHandlerModule;
     const { getCurrentVideoId, getCurrentVideoTime }        = getVideoInfoModule;
     const { enableEditMode }                                = editModule;
+    const { PlaylistStateManager }                          = stateManagerModule;
 
     // === [ 三、全域變數與常數 ] ======================================================
     // 共用 DOM 元素或容器
@@ -72,6 +75,7 @@
     const styleModificationPromises = [];
     let mouseEventHandler;
     let playlistTimeManager;
+    let stateManager;
 
     // 常數（選擇器等）
     const sidebarQuery              = '#related.style-scope.ytd-watch-flexy';
@@ -177,9 +181,12 @@
         toggleSwitch          = createToggleSwitch();
         ul                    = createPlaylistItemsContainer();
 
+        // 初始化狀態管理器
+        stateManager = new PlaylistStateManager(getCurrentVideoId());
+
         // 產生事件處理器
-        mouseEventHandler     = new MouseEventHandler(ul, playlistContainer, playlistState);
-        playlistTimeManager   = new PlaylistTimeManager(playlistContainer, playlistState);
+        mouseEventHandler     = new MouseEventHandler(ul, playlistContainer, playlistState, stateManager);
+        playlistTimeManager   = new PlaylistTimeManager(playlistContainer, playlistState, stateManager);
 
         // 從 local storage 讀取該影片所對應的播放列表資料
         const videoId = getCurrentVideoId();
@@ -188,8 +195,7 @@
             return;
         }
 
-        const result = await chrome.storage.local.get(videoId);
-        const savedState = result[videoId];
+        const savedState = await stateManager.load();
         if (Array.isArray(savedState)) {
             savedState.forEach(itemData => {
                 const startTime = TimeSlot.fromObject(itemData.start);
@@ -345,9 +351,12 @@
         exportPlaylistButton  = createExportPlaylistButton(exportPlaylist);
         ul                    = createPlaylistItemsContainer();
 
+        // 重新初始化狀態管理器
+        stateManager         = new PlaylistStateManager(getCurrentVideoId());
+
         // 重新創建事件處理程序
-        mouseEventHandler    = new MouseEventHandler(ul, playlistContainer, playlistState);
-        playlistTimeManager  = new PlaylistTimeManager(playlistContainer, playlistState);
+        mouseEventHandler    = new MouseEventHandler(ul, playlistContainer, playlistState, stateManager);
+        playlistTimeManager  = new PlaylistTimeManager(playlistContainer, playlistState, stateManager);
     }
 
     // === [ 八、播放列表的核心功能函式 ] ==============================================
@@ -355,12 +364,15 @@
     /**
      * 新增一個播放列表項目
      */
-    function addToPlaylist() {
+    async function addToPlaylist() {
         const newItem = createPlaylistItem();
         playlistState.playlistItems.push(newItem);
         ul.appendChild(newItem);
         playlistContainer.appendChild(ul);
         playlistState.state = getandUpdatePlaylistState(playlistState);
+        if (stateManager) {
+            await stateManager.updateState(playlistState.state);
+        }
     }
 
     /**
@@ -465,7 +477,7 @@
     function createSetStartTimeButton() {
         const button = document.createElement('button');
         button.classList.add('ytj-set-start-time');
-        button.addEventListener('click', (event) => {
+        button.addEventListener('click', async (event) => {
             const listItem      = event.target.closest('.ytj-playlist-item');
             const startTimeText = listItem.querySelector('.ytj-playlist-item-text-start');
             const originalTime  = Number(startTimeText.getAttribute('timeat'));
@@ -478,6 +490,9 @@
                 // 更新列表內記錄
                 playlistTimeManager.updateTimeText(startTimeText, originalTime);
                 playlistState.state = getandUpdatePlaylistState(playlistState);
+                if (stateManager) {
+                    await stateManager.updateState(playlistState.state);
+                }
             }
         });
         return button;
@@ -489,7 +504,7 @@
     function createSetEndTimeButton() {
         const button = document.createElement('button');
         button.classList.add('ytj-set-end-time');
-        button.addEventListener('click', (event) => {
+        button.addEventListener('click', async (event) => {
             try {
                 const listItem     = event.target.closest('.ytj-playlist-item');
                 const endTimeText  = listItem.querySelector('.ytj-playlist-item-text-end');
@@ -501,6 +516,9 @@
 
                     playlistTimeManager.updateTimeText(endTimeText, originalTime);
                     playlistState.state = getandUpdatePlaylistState(playlistState);
+                    if (stateManager) {
+                        await stateManager.updateState(playlistState.state);
+                    }
                 }
             } catch (error) {
                 console.debug('Error occurred while setting end time:', error);
@@ -515,10 +533,13 @@
     function createDeleteButton(listItem) {
         const button = document.createElement('button');
         button.classList.add('ytj-delete-item');
-        button.addEventListener('click', () => {
+        button.addEventListener('click', async () => {
             try {
                 playlistTimeManager.deletePlaylistItem(listItem);
                 playlistState.state = getandUpdatePlaylistState(playlistState);
+                if (stateManager) {
+                    await stateManager.updateState(playlistState.state);
+                }
             } catch (error) {
                 console.debug('Error occurred while trying to delete playlist item:', error);
             }
@@ -620,6 +641,9 @@
 
             playlistContainer.appendChild(ul);
             playlistState.state = getandUpdatePlaylistState(playlistState);
+            if (stateManager) {
+                await stateManager.updateState(playlistState.state);
+            }
         });
     }
 
@@ -642,6 +666,9 @@
             // 先刪除所有項目再重新匯入
             playlistTimeManager.deleteAllPlaylistItems();
             playlistState.state = getandUpdatePlaylistState(playlistState);
+            if (stateManager) {
+                await stateManager.updateState(playlistState.state);
+            }
 
             if (!text) return;
 
@@ -661,6 +688,9 @@
             }
             playlistContainer.appendChild(ul);
             playlistState.state = getandUpdatePlaylistState(playlistState);
+            if (stateManager) {
+                await stateManager.updateState(playlistState.state);
+            }
         }).querySelector('textarea').value = originText;
     }
 
