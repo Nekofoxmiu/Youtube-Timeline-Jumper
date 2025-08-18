@@ -1,2 +1,6 @@
 *.zip
 *.png
+.bmad-core
+web-bundles
+.github
+.vscode
