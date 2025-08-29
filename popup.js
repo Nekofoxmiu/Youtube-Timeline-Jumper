@@ -307,6 +307,28 @@ document.addEventListener('DOMContentLoaded', async () => {
         reader.onload = async (e) => {
             try {
                 const importData = JSON.parse(e.target.result);
+
+                // 先取得目前的資料以便合併
+                const currentData = await chrome.storage.local.get(null);
+                for (const key in importData) {
+                    if (key.startsWith('playlist_') && !key.startsWith('playlist_meta_')) {
+                        const existing = Array.isArray(currentData[key]) ? currentData[key] : [];
+                        const incoming = Array.isArray(importData[key]) ? importData[key] : [];
+                        importData[key] = existing.concat(incoming);
+                    } else if (key.startsWith('playlist_meta_')) {
+                        const existingMeta = currentData[key] || {};
+                        const incomingMeta = importData[key] || {};
+                        const lastModified = [existingMeta.lastModified, incomingMeta.lastModified]
+                            .filter(Boolean)
+                            .sort()
+                            .slice(-1)[0] || incomingMeta.lastModified || existingMeta.lastModified;
+                        const uploadTime = [existingMeta.uploadTime, incomingMeta.uploadTime]
+                            .filter(Boolean)
+                            .sort()[0] || incomingMeta.uploadTime || existingMeta.uploadTime;
+                        importData[key] = { ...existingMeta, ...incomingMeta, lastModified, uploadTime };
+                    }
+                }
+
                 await chrome.storage.local.set(importData);
                 refreshView(); // 重新載入顯示
                 showToast(chrome.i18n.getMessage('import_success'));

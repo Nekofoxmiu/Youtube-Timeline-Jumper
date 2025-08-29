@@ -17,6 +17,7 @@ This project is a Chrome extension designed to enhance YouTube's playlist manage
 ## Features
 - **Dark Theme Detection**: Automatically apply the correct CSS theme based on YouTube's dark or light theme.
 - **Playlist Management**: Add, edit, and delete items in your custom playlists.
+- **Playlist Import**: Importing playlists now appends timelines to existing ones instead of overwriting them.
 - **Video Info Retrieval**: Get the current video ID and playtime.
 - **State Management**: Synchronize and update the playlist state with the background script.
 - **User Interaction**: Enable editable text fields and handle drag-and-drop for playlist items.
