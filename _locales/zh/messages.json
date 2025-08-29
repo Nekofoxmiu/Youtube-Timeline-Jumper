@@ -1,74 +1,74 @@
 {
   "extensionName": {
-    "message": "YouTube Auto Jump",
-    "description": "Extension name"
+    "message": "YouTube 自動跳轉",
+    "description": "擴充功能名稱"
   },
   "toggle_on": {
-    "message": "Extension enabled",
-    "description": "Toggle ON status"
+    "message": "擴充功能已啟用",
+    "description": "開關開啟狀態"
   },
   "toggle_off": {
-    "message": "Extension disabled",
-    "description": "Toggle OFF status"
+    "message": "擴充功能已停用",
+    "description": "開關關閉狀態"
   },
   "export_all": {
-    "message": "Export playlists",
-    "description": "Export button"
+    "message": "匯出所有清單",
+    "description": "匯出按鈕"
   },
   "import_playlists": {
-    "message": "Import playlists",
-    "description": "Import button"
+    "message": "匯入播放清單",
+    "description": "匯入按鈕"
   },
   "clear_empty": {
-    "message": "Clear empty playlists",
-    "description": "Clear empty button"
+    "message": "清除空播放清單",
+    "description": "清除空紀錄按鈕"
   },
   "video_id_prefix": {
-    "message": "Video ID:",
-    "description": "Prefix for video id when title unavailable"
+    "message": "影片 ID:",
+    "description": "當標題不存在時的前綴"
   },
   "timepoints_suffix": {
-    "message": "timepoints",
-    "description": "Suffix after number of timepoints"
+    "message": "個時間點",
+    "description": "時間點數量後綴"
   },
   "search_placeholder": {
-    "message": "Search...",
-    "description": "Default text in search box"
+    "message": "搜尋...",
+    "description": "搜尋欄位的預設文字"
   },
   "sort_lastModified_desc": {
-    "message": "Last modified ↓",
-    "description": "Sort option: last modified (newest first)"
+    "message": "最後修改時間 ↓",
+    "description": "排序選項：最後修改時間(新到舊)"
   },
   "sort_lastModified_asc": {
-    "message": "Last modified ↑",
-    "description": "Sort option: last modified (oldest first)"
+    "message": "最後修改時間 ↑",
+    "description": "排序選項：最後修改時間(舊到新)"
   },
   "sort_uploadTime_desc": {
-    "message": "Upload time ↓",
-    "description": "Sort option: upload time (newest first)"
+    "message": "上傳時間 ↓",
+    "description": "排序選項：上傳時間(新到舊)"
   },
   "sort_uploadTime_asc": {
-    "message": "Upload time ↑",
-    "description": "Sort option: upload time (oldest first)"
+    "message": "上傳時間 ↑",
+    "description": "排序選項：上傳時間(舊到新)"
   },
   "no_empty_playlists": {
-    "message": "No empty playlists to remove.",
-    "description": "Toast when no empty playlists"
+    "message": "沒有可清除的空播放清單。",
+    "description": "無空清單時的通知"
   },
   "deleted_empty_playlists": {
-    "message": "Deleted $1 empty playlists.",
-    "description": "Toast after deletion (uses $1 for count)"
+    "message": "已刪除 $1 個空播放清單",
+    "description": "刪除完成的通知（$1 代表數量）"
   },
   "clear_failed": {
-    "message": "Clear failed — check console for details.",
-    "description": "Toast when clear failed"
+    "message": "清除失敗，請查看 console 取得更多資訊。",
+    "description": "清除失敗的通知"
   },
   "import_success": {
-    "message": "Playlists imported successfully!",
-    "description": "Toast on successful import"
+    "message": "播放清單已成功匯入！",
+    "description": "匯入成功通知"
   },
   "import_failed": {
-    "message": "Import failed — please check file format.",
-    "description": "Toast when import fails"
+    "message": "匯入失敗，請確認檔案格式正確。",
+    "description": "匯入失敗通知"
   }
 }
