@@ -51,7 +51,7 @@
     } = uiModule;
     const { applyTheme }                                    = themeModule;
     const { handleRuntimeMessage }                          = runtimeHandlerModule;
-    const { getCurrentVideoId, getCurrentVideoTime }        = getVideoInfoModule;
+    const { getCurrentVideoId, getCurrentVideoTime, getCurrentVideoUploadDate }        = getVideoInfoModule;
     const { enableEditMode }                                = editModule;
 
     // === [ 三、全域變數與常數 ] ======================================================
@@ -77,6 +77,39 @@
     const sidebarQuery              = '#related.style-scope.ytd-watch-flexy';
     const appPlayListContainerQuery = '#ytj-playlist-container';
 
+    /**
+     * 檢查並初始化影片相關的時間資訊。
+     * 若無最後修改時間或影片上傳時間，則自動寫入。
+     */
+    async function ensureVideoTimes() {
+        const videoId = getCurrentVideoId();
+        if (!videoId) {
+            return;
+        }
+
+        const key = `metadata_${videoId}`;
+        const result = await chrome.storage.local.get(key);
+        const metadata = result[key] || {};
+        let needUpdate = false;
+
+        if (!metadata.uploadDate) {
+            const uploadDate = getCurrentVideoUploadDate();
+            if (uploadDate) {
+                metadata.uploadDate = uploadDate;
+                needUpdate = true;
+            }
+        }
+
+        if (!metadata.lastModified) {
+            metadata.lastModified = new Date().toISOString();
+            needUpdate = true;
+        }
+
+        if (needUpdate) {
+            await chrome.storage.local.set({ [key]: metadata });
+        }
+    }
+
     // === [ 四、Chrome 訊息監聽與狀態控制 ] ============================================
     // 監聽來自 background.js 的訊息
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -97,6 +130,9 @@
     const response = await chrome.runtime.sendMessage({ action: 'getExtensionWorkOrNot' });
     //console.info('getExtensionWorkOrNot:', response);
     const extensionWorkOrNot = response.state || false;
+
+    await ensureVideoTimes();
+
     if (extensionWorkOrNot) {
         appstart();
     }
