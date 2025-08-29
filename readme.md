@@ -53,7 +53,7 @@ Handles runtime messages and manages the state of the extension (on/off) and pla
 ### sendPlaylistStateToBackground.js
 Sends the current playlist state to the background script for persistence.
 - **Functions**:
-  - `sendPlaylistStateToBackground(nowPlaylistState)`: Sends the current playlist state to `background.js`.
+  - `sendPlaylistStateToBackground(nowPlaylistState, meta)`: Sends the current playlist state to `background.js` with optional metadata.
 
 ### getVideoInfo.js
 Provides functions to retrieve information about the current YouTube video.
