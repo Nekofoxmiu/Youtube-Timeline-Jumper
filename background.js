@@ -78,15 +78,111 @@ async function runMigrationsIfNeeded() {
   await chrome.storage.local.set({ version: CURRENT_VERSION });
 }
 
+// 嘗試從 watch page 抓取 uploadDate 的輔助函式
+async function fetchUploadTimeFromWatchPage(videoId) {
+  try {
+    const url = `https://www.youtube.com/watch?v=${videoId}`;
+    const resp = await fetch(url, { credentials: 'omit' });
+    if (!resp || !resp.ok) return null;
+    const text = await resp.text();
+
+    const metaMatch = text.match(/<meta[^>]+itemprop=(?:"|')datePublished(?:"|')[^>]*content=(?:"|')([^"']+)(?:"|')/i);
+    if (metaMatch && metaMatch[1]) {
+      const d = new Date(metaMatch[1]);
+      if (!Number.isNaN(d.getTime())) return d.toISOString();
+    }
+
+    const jsonMatch =
+      text.match(/"uploadDate"\s*:\s*"([0-9T:\-\.Z ]+)"/i) ||
+      text.match(/"datePublished"\s*:\s*"([0-9T:\-\.Z ]+)"/i);
+    if (jsonMatch && jsonMatch[1]) {
+      const d2 = new Date(jsonMatch[1]);
+      if (!Number.isNaN(d2.getTime())) return d2.toISOString();
+    }
+  } catch (err) {
+    console.debug('fetchUploadTimeFromWatchPage failed for', videoId, err);
+  }
+  return null;
+}
+
+// 確保所有播放清單擁有 meta（lastModified / uploadTime）
+async function ensureAllPlaylistMeta() {
+  const all = await chrome.storage.local.get(null);
+  const now = new Date().toISOString();
+
+  const playlists = Object.keys(all)
+    .filter(k => k.startsWith('playlist_') && !k.startsWith('playlist_meta_'))
+    .map(k => ({ videoId: k.replace('playlist_', ''), items: Array.isArray(all[k]) ? all[k] : [] }));
+
+  for (const p of playlists) {
+    const metaKey = `playlist_meta_${p.videoId}`;
+    const meta = all[metaKey] || {};
+    let { lastModified, uploadTime } = meta;
+    let changed = false;
+
+    if (!lastModified) {
+      const lmList = p.items.map(it => it && it.lastModified).filter(Boolean).sort();
+      lastModified = lmList.length ? lmList.slice(-1)[0] : now;
+      changed = true;
+    }
+    if (!uploadTime) {
+      // 1) try asking any open YouTube watch tab
+      try {
+        const tabs = await chrome.tabs.query({ url: '*://*.youtube.com/watch*' });
+        for (const t of tabs) {
+          try {
+            const resp = await chrome.tabs.sendMessage(t.id, { action: 'getUploadTime', videoId: p.videoId });
+            if (resp && resp.uploadTime) {
+              uploadTime = resp.uploadTime;
+              break;
+            }
+          } catch (e) {
+            // ignore - content script may not exist in tab
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+      // 2) fallback to fetching watch page directly
+      if (!uploadTime) {
+        uploadTime = await fetchUploadTimeFromWatchPage(p.videoId);
+      }
+      if (!uploadTime) uploadTime = now;
+      changed = true;
+    }
+
+    if (changed) {
+      await chrome.storage.local.set({ [metaKey]: { ...meta, lastModified, uploadTime } });
+    }
+  }
+}
+
+async function checkMetaOnStartup() {
+  try {
+    await ensureAllPlaylistMeta();
+  } catch (err) {
+    console.error('ensureAllPlaylistMeta failed:', err);
+  }
+}
+
 // ── onInstalled：安裝/更新時處理預設值與遷移
 chrome.runtime.onInstalled.addListener(async (details) => {
   try {
     await ensureDefaultState();
     await runMigrationsIfNeeded();
+    await checkMetaOnStartup();
   } catch (err) {
     console.error('Error during installation/update:', err);
   }
 });
+
+// 其他情境下（如瀏覽器啟動）也要檢查 meta
+chrome.runtime.onStartup.addListener(() => {
+  checkMetaOnStartup();
+});
+
+// service worker 啟動時先嘗試檢查一次
+checkMetaOnStartup();
 
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {

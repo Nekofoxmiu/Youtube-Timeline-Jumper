@@ -183,33 +183,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const sortSelect = document.getElementById('sortSelect');
     sortSelect.value = 'lastModified_desc';
 
-    // 嘗試從 watch page 抓 uploadDate 的輔助函式
-    async function fetchUploadTimeFromWatchPage(videoId) {
-        try {
-            const url = `https://www.youtube.com/watch?v=${videoId}`;
-            const resp = await fetch(url, { credentials: 'omit' });
-            if (!resp || !resp.ok) return null;
-            const text = await resp.text();
-
-            const metaMatch = text.match(/<meta[^>]+itemprop=(?:\"|')datePublished(?:\"|')[^>]*content=(?:\"|')([^\"']+)(?:\"|')/i);
-            if (metaMatch && metaMatch[1]) {
-                const d = new Date(metaMatch[1]);
-                if (!Number.isNaN(d.getTime())) return d.toISOString();
-            }
-
-            const jsonMatch = text.match(/"uploadDate"\s*:\s*"([0-9T:\-\.Z ]+)"/i) || text.match(/"datePublished"\s*:\s*"([0-9T:\-\.Z ]+)"/i);
-            if (jsonMatch && jsonMatch[1]) {
-                const d2 = new Date(jsonMatch[1]);
-                if (!Number.isNaN(d2.getTime())) return d2.toISOString();
-            }
-
-            return null;
-        } catch (err) {
-            console.debug('fetchUploadTimeFromWatchPage failed for', videoId, err);
-            return null;
-        }
-    }
-
     async function refreshView() {
         const all = await chrome.storage.local.get(null);
         let playlists = Object.keys(all)
@@ -219,65 +192,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         // compute playlist-level metadata by reading separate meta store and preserve already-rendered titles
         const metaKeys = playlists.map(p => `playlist_meta_${p.videoId}`);
         const metaResults = await chrome.storage.local.get(metaKeys);
-        const now = new Date().toISOString();
         playlists = playlists.map(p => {
             const existingTitleEl = document.querySelector(`[data-vid="${p.videoId}"] .playlist-title`);
             const existingTitle = existingTitleEl ? existingTitleEl.textContent : null;
             const meta = metaResults[`playlist_meta_${p.videoId}`] || {};
-            const lastModified = meta.lastModified || now;
-            const uploadTime = meta.uploadTime || null;
+            const lastModified = meta.lastModified || '';
+            const uploadTime = meta.uploadTime || '';
             return { ...p, title: existingTitle || null, lastModified, uploadTime };
         });
 
         const mode = sortSelect.value;
-
-        // If sorting by uploadTime, ensure missing uploadTime values are fetched and persisted to meta store
-        if (mode === 'uploadTime_desc' || mode === 'uploadTime_asc') {
-            await Promise.all(playlists.map(async (p) => {
-                try {
-                        if (p.uploadTime) return; // already have meta
-                        // 1) try asking an open tab's content script for uploadTime (avoids CORS)
-                        try {
-                            const tabs = await chrome.tabs.query({ url: '*://*.youtube.com/watch*' });
-                            let got = null;
-                            for (const t of tabs) {
-                                try {
-                                    const resp = await chrome.tabs.sendMessage(t.id, { action: 'getUploadTime', videoId: p.videoId });
-                                    if (resp && resp.uploadTime) { got = resp.uploadTime; break; }
-                                } catch (e) {
-                                    // tab might not have the content script injected or not a watch page; ignore
-                                }
-                            }
-                            if (got) {
-                                const metaKey = `playlist_meta_${p.videoId}`;
-                                const metaObj = { ...(metaResults[metaKey] || {}), uploadTime: got };
-                                await chrome.storage.local.set({ [metaKey]: metaObj });
-                                p.uploadTime = got;
-                                return;
-                            }
-                        } catch (e) {
-                            // ignore and fallback
-                        }
-
-                        // 2) fallback: fetch watch page HTML (may be blocked by CORS)
-                        const fetched = await fetchUploadTimeFromWatchPage(p.videoId);
-                        const metaKey = `playlist_meta_${p.videoId}`;
-                        if (fetched) {
-                            const metaObj = { ...(metaResults[metaKey] || {}), uploadTime: fetched };
-                            await chrome.storage.local.set({ [metaKey]: metaObj });
-                            p.uploadTime = fetched;
-                        } else {
-                            const fallback = new Date().toISOString();
-                            const metaObj = { ...(metaResults[metaKey] || {}), uploadTime: fallback };
-                            await chrome.storage.local.set({ [metaKey]: metaObj });
-                            p.uploadTime = fallback;
-                        }
-                } catch (err) {
-                    console.debug('Failed to fetch/persist uploadTime for', p.videoId, err);
-                    p.uploadTime = new Date().toISOString();
-                }
-            }));
-        }
 
         // For any missing titles, fetch in parallel (non-blocking for each)
         await Promise.all(playlists.map(async (p) => {
