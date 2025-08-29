@@ -194,9 +194,10 @@
             color: #e6eef6;
         }
         .playlist-expand{
-            text-align:center;
+            user-select: none; 
+            text-align:right;
             cursor:pointer;
-            padding:4px 0;
+            padding:4px;
             font-size:12px;
             color: var(--muted);
             border-top:1px solid rgba(255,255,255,0.04);
@@ -220,8 +221,10 @@
         }
         .timeline-start,
         .timeline-end{
-            width:60px;
+            text-align:end;
+            width:40px;
             flex-shrink:0;
+            padding-right: 15px;
         }
         .timeline-title{
             flex:1;
