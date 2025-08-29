@@ -6,9 +6,9 @@ const MIGRATIONS = [
   {
     to: '2.0.0',
     run: async () => {
-      // 將舊版播放清單鍵（陣列值）搬移到 playlist_ 前綴
+      // 將舊版播放清單鍵（陣列值）搬移到 playlist_ 前綴，並整理 meta
       const allData = await chrome.storage.local.get(null);
-      const keepPrefixes = ['currentPlayId_', 'isPlaying_', 'playlist_'];
+      const keepPrefixes = ['currentPlayId_', 'isPlaying_', 'playlist_', 'playlist_meta_'];
       const keepSet = new Set(['extensionWorkOrNot', 'version']);
       const migrated = {};
       const removeKeys = [];
@@ -16,7 +16,31 @@ const MIGRATIONS = [
       for (const [key, value] of Object.entries(allData)) {
         if (keepSet.has(key) || keepPrefixes.some(p => key.startsWith(p))) continue;
         if (Array.isArray(value)) {
-          migrated[`playlist_${key}`] = value;
+          // strip legacy per-item meta and consolidate
+          let items = [];
+          const metaCandidates = [];
+          for (const it of value) {
+            if (it && typeof it === 'object') {
+              const { lastModified, uploadTime, ...rest } = it;
+              if (lastModified || uploadTime) {
+                metaCandidates.push({ lastModified, uploadTime });
+              }
+              items.push(rest);
+            } else {
+              items.push(it);
+            }
+          }
+          migrated[`playlist_${key}`] = items;
+
+          if (metaCandidates.length) {
+            const now = new Date().toISOString();
+            const lmList = metaCandidates.map(m => m.lastModified).filter(Boolean).sort();
+            const utList = metaCandidates.map(m => m.uploadTime).filter(Boolean).sort();
+            migrated[`playlist_meta_${key}`] = {
+              lastModified: lmList.length ? lmList.slice(-1)[0] : now,
+              uploadTime: utList.length ? utList[0] : now,
+            };
+          }
           removeKeys.push(key);
         }
       }
@@ -192,17 +216,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         let { extensionWorkOrNot } = await chrome.storage.local.get('extensionWorkOrNot');
         sendResponse({ state: extensionWorkOrNot });
       }
-      if (request.action === 'updatePlaylistState') {
+        if (request.action === 'updatePlaylistState') {
         // new format: data = { videoId, state, meta }
         const { videoId, state, meta } = request.data || {};
         try {
           if (videoId && Array.isArray(state)) {
             const itemsKey = `playlist_${videoId}`;
             const metaKey = `playlist_meta_${videoId}`;
-            const toSet = {};
-            toSet[itemsKey] = state;
-            if (meta && typeof meta === 'object') toSet[metaKey] = meta;
-            await chrome.storage.local.set(toSet);
+            if (state.length === 0) {
+              await chrome.storage.local.remove([itemsKey, metaKey]);
+            } else {
+              const toSet = { [itemsKey]: state };
+              if (meta && typeof meta === 'object') toSet[metaKey] = meta;
+              await chrome.storage.local.set(toSet);
+            }
             sendResponse({ success: true });
           } else if (request.data && typeof request.data === 'object') {
             // Backwards compatibility: older callers may send { videoId: stateArray }
