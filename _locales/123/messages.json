@@ -31,9 +31,25 @@
     "message": "個時間點",
     "description": "時間點數量後綴"
   },
-  "open_video": {
-    "message": "打開影片",
-    "description": "打開影片按鈕"
+  "search_placeholder": {
+    "message": "搜尋...",
+    "description": "搜尋欄位的預設文字"
+  },
+  "sort_lastModified_desc": {
+    "message": "最後修改時間 ↓",
+    "description": "排序選項：最後修改時間(新到舊)"
+  },
+  "sort_lastModified_asc": {
+    "message": "最後修改時間 ↑",
+    "description": "排序選項：最後修改時間(舊到新)"
+  },
+  "sort_uploadTime_desc": {
+    "message": "上傳時間 ↓",
+    "description": "排序選項：上傳時間(新到舊)"
+  },
+  "sort_uploadTime_asc": {
+    "message": "上傳時間 ↑",
+    "description": "排序選項：上傳時間(舊到新)"
   },
   "no_empty_playlists": {
     "message": "沒有可清除的空播放清單。",

@@ -114,9 +114,6 @@
             font-size: 12px;
             color: var(--muted);
         }
-        .playlist-meta{
-            text-align:right;
-        }
         .button-container {
             margin-top: 8px;
             display: flex;
@@ -131,13 +128,6 @@
             cursor: pointer;
             font-weight:600;
             box-shadow: 0 6px 14px rgba(59,130,246,0.12);
-        }
-        button.secondary{
-            background: transparent;
-            border: 1px solid rgba(255,255,255,0.06);
-            color: var(--muted);
-            box-shadow: none;
-            font-weight:500;
         }
         button.third {
             padding: 8px 12px;
@@ -246,12 +236,12 @@
     </div>
 
     <div class="button-container controls" style="margin-top:6px; gap:6px; align-items:center;">
-        <input id="searchInput" type="search" placeholder="Search..." style="flex:1; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.04); background:transparent; color:inherit;">
+        <input id="searchInput" type="search" data-i18n-placeholder="search_placeholder" placeholder="__MSG_search_placeholder__" style="flex:1; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.04); background:transparent; color:inherit;">
         <select id="sortSelect" style="padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.04); color:inherit;">
-            <option value="lastModified_desc" selected>Last modified ↓</option>
-            <option value="lastModified_asc">Last modified ↑</option>
-            <option value="uploadTime_desc">Upload time ↓</option>
-            <option value="uploadTime_asc">Upload time ↑</option>
+            <option value="lastModified_desc" selected data-i18n="sort_lastModified_desc">__MSG_sort_lastModified_desc__</option>
+            <option value="lastModified_asc" data-i18n="sort_lastModified_asc">__MSG_sort_lastModified_asc__</option>
+            <option value="uploadTime_desc" data-i18n="sort_uploadTime_desc">__MSG_sort_uploadTime_desc__</option>
+            <option value="uploadTime_asc" data-i18n="sort_uploadTime_asc">__MSG_sort_uploadTime_asc__</option>
         </select>
     </div>
     <div class="playlist-container" id="playlistContainer">
