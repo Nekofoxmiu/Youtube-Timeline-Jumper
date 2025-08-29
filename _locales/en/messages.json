@@ -1,0 +1,58 @@
+{
+  "extensionName": {
+    "message": "YouTube Auto Jump",
+    "description": "Extension name"
+  },
+  "toggle_on": {
+    "message": "Extension enabled",
+    "description": "Toggle ON status"
+  },
+  "toggle_off": {
+    "message": "Extension disabled",
+    "description": "Toggle OFF status"
+  },
+  "export_all": {
+    "message": "Export playlists",
+    "description": "Export button"
+  },
+  "import_playlists": {
+    "message": "Import playlists",
+    "description": "Import button"
+  },
+  "clear_empty": {
+    "message": "Clear empty playlists",
+    "description": "Clear empty button"
+  },
+  "video_id_prefix": {
+    "message": "Video ID:",
+    "description": "Prefix for video id when title unavailable"
+  },
+  "timepoints_suffix": {
+    "message": "timepoints",
+    "description": "Suffix after number of timepoints"
+  },
+  "open_video": {
+    "message": "Open video",
+    "description": "Open video button"
+  },
+  "no_empty_playlists": {
+    "message": "No empty playlists to remove.",
+    "description": "Toast when no empty playlists"
+  },
+  "deleted_empty_playlists": {
+    "message": "Deleted $1 empty playlists.",
+    "description": "Toast after deletion (uses $1 for count)"
+  },
+  "clear_failed": {
+    "message": "Clear failed — check console for details.",
+    "description": "Toast when clear failed"
+  },
+  "import_success": {
+    "message": "Playlists imported successfully!",
+    "description": "Toast on successful import"
+  },
+  "import_failed": {
+    "message": "Import failed — please check file format.",
+    "description": "Toast when import fails"
+  }
+}

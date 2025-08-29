@@ -97,11 +97,29 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ state: extensionWorkOrNot });
       }
       if (request.action === 'updatePlaylistState') {
-        const { videoId, state } = request.data;
-        // 儲存資料，使用 chrome.storage.local
-        await chrome.storage.local.set({ [videoId]: state }, () => {
-          sendResponse({ success: true });
-        });
+        // new format: data = { videoId, state, meta }
+        const { videoId, state, meta } = request.data || {};
+        try {
+          if (videoId && Array.isArray(state)) {
+            const itemsKey = `playlist_${videoId}`;
+            const metaKey = `playlist_meta_${videoId}`;
+            const toSet = {};
+            toSet[itemsKey] = state;
+            if (meta && typeof meta === 'object') toSet[metaKey] = meta;
+            await chrome.storage.local.set(toSet);
+            sendResponse({ success: true });
+          } else if (request.data && typeof request.data === 'object') {
+            // Backwards compatibility: older callers may send { videoId: stateArray }
+            // If caller passed direct mapping, merge into storage
+            await chrome.storage.local.set(request.data);
+            sendResponse({ success: true });
+          } else {
+            sendResponse({ success: false, message: 'Invalid payload' });
+          }
+        } catch (err) {
+          console.error('Error saving playlist state:', err);
+          sendResponse({ success: false, message: String(err) });
+        }
       }
       if (request.action === 'playPlaylist') {
         const tabId = sender.tab.id; // 獲取發送消息的 tab ID

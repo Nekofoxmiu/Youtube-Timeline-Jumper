@@ -1,9 +1,19 @@
 document.addEventListener('DOMContentLoaded', async () => {
+    // Apply localization to any element that uses data-i18n attribute
+    document.querySelectorAll('[data-i18n]').forEach(el => {
+        const key = el.getAttribute('data-i18n');
+        try {
+            el.textContent = chrome.i18n.getMessage(key) || el.textContent;
+        } catch (e) {
+            // chrome.i18n may not be available in some contexts; ignore
+        }
+    });
+
     const playlistContainer = document.getElementById('playlistContainer');
     const importBtn = document.getElementById('importBtn');
     const exportBtn = document.getElementById('exportBtn');
     const importInput = document.getElementById('importInput');
-    const clearEmptyBtn = document.getElementById('clearEmptyBtn');
+    // clearEmptyBtn removed: automatic cleanup on load
     const extensionToggle = document.getElementById('extensionToggle');
     const toggleStatus = document.getElementById('toggleStatus');
 
@@ -32,8 +42,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     function updateToggleStatus(state) {
-        toggleStatus.textContent = state ? '擴充功能已啟用' : '擴充功能已停用';
-        toggleStatus.style.color = state ? '#2196F3' : '#666';
+    const msg = state ? chrome.i18n.getMessage('toggle_on') : chrome.i18n.getMessage('toggle_off');
+    toggleStatus.textContent = msg;
+    toggleStatus.style.color = state ? '#2196F3' : '#666';
     }
     // Toast 顯示函式
     const toastContainer = document.getElementById('toastContainer');
@@ -69,8 +80,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     await Promise.all(
         playlists.map(async (p) => {
         p.title = await getVideoTitle(p.videoId);
-        const titleEl = document.querySelector(`[data-vid="${p.videoId}"] .playlist-title`);
-        if (titleEl) titleEl.textContent = p.title || `影片 ID: ${p.videoId}`;
+    const titleEl = document.querySelector(`[data-vid="${p.videoId}"] .playlist-title`);
+    if (titleEl) titleEl.textContent = p.title || `${chrome.i18n.getMessage('video_id_prefix')} ${p.videoId}`;
         })
     );
 
@@ -82,10 +93,53 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function displayPlaylists(list) {
     playlistContainer.innerHTML = '';
+    // helper to format a time token (TimeSlot object, number seconds, or string)
+    function formatTimeToken(tok) {
+        try {
+            if (!tok && tok !== 0) return '';
+            // If it's an object with toformatString (our TimeSlot), use it
+            if (typeof tok === 'object') {
+                if (typeof tok.toformatString === 'function') return tok.toformatString();
+                // if it's a plain object with hours/minutes/seconds
+                if ('hours' in tok || 'minutes' in tok || 'seconds' in tok) {
+                    const h = Number(tok.hours) || 0;
+                    const m = Number(tok.minutes) || 0;
+                    const s = Number(tok.seconds) || 0;
+                    const parts = [];
+                    if (h) parts.push(String(h));
+                    parts.push(String(m).padStart(2, '0'));
+                    parts.push(String(s).padStart(2, '0'));
+                    return parts.join(':');
+                }
+                return String(tok);
+            }
+            // number of seconds
+            if (typeof tok === 'number') {
+                const s = Math.floor(tok);
+                const h = Math.floor(s / 3600);
+                const m = Math.floor((s % 3600) / 60);
+                const sec = s % 60;
+                return (h ? `${h}:` : '') + `${String(m).padStart(h ? 2 : 1, '0')}:${String(sec).padStart(2, '0')}`;
+            }
+            // string: maybe it's already formatted
+            return String(tok);
+        } catch (err) {
+            return String(tok);
+        }
+    }
+
     list.forEach(({ videoId, playlist, title }) => {
         const itemDiv = document.createElement('div');
         itemDiv.className = 'playlist-item';
-        itemDiv.setAttribute('data-vid', videoId); // 用於後續更新標題
+        itemDiv.setAttribute('data-vid', videoId);
+        itemDiv.style.cursor = 'pointer';
+        itemDiv._playlist = playlist || [];
+
+        // top area: title + meta (open)
+        const top = document.createElement('div');
+        top.style.display = 'flex';
+        top.style.width = '100%';
+        top.style.alignItems = 'center';
 
         const left = document.createElement('div');
         left.style.flex = '1';
@@ -96,7 +150,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         const infoDiv = document.createElement('div');
         infoDiv.className = 'playlist-info';
-        infoDiv.textContent = `${Array.isArray(playlist) ? playlist.length : 0} 個時間點`;
+        infoDiv.textContent = `${Array.isArray(playlist) ? playlist.length : 0} ${chrome.i18n.getMessage('timepoints_suffix')}`;
 
         left.appendChild(titleDiv);
         left.appendChild(infoDiv);
@@ -105,19 +159,179 @@ document.addEventListener('DOMContentLoaded', async () => {
         meta.className = 'playlist-meta';
         const openBtn = document.createElement('button');
         openBtn.className = 'secondary';
-        openBtn.textContent = '打開影片';
+        openBtn.textContent = chrome.i18n.getMessage('open_video');
         openBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             chrome.tabs.create({ url: `https://www.youtube.com/watch?v=${videoId}` });
         });
         meta.appendChild(openBtn);
 
-        itemDiv.appendChild(left);
-        itemDiv.appendChild(meta);
+        top.appendChild(left);
+        top.appendChild(meta);
+        itemDiv.appendChild(top);
+
+        // expandable area placed under the title (full width)
+        const details = document.createElement('div');
+        details.className = 'playlist-details';
+        details.style.display = 'none';
+        details.style.marginTop = '8px';
+        details.style.paddingTop = '8px';
+        details.style.borderTop = '1px solid rgba(255,255,255,0.03)';
+
+        const ul = document.createElement('ul');
+        ul.style.listStyle = 'none';
+        ul.style.padding = '0';
+        (playlist || []).forEach((pt, idx) => {
+            const li = document.createElement('li');
+            const startText = formatTimeToken(pt.start);
+            const endText = formatTimeToken(pt.end);
+            const titleText = pt.title ? ` • ${pt.title}` : '';
+            li.textContent = `${startText || '0:00'} - ${endText || startText || '0:00'}${titleText}`;
+            li.style.padding = '6px 0';
+            ul.appendChild(li);
+        });
+        details.appendChild(ul);
+        itemDiv.appendChild(details);
+
+        // toggle expand on click (but not when clicking buttons)
+        itemDiv.addEventListener('click', (e) => {
+            if (e.target.tagName === 'BUTTON' || e.target.tagName === 'A' || e.target.closest('button')) return;
+            details.style.display = details.style.display === 'none' ? 'block' : 'none';
+        });
 
         playlistContainer.appendChild(itemDiv);
     });
     }
+
+    // Search & Sort handlers
+    const searchInput = document.getElementById('searchInput');
+    const sortSelect = document.getElementById('sortSelect');
+
+    // 嘗試從 watch page 抓 uploadDate 的輔助函式
+    async function fetchUploadTimeFromWatchPage(videoId) {
+        try {
+            const url = `https://www.youtube.com/watch?v=${videoId}`;
+            const resp = await fetch(url, { credentials: 'omit' });
+            if (!resp || !resp.ok) return null;
+            const text = await resp.text();
+
+            const metaMatch = text.match(/<meta[^>]+itemprop=(?:\"|')datePublished(?:\"|')[^>]*content=(?:\"|')([^\"']+)(?:\"|')/i);
+            if (metaMatch && metaMatch[1]) {
+                const d = new Date(metaMatch[1]);
+                if (!Number.isNaN(d.getTime())) return d.toISOString();
+            }
+
+            const jsonMatch = text.match(/"uploadDate"\s*:\s*"([0-9T:\-\.Z ]+)"/i) || text.match(/"datePublished"\s*:\s*"([0-9T:\-\.Z ]+)"/i);
+            if (jsonMatch && jsonMatch[1]) {
+                const d2 = new Date(jsonMatch[1]);
+                if (!Number.isNaN(d2.getTime())) return d2.toISOString();
+            }
+
+            return null;
+        } catch (err) {
+            console.debug('fetchUploadTimeFromWatchPage failed for', videoId, err);
+            return null;
+        }
+    }
+
+    async function refreshView() {
+        const all = await chrome.storage.local.get(null);
+        let playlists = Object.keys(all)
+            .filter(k => k.startsWith('playlist_'))
+            .map(k => ({ videoId: k.replace('playlist_', ''), playlist: all[k] || [] }));
+
+        // compute playlist-level metadata by reading separate meta store and preserve already-rendered titles
+        const metaKeys = playlists.map(p => `playlist_meta_${p.videoId}`);
+        const metaResults = await chrome.storage.local.get(metaKeys);
+        const now = new Date().toISOString();
+        playlists = playlists.map(p => {
+            const existingTitleEl = document.querySelector(`[data-vid="${p.videoId}"] .playlist-title`);
+            const existingTitle = existingTitleEl ? existingTitleEl.textContent : null;
+            const meta = metaResults[`playlist_meta_${p.videoId}`] || {};
+            const lastModified = meta.lastModified || now;
+            const uploadTime = meta.uploadTime || null;
+            return { ...p, title: existingTitle || null, lastModified, uploadTime };
+        });
+
+        const mode = sortSelect.value;
+
+        // If sorting by uploadTime, ensure missing uploadTime values are fetched and persisted to meta store
+        if (mode === 'uploadTime_desc' || mode === 'uploadTime_asc') {
+            await Promise.all(playlists.map(async (p) => {
+                try {
+                        if (p.uploadTime) return; // already have meta
+                        // 1) try asking an open tab's content script for uploadTime (avoids CORS)
+                        try {
+                            const tabs = await chrome.tabs.query({ url: '*://*.youtube.com/watch*' });
+                            let got = null;
+                            for (const t of tabs) {
+                                try {
+                                    const resp = await chrome.tabs.sendMessage(t.id, { action: 'getUploadTime', videoId: p.videoId });
+                                    if (resp && resp.uploadTime) { got = resp.uploadTime; break; }
+                                } catch (e) {
+                                    // tab might not have the content script injected or not a watch page; ignore
+                                }
+                            }
+                            if (got) {
+                                const metaKey = `playlist_meta_${p.videoId}`;
+                                const metaObj = { ...(metaResults[metaKey] || {}), uploadTime: got };
+                                await chrome.storage.local.set({ [metaKey]: metaObj });
+                                p.uploadTime = got;
+                                return;
+                            }
+                        } catch (e) {
+                            // ignore and fallback
+                        }
+
+                        // 2) fallback: fetch watch page HTML (may be blocked by CORS)
+                        const fetched = await fetchUploadTimeFromWatchPage(p.videoId);
+                        const metaKey = `playlist_meta_${p.videoId}`;
+                        if (fetched) {
+                            const metaObj = { ...(metaResults[metaKey] || {}), uploadTime: fetched };
+                            await chrome.storage.local.set({ [metaKey]: metaObj });
+                            p.uploadTime = fetched;
+                        } else {
+                            const fallback = new Date().toISOString();
+                            const metaObj = { ...(metaResults[metaKey] || {}), uploadTime: fallback };
+                            await chrome.storage.local.set({ [metaKey]: metaObj });
+                            p.uploadTime = fallback;
+                        }
+                } catch (err) {
+                    console.debug('Failed to fetch/persist uploadTime for', p.videoId, err);
+                    p.uploadTime = new Date().toISOString();
+                }
+            }));
+        }
+
+        // For any missing titles, fetch in parallel (non-blocking for each)
+        await Promise.all(playlists.map(async (p) => {
+            if (!p.title) {
+                try {
+                    const t = await getVideoTitle(p.videoId);
+                    p.title = t || `${chrome.i18n.getMessage('video_id_prefix')} ${p.videoId}`;
+                } catch (e) {
+                    p.title = `${chrome.i18n.getMessage('video_id_prefix')} ${p.videoId}`;
+                }
+            }
+        }));
+
+        // apply search
+        const q = (searchInput.value || '').trim().toLowerCase();
+        let filtered = playlists;
+        if (q) {
+            filtered = playlists.filter(p => (p.videoId && p.videoId.includes(q)) || (p.title && p.title.toLowerCase().includes(q)));
+        }
+
+        // apply sort
+        if (mode === 'lastModified_desc') filtered.sort((a,b) => (b.lastModified||'').localeCompare(a.lastModified||''));
+        else if (mode === 'lastModified_asc') filtered.sort((a,b) => (a.lastModified||'').localeCompare(b.lastModified||''));
+        else if (mode === 'uploadTime_desc') filtered.sort((a,b) => (b.uploadTime||'').localeCompare(a.uploadTime||''));
+        else if (mode === 'uploadTime_asc') filtered.sort((a,b) => (a.uploadTime||'').localeCompare(b.uploadTime||''));
+
+        displayPlaylists(filtered.map(p => ({ videoId: p.videoId, playlist: p.playlist, title: p.title })));
+    }
+    searchInput.addEventListener('input', () => refreshView());
+    sortSelect.addEventListener('change', () => refreshView());
 
 
     // 從 YouTube API 獲取影片標題
@@ -138,7 +352,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const exportData = {};
         
         for (let key in result) {
-            if (key.startsWith('playlist_')) {
+            if (key.startsWith('playlist_') || key.startsWith('playlist_meta_')) {
                 exportData[key] = result[key];
             }
         }
@@ -154,33 +368,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         URL.revokeObjectURL(url);
     });
 
-    // 清除長度為 0 的播放清單紀錄
-    clearEmptyBtn.addEventListener('click', async () => {
-        try {
-            const all = await chrome.storage.local.get(null);
-            const keysToRemove = [];
-            for (const k of Object.keys(all)) {
-                if (k.startsWith('playlist_')) {
-                    const v = all[k];
-                    if (!Array.isArray(v) || v.length === 0) {
-                        keysToRemove.push(k);
-                    }
-                }
-            }
-
-            if (keysToRemove.length === 0) {
-                showToast('沒有可清除的空播放清單。');
-                return;
-            }
-
-            await chrome.storage.local.remove(keysToRemove);
-            loadAllPlaylists();
-            showToast(`已刪除 ${keysToRemove.length} 個空播放清單`);
-        } catch (error) {
-            console.error('清除空播放清單失敗：', error);
-            showToast('清除失敗，請查看 console 取得更多資訊。');
-        }
-    });
 
     // 觸發檔案選擇
     importBtn.addEventListener('click', () => {
@@ -198,15 +385,36 @@ document.addEventListener('DOMContentLoaded', async () => {
                 const importData = JSON.parse(e.target.result);
                 await chrome.storage.local.set(importData);
                 loadAllPlaylists(); // 重新載入顯示
-                showToast('播放清單已成功匯入！');
+                showToast(chrome.i18n.getMessage('import_success'));
             } catch (error) {
                 console.error('Import error:', error);
-                showToast('匯入失敗，請確認檔案格式正確。');
+                showToast(chrome.i18n.getMessage('import_failed'));
             }
         };
         reader.readAsText(file);
     });
 
     // 初始載入所有播放清單
-    loadAllPlaylists();
+    // First, automatically remove empty playlist_* entries then load playlists
+    (async () => {
+        try {
+            const all = await chrome.storage.local.get(null);
+            const keysToRemove = [];
+            for (const k of Object.keys(all)) {
+                if (k.startsWith('playlist_')) {
+                    const v = all[k];
+                    if (!Array.isArray(v) || v.length === 0) {
+                        keysToRemove.push(k);
+                    }
+                }
+            }
+            if (keysToRemove.length) {
+                await chrome.storage.local.remove(keysToRemove);
+                showToast(chrome.i18n.getMessage('deleted_empty_playlists', [String(keysToRemove.length)]));
+            }
+        } catch (err) {
+            console.error('Auto-cleanup failed:', err);
+        }
+        loadAllPlaylists();
+    })();
 });

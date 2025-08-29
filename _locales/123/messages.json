@@ -1,0 +1,58 @@
+{
+  "extensionName": {
+    "message": "YouTube 自動跳轉",
+    "description": "擴充功能名稱"
+  },
+  "toggle_on": {
+    "message": "擴充功能已啟用",
+    "description": "開關開啟狀態"
+  },
+  "toggle_off": {
+    "message": "擴充功能已停用",
+    "description": "開關關閉狀態"
+  },
+  "export_all": {
+    "message": "匯出所有清單",
+    "description": "匯出按鈕"
+  },
+  "import_playlists": {
+    "message": "匯入播放清單",
+    "description": "匯入按鈕"
+  },
+  "clear_empty": {
+    "message": "清除空播放清單",
+    "description": "清除空紀錄按鈕"
+  },
+  "video_id_prefix": {
+    "message": "影片 ID:",
+    "description": "當標題不存在時的前綴"
+  },
+  "timepoints_suffix": {
+    "message": "個時間點",
+    "description": "時間點數量後綴"
+  },
+  "open_video": {
+    "message": "打開影片",
+    "description": "打開影片按鈕"
+  },
+  "no_empty_playlists": {
+    "message": "沒有可清除的空播放清單。",
+    "description": "無空清單時的通知"
+  },
+  "deleted_empty_playlists": {
+    "message": "已刪除 $1 個空播放清單",
+    "description": "刪除完成的通知（$1 代表數量）"
+  },
+  "clear_failed": {
+    "message": "清除失敗，請查看 console 取得更多資訊。",
+    "description": "清除失敗的通知"
+  },
+  "import_success": {
+    "message": "播放清單已成功匯入！",
+    "description": "匯入成功通知"
+  },
+  "import_failed": {
+    "message": "匯入失敗，請確認檔案格式正確。",
+    "description": "匯入失敗通知"
+  }
+}

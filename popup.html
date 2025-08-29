@@ -2,7 +2,7 @@
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Youtube Timeline Jumper</title>
+    <title data-i18n="extensionName">__MSG_extensionName__</title>
     <style>
         :root{
             --bg:#0f1724;
@@ -194,13 +194,23 @@
             <input type="checkbox" id="extensionToggle">
             <span class="slider round"></span>
         </label>
-        <span id="toggleStatus">擴充功能已停用</span>
+        <span id="toggleStatus" data-i18n="toggle_off">__MSG_toggle_off__</span>
     </div>
     <div class="button-container controls">
-        <button id="exportBtn">匯出所有清單</button>
-        <button id="importBtn" class="third">匯入播放清單</button>
-        <button id="clearEmptyBtn" class="warn">清除空播放清單</button>
+    <button id="exportBtn" data-i18n="export_all">__MSG_export_all__</button>
+    <button id="importBtn" class="third" data-i18n="import_playlists">__MSG_import_playlists__</button>
         <input type="file" id="importInput" accept=".json">
+    </div>
+
+    <div class="button-container controls" style="margin-top:6px; gap:6px; align-items:center;">
+        <input id="searchInput" type="search" placeholder="Search..." style="flex:1; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.04); background:transparent; color:inherit;">
+        <select id="sortSelect" style="padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.04); background:transparent; color:inherit;">
+            <option value="default">Sort</option>
+            <option value="lastModified_desc">Last modified ↓</option>
+            <option value="lastModified_asc">Last modified ↑</option>
+            <option value="uploadTime_desc">Upload time ↓</option>
+            <option value="uploadTime_asc">Upload time ↑</option>
+        </select>
     </div>
     <div class="playlist-container" id="playlistContainer">
         <!-- 播放清單項目將動態插入此處 -->
