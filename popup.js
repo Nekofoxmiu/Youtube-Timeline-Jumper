@@ -26,14 +26,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     extensionToggle.addEventListener('change', async () => {
         const newState = extensionToggle.checked;
         updateToggleStatus(newState);
+        // 將狀態儲存到 storage，確保在沒有 YouTube 分頁時也能生效
+        await chrome.storage.local.set({ extensionWorkOrNot: newState });
 
         // 取得目前的 YouTube 分頁
-        const tabs = await chrome.tabs.query({ url: '*://*.youtube.com/*' });
+        const tabs = await chrome.tabs.query({
+            url: ['*://*.youtube.com/*', '*://youtube.com/*', '*://youtu.be/*']
+        });
         for (const tab of tabs) {
             // 向每個 YouTube 分頁發送更新狀態的消息
             try {
-                await chrome.tabs.sendMessage(tab.id, { 
-                    action: newState ? 'initializePlaylist' : 'removePlaylist' 
+                await chrome.tabs.sendMessage(tab.id, {
+                    action: newState ? 'initializePlaylist' : 'removePlaylist'
                 });
             } catch (error) {
                 console.debug(`Tab ${tab.id} not ready or not a video page`);
