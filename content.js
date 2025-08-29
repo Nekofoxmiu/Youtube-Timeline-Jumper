@@ -425,7 +425,7 @@
      */
     function createPlaylistItem(startTime, endTime, title, meta) {
         // 確認起訖時間是否合法，若不合法則自動修正
-        if (startTime !== undefined && endTime !== undefined) {
+        if (startTime != null && endTime != null) {
             const timeObj  = PlaylistTimeManager.checkStartAndEnd(startTime, endTime);
             startTime = timeObj.start;
             endTime   = timeObj.end;
