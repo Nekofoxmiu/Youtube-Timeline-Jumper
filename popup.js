@@ -67,10 +67,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // 先收集鍵，立刻渲染 skeleton
     const playlists = Object.keys(result)
-        .filter(k => k.startsWith('playlist_'))
+        .filter(k => k.startsWith('playlist_') && !k.startsWith('playlist_meta_'))
         .map(k => ({
         videoId: k.replace('playlist_', ''),
-        playlist: result[k],
+        playlist: Array.isArray(result[k]) ? result[k] : [],
         title: null
         }));
 
@@ -237,8 +237,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     async function refreshView() {
         const all = await chrome.storage.local.get(null);
         let playlists = Object.keys(all)
-            .filter(k => k.startsWith('playlist_'))
-            .map(k => ({ videoId: k.replace('playlist_', ''), playlist: all[k] || [] }));
+            .filter(k => k.startsWith('playlist_') && !k.startsWith('playlist_meta_'))
+            .map(k => ({ videoId: k.replace('playlist_', ''), playlist: Array.isArray(all[k]) ? all[k] : [] }));
 
         // compute playlist-level metadata by reading separate meta store and preserve already-rendered titles
         const metaKeys = playlists.map(p => `playlist_meta_${p.videoId}`);
@@ -401,10 +401,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             const all = await chrome.storage.local.get(null);
             const keysToRemove = [];
             for (const k of Object.keys(all)) {
-                if (k.startsWith('playlist_')) {
+                if (k.startsWith('playlist_') && !k.startsWith('playlist_meta_')) {
                     const v = all[k];
                     if (!Array.isArray(v) || v.length === 0) {
                         keysToRemove.push(k);
+                        const vid = k.replace('playlist_', '');
+                        const metaKey = `playlist_meta_${vid}`;
+                        if (metaKey in all) keysToRemove.push(metaKey);
                     }
                 }
             }
