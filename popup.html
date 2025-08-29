@@ -186,6 +186,14 @@
             opacity: 1;
             transform: translateY(0);
         }
+        #sortSelect {
+            background: var(--card);
+            color: inherit;
+        }
+        #sortSelect option {
+            background: var(--card);
+            color: #e6eef6;
+        }
     </style>
 </head>
 <body>
@@ -204,9 +212,8 @@
 
     <div class="button-container controls" style="margin-top:6px; gap:6px; align-items:center;">
         <input id="searchInput" type="search" placeholder="Search..." style="flex:1; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.04); background:transparent; color:inherit;">
-        <select id="sortSelect" style="padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.04); background:transparent; color:inherit;">
-            <option value="default">Sort</option>
-            <option value="lastModified_desc">Last modified ↓</option>
+        <select id="sortSelect" style="padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.04); color:inherit;">
+            <option value="lastModified_desc" selected>Last modified ↓</option>
             <option value="lastModified_asc">Last modified ↑</option>
             <option value="uploadTime_desc">Upload time ↓</option>
             <option value="uploadTime_asc">Upload time ↑</option>

@@ -66,35 +66,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             setTimeout(() => el.remove(), 200);
         }, timeout);
     }
-    async function loadAllPlaylists() {
-    const result = await chrome.storage.local.get(null);
-
-    // 先收集鍵，立刻渲染 skeleton
-    const playlists = Object.keys(result)
-        .filter(k => k.startsWith('playlist_') && !k.startsWith('playlist_meta_'))
-        .map(k => ({
-        videoId: k.replace('playlist_', ''),
-        playlist: Array.isArray(result[k]) ? result[k] : [],
-        title: null
-        }));
-
-    displayPlaylists(playlists); // 先畫出清單（先用 ID 當佔位）
-
-    // 併發補標題，不阻塞 UI
-    await Promise.all(
-        playlists.map(async (p) => {
-        p.title = await getVideoTitle(p.videoId);
-    const titleEl = document.querySelector(`[data-vid="${p.videoId}"] .playlist-title`);
-    if (titleEl) titleEl.textContent = p.title || `${chrome.i18n.getMessage('video_id_prefix')} ${p.videoId}`;
-        })
-    );
-
-    // 強制觸發 popup 重新計算高度（保險）
-    requestAnimationFrame(() => {
-        document.body.style.minHeight = `${document.body.scrollHeight}px`;
-    });
-    }
-
     function displayPlaylists(list) {
     playlistContainer.innerHTML = '';
     // helper to format a time token (TimeSlot object, number seconds, or string)
@@ -210,6 +181,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Search & Sort handlers
     const searchInput = document.getElementById('searchInput');
     const sortSelect = document.getElementById('sortSelect');
+    sortSelect.value = 'lastModified_desc';
 
     // 嘗試從 watch page 抓 uploadDate 的輔助函式
     async function fetchUploadTimeFromWatchPage(videoId) {
@@ -388,7 +360,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             try {
                 const importData = JSON.parse(e.target.result);
                 await chrome.storage.local.set(importData);
-                loadAllPlaylists(); // 重新載入顯示
+                refreshView(); // 重新載入顯示
                 showToast(chrome.i18n.getMessage('import_success'));
             } catch (error) {
                 console.error('Import error:', error);
@@ -422,6 +394,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         } catch (err) {
             console.error('Auto-cleanup failed:', err);
         }
-        loadAllPlaylists();
+        refreshView();
     })();
 });
