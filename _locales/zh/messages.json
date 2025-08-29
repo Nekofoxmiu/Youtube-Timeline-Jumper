@@ -31,9 +31,25 @@
     "message": "timepoints",
     "description": "Suffix after number of timepoints"
   },
-  "open_video": {
-    "message": "Open video",
-    "description": "Open video button"
+  "search_placeholder": {
+    "message": "Search...",
+    "description": "Default text in search box"
+  },
+  "sort_lastModified_desc": {
+    "message": "Last modified ↓",
+    "description": "Sort option: last modified (newest first)"
+  },
+  "sort_lastModified_asc": {
+    "message": "Last modified ↑",
+    "description": "Sort option: last modified (oldest first)"
+  },
+  "sort_uploadTime_desc": {
+    "message": "Upload time ↓",
+    "description": "Sort option: upload time (newest first)"
+  },
+  "sort_uploadTime_asc": {
+    "message": "Upload time ↑",
+    "description": "Sort option: upload time (oldest first)"
   },
   "no_empty_playlists": {
     "message": "No empty playlists to remove.",

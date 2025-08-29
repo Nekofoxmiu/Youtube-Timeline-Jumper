@@ -9,6 +9,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
+    document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+        const key = el.getAttribute('data-i18n-placeholder');
+        try {
+            el.placeholder = chrome.i18n.getMessage(key) || el.placeholder;
+        } catch (e) {
+            // ignore
+        }
+    });
+
     const playlistContainer = document.getElementById('playlistContainer');
     const importBtn = document.getElementById('importBtn');
     const exportBtn = document.getElementById('exportBtn');
@@ -122,7 +131,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         const titleDiv = document.createElement('div');
         titleDiv.className = 'playlist-title';
-        titleDiv.textContent = title || `影片 ID: ${videoId}`;
+        titleDiv.textContent = title || `${chrome.i18n.getMessage('video_id_prefix')} ${videoId}`;
         // allow clicking title to open video like YouTube page
         titleDiv.style.cursor = 'pointer';
         titleDiv.addEventListener('click', (e) => {
@@ -137,19 +146,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         left.appendChild(titleDiv);
         left.appendChild(infoDiv);
 
-        const meta = document.createElement('div');
-        meta.className = 'playlist-meta';
-        const openBtn = document.createElement('button');
-        openBtn.className = 'secondary';
-        openBtn.textContent = chrome.i18n.getMessage('open_video');
-        openBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            chrome.tabs.create({ url: `https://www.youtube.com/watch?v=${videoId}` });
-        });
-        meta.appendChild(openBtn);
-
         top.appendChild(left);
-        top.appendChild(meta);
         itemDiv.appendChild(top);
 
         // expandable area placed under the title (full width)
