@@ -115,6 +115,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         top.style.display = 'flex';
         top.style.width = '100%';
         top.style.alignItems = 'center';
+        top.style.justifyContent = 'space-between';
 
         const left = document.createElement('div');
         left.style.flex = '1';
