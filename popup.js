@@ -107,7 +107,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const itemDiv = document.createElement('div');
         itemDiv.className = 'playlist-item';
         itemDiv.setAttribute('data-vid', videoId);
-        itemDiv.style.cursor = 'pointer';
+        // store raw playlist for later use
         itemDiv._playlist = playlist || [];
 
         // top area: title + meta (open)
@@ -123,6 +123,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         const titleDiv = document.createElement('div');
         titleDiv.className = 'playlist-title';
         titleDiv.textContent = title || `影片 ID: ${videoId}`;
+        // allow clicking title to open video like YouTube page
+        titleDiv.style.cursor = 'pointer';
+        titleDiv.addEventListener('click', (e) => {
+            e.stopPropagation();
+            chrome.tabs.create({ url: `https://www.youtube.com/watch?v=${videoId}` });
+        });
 
         const infoDiv = document.createElement('div');
         infoDiv.className = 'playlist-info';
@@ -150,30 +156,50 @@ document.addEventListener('DOMContentLoaded', async () => {
         const details = document.createElement('div');
         details.className = 'playlist-details';
         details.style.display = 'none';
-        details.style.marginTop = '8px';
-        details.style.paddingTop = '8px';
-        details.style.borderTop = '1px solid rgba(255,255,255,0.03)';
 
         const ul = document.createElement('ul');
         ul.style.listStyle = 'none';
         ul.style.padding = '0';
-        (playlist || []).forEach((pt, idx) => {
+        (playlist || []).forEach((pt) => {
             const li = document.createElement('li');
-            const startText = formatTimeToken(pt.start);
-            const endText = formatTimeToken(pt.end);
-            const titleText = pt.title ? ` • ${pt.title}` : '';
-            li.textContent = `${startText || '0:00'} - ${endText || startText || '0:00'}${titleText}`;
-            li.style.padding = '6px 0';
+            li.className = 'timeline-entry';
+
+            const startSpan = document.createElement('span');
+            startSpan.className = 'timeline-start';
+            startSpan.textContent = formatTimeToken(pt.start) || '0:00';
+
+            const endSpan = document.createElement('span');
+            endSpan.className = 'timeline-end';
+            endSpan.textContent = formatTimeToken(pt.end) || startSpan.textContent;
+
+            const titleSpan = document.createElement('span');
+            titleSpan.className = 'timeline-title';
+            titleSpan.textContent = pt.title || '';
+
+            li.appendChild(startSpan);
+            const dash = document.createElement('span');
+            dash.textContent = '-';
+            dash.className = 'timeline-dash';
+            li.appendChild(dash);
+            li.appendChild(endSpan);
+            li.appendChild(titleSpan);
             ul.appendChild(li);
         });
         details.appendChild(ul);
-        itemDiv.appendChild(details);
 
-        // toggle expand on click (but not when clicking buttons)
-        itemDiv.addEventListener('click', (e) => {
-            if (e.target.tagName === 'BUTTON' || e.target.tagName === 'A' || e.target.closest('button')) return;
-            details.style.display = details.style.display === 'none' ? 'block' : 'none';
+        // create a small bar to toggle expand/collapse
+        const expandBar = document.createElement('div');
+        expandBar.className = 'playlist-expand';
+        expandBar.textContent = '▼';
+        expandBar.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const open = details.style.display === 'none';
+            details.style.display = open ? 'block' : 'none';
+            expandBar.textContent = open ? '▲' : '▼';
         });
+
+        itemDiv.appendChild(expandBar);
+        itemDiv.appendChild(details);
 
         playlistContainer.appendChild(itemDiv);
     });
