@@ -1,12 +1,48 @@
-chrome.runtime.onInstalled.addListener(() => {
+function compareVersions(v1, v2) {
+  const a = v1.split('.').map(Number);
+  const b = v2.split('.').map(Number);
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    const diff = (a[i] || 0) - (b[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+async function migrateOldStorage() {
+  try {
+    const allData = await chrome.storage.local.get(null);
+    const newStore = {};
+    const keysToRemove = [];
+    for (const [key, value] of Object.entries(allData)) {
+      const isReserved = key === 'extensionWorkOrNot' || key === 'playlistStates' || key.startsWith('currentPlayId_') || key.startsWith('isPlaying_');
+      if (!isReserved && Array.isArray(value)) {
+        newStore[key] = value;
+        keysToRemove.push(key);
+      }
+    }
+    if (Object.keys(newStore).length > 0) {
+      const existing = (await chrome.storage.local.get('playlistStates')).playlistStates || {};
+      await chrome.storage.local.set({ playlistStates: { ...existing, ...newStore } });
+      await chrome.storage.local.remove(keysToRemove);
+    }
+  } catch (error) {
+    console.log('Error migrating old storage:', error);
+  }
+}
+
+chrome.runtime.onInstalled.addListener((details) => {
   (async () => {
     try {
       let data = await chrome.storage.local.get('extensionWorkOrNot');
       if (data.extensionWorkOrNot === undefined) {
         await chrome.storage.local.set({ extensionWorkOrNot: false });
       }
+      if (details.reason === 'update' && compareVersions(details.previousVersion || '0', '2.0.0') < 0) {
+        await migrateOldStorage();
+      }
     } catch (error) {
-      console.log('Error checking ExtensionWorkOrNot state:', error);
+      console.log('Error during installation process:', error);
     }
   })();
 });
@@ -40,10 +76,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       }
       if (request.action === 'updatePlaylistState') {
         const { videoId, state } = request.data;
-        // 儲存資料，使用 chrome.storage.local
-        await chrome.storage.local.set({ [videoId]: state }, () => {
-          sendResponse({ success: true });
-        });
+        const data = await chrome.storage.local.get('playlistStates');
+        const playlists = data.playlistStates || {};
+        playlists[videoId] = state;
+        await chrome.storage.local.set({ playlistStates: playlists });
+        sendResponse({ success: true });
       }
       if (request.action === 'playPlaylist') {
         const tabId = sender.tab.id; // 獲取發送消息的 tab ID
