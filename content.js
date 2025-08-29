@@ -188,8 +188,14 @@
             return;
         }
 
-        const result = await chrome.storage.local.get(videoId);
-        const savedState = result[videoId];
+        let savedState;
+        const store = await chrome.storage.local.get('playlistStates');
+        if (store.playlistStates && store.playlistStates[videoId]) {
+            savedState = store.playlistStates[videoId];
+        } else {
+            const legacy = await chrome.storage.local.get(videoId);
+            savedState = legacy[videoId];
+        }
         if (Array.isArray(savedState)) {
             savedState.forEach(itemData => {
                 const startTime = TimeSlot.fromObject(itemData.start);
