@@ -16,6 +16,7 @@
     let runtimeHandlerModule;
     let getVideoInfoModule;
     let editModule;
+    let stateManagerModule;
 
     try {
         dataClassModule            = await import('./lib/dataclass.js');
@@ -26,6 +27,7 @@
         runtimeHandlerModule       = await import('./lib/runtimeHandler.js');
         editModule                 = await import('./lib/editModule.js');
         getVideoInfoModule         = await import('./lib/getVideoInfo.js');
+        stateManagerModule         = await import('./lib/stateManager.js');
     } catch (error) {
         console.error('Module loading failed:', error);
     }
@@ -52,7 +54,9 @@
     const { applyTheme }                                    = themeModule;
     const { handleRuntimeMessage }                          = runtimeHandlerModule;
     const { getCurrentVideoId, getCurrentVideoTime }        = getVideoInfoModule;
+    const { fetchVideoUploadTime }                          = getVideoInfoModule;
     const { enableEditMode }                                = editModule;
+    const { PlaylistStateManager }                          = stateManagerModule;
 
     // === [ 三、全域變數與常數 ] ======================================================
     // 共用 DOM 元素或容器
@@ -72,6 +76,7 @@
     const styleModificationPromises = [];
     let mouseEventHandler;
     let playlistTimeManager;
+    let stateManager;
 
     // 常數（選擇器等）
     const sidebarQuery              = '#related.style-scope.ytd-watch-flexy';
@@ -80,6 +85,22 @@
     // === [ 四、Chrome 訊息監聽與狀態控制 ] ============================================
     // 監聽來自 background.js 的訊息
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+        // handle quick content-scoped requests first
+        if (request && request.action === 'getUploadTime') {
+            (async () => {
+                try {
+                    const vid = getCurrentVideoId();
+                    // if videoId supplied in request, trust it; else use current
+                    const targetVid = request.videoId || vid;
+                    const t = await fetchVideoUploadTime(targetVid);
+                    sendResponse({ uploadTime: t || null });
+                } catch (e) {
+                    sendResponse({ uploadTime: null });
+                }
+            })();
+            return true;
+        }
+
         (async () => {
             await handleRuntimeMessage(request, sender, sendResponse, {
                 deleteAppElement,
@@ -177,9 +198,12 @@
         toggleSwitch          = createToggleSwitch();
         ul                    = createPlaylistItemsContainer();
 
+        // 初始化狀態管理器
+        stateManager = new PlaylistStateManager(getCurrentVideoId());
+
         // 產生事件處理器
-        mouseEventHandler     = new MouseEventHandler(ul, playlistContainer, playlistState);
-        playlistTimeManager   = new PlaylistTimeManager(playlistContainer, playlistState);
+        mouseEventHandler     = new MouseEventHandler(ul, playlistContainer, playlistState, stateManager);
+        playlistTimeManager   = new PlaylistTimeManager(playlistContainer, playlistState, stateManager);
 
         // 從 local storage 讀取該影片所對應的播放列表資料
         const videoId = getCurrentVideoId();
@@ -188,13 +212,24 @@
             return;
         }
 
-        const result = await chrome.storage.local.get(videoId);
-        const savedState = result[videoId];
+        const savedState = await stateManager.load();
         if (Array.isArray(savedState)) {
+            // load playlist-level meta (uploadTime/lastModified) from meta store
+            let meta = null;
+            try {
+                meta = await stateManager.loadMeta();
+            } catch (e) {
+                meta = null;
+            }
+
+            const now = new Date().toISOString();
             savedState.forEach(itemData => {
                 const startTime = TimeSlot.fromObject(itemData.start);
                 const endTime   = TimeSlot.fromObject(itemData.end);
-                const newItem   = createPlaylistItem(startTime, endTime, itemData.title);
+                // Prefer per-item values if present (backwards compatibility), else use playlist-level meta, else now
+                const itemLastModified = itemData.lastModified || (meta && meta.lastModified) || now;
+                const itemUploadTime = itemData.uploadTime || (meta && meta.uploadTime) || now;
+                const newItem   = createPlaylistItem(startTime, endTime, itemData.title, { lastModified: itemLastModified, uploadTime: itemUploadTime });
                 playlistState.playlistItems.push(newItem);
                 ul.appendChild(newItem);
             });
@@ -345,9 +380,12 @@
         exportPlaylistButton  = createExportPlaylistButton(exportPlaylist);
         ul                    = createPlaylistItemsContainer();
 
+        // 重新初始化狀態管理器
+        stateManager         = new PlaylistStateManager(getCurrentVideoId());
+
         // 重新創建事件處理程序
-        mouseEventHandler    = new MouseEventHandler(ul, playlistContainer, playlistState);
-        playlistTimeManager  = new PlaylistTimeManager(playlistContainer, playlistState);
+        mouseEventHandler    = new MouseEventHandler(ul, playlistContainer, playlistState, stateManager);
+        playlistTimeManager  = new PlaylistTimeManager(playlistContainer, playlistState, stateManager);
     }
 
     // === [ 八、播放列表的核心功能函式 ] ==============================================
@@ -356,11 +394,26 @@
      * 新增一個播放列表項目
      */
     function addToPlaylist() {
-        const newItem = createPlaylistItem();
+    const now = new Date().toISOString();
+    const newItem = createPlaylistItem(null, null, '', { lastModified: now, uploadTime: now });
         playlistState.playlistItems.push(newItem);
         ul.appendChild(newItem);
         playlistContainer.appendChild(ul);
         playlistState.state = getandUpdatePlaylistState(playlistState);
+        if (stateManager) {
+            stateManager.setState(playlistState.state);
+            stateManager.save();
+            // ensure meta exists / update lastModified/uploadTime
+            try {
+                (async () => {
+                    const existingMeta = await stateManager.loadMeta() || {};
+                    const newMeta = { ...(existingMeta || {}), uploadTime: existingMeta.uploadTime || now, lastModified: now };
+                    await stateManager.saveMeta(newMeta);
+                })();
+            } catch (e) {
+                // ignore
+            }
+        }
     }
 
     /**
@@ -370,9 +423,9 @@
     * @param {string} [title] - 項目標題（可選）
      * @returns {HTMLElement} 新建立的播放列表項目
      */
-    function createPlaylistItem(startTime, endTime, title) {
+    function createPlaylistItem(startTime, endTime, title, meta) {
         // 確認起訖時間是否合法，若不合法則自動修正
-        if (startTime !== undefined && endTime !== undefined) {
+        if (startTime != null && endTime != null) {
             const timeObj  = PlaylistTimeManager.checkStartAndEnd(startTime, endTime);
             startTime = timeObj.start;
             endTime   = timeObj.end;
@@ -382,7 +435,7 @@
         newItem.classList.add('ytj-playlist-item');
 
         // 拖曳把手
-        const dragHandle = document.createElement('div');
+    const dragHandle = document.createElement('div');
         dragHandle.classList.add('ytj-drag-handle');
         dragHandle.draggable = true;
         dragHandle.addEventListener('dragstart', mouseEventHandler.handleDragStart);
@@ -392,7 +445,7 @@
         const startTimeText    = TimeTextElements.startElement;
         const endTimeText      = TimeTextElements.endElement;
 
-        // UI 上的功能按鈕
+    // UI 上的功能按鈕
         const setStartTimeButton = createSetStartTimeButton();
         const setEndTimeButton   = createSetEndTimeButton();
         const deleteButton       = createDeleteButton(newItem);
@@ -401,6 +454,11 @@
         // 播放列表項目標題 input
         const titleInput         = createTitleInput();
         titleInput.value         = title || '';
+
+    // attach metadata to DOM dataset
+    const now = new Date().toISOString();
+    newItem.dataset.lastModified = (meta && meta.lastModified) ? meta.lastModified : now;
+    newItem.dataset.uploadTime = (meta && meta.uploadTime) ? meta.uploadTime : now;
 
         // 將上述元素組合到 newItem
         newItem.appendChild(dragHandle);
@@ -478,6 +536,10 @@
                 // 更新列表內記錄
                 playlistTimeManager.updateTimeText(startTimeText, originalTime);
                 playlistState.state = getandUpdatePlaylistState(playlistState);
+                if (stateManager) {
+                    stateManager.setState(playlistState.state);
+                    stateManager.save();
+                }
             }
         });
         return button;
@@ -501,6 +563,10 @@
 
                     playlistTimeManager.updateTimeText(endTimeText, originalTime);
                     playlistState.state = getandUpdatePlaylistState(playlistState);
+                    if (stateManager) {
+                        stateManager.setState(playlistState.state);
+                        stateManager.save();
+                    }
                 }
             } catch (error) {
                 console.debug('Error occurred while setting end time:', error);
@@ -515,10 +581,25 @@
     function createDeleteButton(listItem) {
         const button = document.createElement('button');
         button.classList.add('ytj-delete-item');
-        button.addEventListener('click', () => {
+    button.addEventListener('click', async () => {
             try {
                 playlistTimeManager.deletePlaylistItem(listItem);
                 playlistState.state = getandUpdatePlaylistState(playlistState);
+                if (stateManager) {
+                    stateManager.setState(playlistState.state);
+                    stateManager.save();
+                    // If this playlist became empty, remove storage key entirely
+                    if (!playlistState.playlistItems || playlistState.playlistItems.length === 0) {
+                        try {
+                            const vid = getCurrentVideoId();
+                            if (vid) {
+                await chrome.storage.local.remove([`playlist_${vid}`, `playlist_meta_${vid}`]);
+                            }
+                        } catch (removeErr) {
+                            console.debug('Failed to remove empty playlist storage key:', removeErr);
+                        }
+                    }
+                }
             } catch (error) {
                 console.debug('Error occurred while trying to delete playlist item:', error);
             }
@@ -612,7 +693,8 @@
                 // 建立 TimeSlot 與 playlist item
                 const start = TimeSlot.fromTotalseconds(startSec);
                 const end   = TimeSlot.fromTotalseconds(endSec);
-                const newItem = createPlaylistItem(start, end, title);
+                const now = new Date().toISOString();
+                const newItem = createPlaylistItem(start, end, title, { lastModified: now, uploadTime: now });
 
                 playlistState.playlistItems.push(newItem);
                 ul.appendChild(newItem);
@@ -620,6 +702,28 @@
 
             playlistContainer.appendChild(ul);
             playlistState.state = getandUpdatePlaylistState(playlistState);
+            if (stateManager) {
+                stateManager.setState(playlistState.state);
+                stateManager.save();
+                // persist playlist-level meta
+                (async () => {
+                    try {
+                        if (typeof stateManager.saveMeta === 'function') {
+                            const metaCandidates = playlistState.playlistItems.map(it => ({
+                                lastModified: it.dataset?.lastModified || null,
+                                uploadTime: it.dataset?.uploadTime || null
+                            }));
+                            const lmList = metaCandidates.map(m => m.lastModified).filter(Boolean).sort();
+                            const utList = metaCandidates.map(m => m.uploadTime).filter(Boolean).sort();
+                            const lastModified = lmList.length ? lmList.slice(-1)[0] : new Date().toISOString();
+                            const uploadTime = utList.length ? utList[0] : new Date().toISOString();
+                            await stateManager.saveMeta({ lastModified, uploadTime });
+                        }
+                    } catch (e) {
+                        // ignore
+                    }
+                })();
+            }
         });
     }
 
@@ -642,6 +746,10 @@
             // 先刪除所有項目再重新匯入
             playlistTimeManager.deleteAllPlaylistItems();
             playlistState.state = getandUpdatePlaylistState(playlistState);
+            if (stateManager) {
+                stateManager.setState(playlistState.state);
+                stateManager.save();
+            }
 
             if (!text) return;
 
@@ -654,13 +762,36 @@
                     const [, startTime, endTime, title] = match;
                     const start = TimeSlot.fromString(startTime);
                     const end   = endTime ? TimeSlot.fromString(endTime) : start;
-                    const newItem = createPlaylistItem(start, end, title);
+                    const now = new Date().toISOString();
+                    const newItem = createPlaylistItem(start, end, title, { lastModified: now, uploadTime: now });
                     playlistState.playlistItems.push(newItem);
                     ul.appendChild(newItem);
                 }
             }
             playlistContainer.appendChild(ul);
             playlistState.state = getandUpdatePlaylistState(playlistState);
+            if (stateManager) {
+                stateManager.setState(playlistState.state);
+                stateManager.save();
+                // persist playlist-level meta
+                (async () => {
+                    try {
+                        if (typeof stateManager.saveMeta === 'function') {
+                            const metaCandidates = playlistState.playlistItems.map(it => ({
+                                lastModified: it.dataset?.lastModified || null,
+                                uploadTime: it.dataset?.uploadTime || null
+                            }));
+                            const lmList = metaCandidates.map(m => m.lastModified).filter(Boolean).sort();
+                            const utList = metaCandidates.map(m => m.uploadTime).filter(Boolean).sort();
+                            const lastModified = lmList.length ? lmList.slice(-1)[0] : new Date().toISOString();
+                            const uploadTime = utList.length ? utList[0] : new Date().toISOString();
+                            await stateManager.saveMeta({ lastModified, uploadTime });
+                        }
+                    } catch (e) {
+                        // ignore
+                    }
+                })();
+            }
         }).querySelector('textarea').value = originText;
     }
 

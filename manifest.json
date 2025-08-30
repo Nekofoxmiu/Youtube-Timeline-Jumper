@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "YouTube Auto Jump",
-  "version": "1.2.5",
+  "version": "2.0.0",
   "description": "Automatically jump to a specific time on YouTube videos.",
   "permissions": [
     "storage",
-    "activeTab"
+    "activeTab",
+    "tabs"
     ],
   "background": {
     "service_worker": "background.js",
@@ -16,8 +17,10 @@
       "16": "images/icon/icon16.png",
       "48": "images/icon/icon48.png",
       "128": "images/icon/icon128.png"
-    }
+    },
+    "default_popup": "popup.html"
   },
+  "default_locale": "en",
   "icons": {
     "16": "images/icon/icon16.png",
     "48": "images/icon/icon48.png",
