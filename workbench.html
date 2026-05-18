@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>YouTube Timeline Studio</title>
+  <link rel="stylesheet" href="workbench.css">
+</head>
+<body>
+  <div class="app-shell" id="appShell">
+    <aside class="side-rail" id="sideRail">
+      <div class="rail-header">
+        <button id="sidebarToggle" class="icon-button" type="button" aria-label="Collapse sidebar" title="收合側欄">
+          <svg class="sidebar-toggle-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M15.5 5.5 9 12l6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path>
+          </svg>
+        </button>
+      </div>
+
+      <nav class="nav-stack" aria-label="Studio sections">
+        <button class="nav-item active" type="button" data-view="global" title="總播放清單">
+          <span class="nav-icon">≣</span>
+          <span class="nav-label" data-ui-key="nav_global">總播放清單</span>
+        </button>
+        <button class="nav-item" type="button" data-view="database" title="資料庫編輯">
+          <span class="nav-icon">✎</span>
+          <span class="nav-label" data-ui-key="nav_database">資料庫編輯</span>
+        </button>
+        <button class="nav-item" type="button" data-view="offline" title="本機音訊分析">
+          <span class="nav-icon">♪</span>
+          <span class="nav-label" data-ui-key="nav_offline">本機音訊分析</span>
+        </button>
+        <button class="nav-item" type="button" data-view="settings" title="設定">
+          <span class="nav-icon">⚙</span>
+          <span class="nav-label" data-ui-key="nav_settings">設定</span>
+        </button>
+      </nav>
+    </aside>
+
+    <main class="main-stage">
+      <section id="globalPlaylistPanel" class="view-panel active" data-view-panel="global">
+        <div class="spotify-workspace">
+          <article class="panel panel-global library-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow" data-ui-key="library_eyebrow">Song Library</p>
+                <h2 data-ui-key="library_title">已記錄歌曲</h2>
+              </div>
+            </div>
+            <div class="toolbar-row">
+              <input id="globalSearch" type="search" placeholder="搜尋歌曲 / 影片標題" data-ui-placeholder="search_global_placeholder">
+              <button id="refreshGlobalBtn" type="button" data-ui-key="refresh">Refresh</button>
+              <button id="groupToggleBtn" type="button" data-ui-key="collapse">收合</button>
+            </div>
+            <div id="globalPlaylistList" class="song-library"></div>
+          </article>
+
+          <aside class="panel player-panel">
+            <div class="player-hero">
+              <img id="nowPlayingCover" class="player-cover" alt="Video cover">
+              <div class="player-copy">
+                <div class="player-eyebrow-row">
+                  <p class="eyebrow" data-ui-key="now_playing">Now Playing</p>
+                  <span id="queueStatus" class="status-text queue-status-inline"></span>
+                </div>
+                <h2 id="nowPlayingTitle" data-ui-key="no_track_selected">尚未選擇歌曲</h2>
+                <div id="nowPlayingVideoTitle" class="player-video-title" data-ui-key="drag_songs_to_queue">拖曳左側歌曲加入播放序列</div>
+                <div id="nowPlayingTime" class="player-time">--:--</div>
+              </div>
+            </div>
+
+            <div class="player-controls">
+              <button id="shuffleQueueBtn" class="round-control transport-control shuffle-control" type="button" aria-label="亂序播放" title="亂序播放">
+                <svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M16.8 3.4 21 7.6l-4.2 4.2-1.4-1.4 1.8-1.8h-1.7c-2.2 0-3.5 1-5 3.8l-.7 1.3C8 17.1 5.9 19 2.4 19H2v-2h.4c2.6 0 3.9-1.2 5.6-4.3l.7-1.3c1.8-3.3 3.9-4.8 6.8-4.8h1.7l-1.8-1.8 1.4-1.4ZM2 6h.4c2.2 0 3.8.8 5.1 2.6L6.4 10.3C5.3 8.7 4.2 8 2.4 8H2V6Zm13.4 7.6 1.4-1.4L21 16.4l-4.2 4.2-1.4-1.4 1.8-1.8h-1.7c-2.4 0-4.2-1-5.7-3.1l1.1-1.8c1.3 2.1 2.6 2.9 4.6 2.9h1.7l-1.8-1.8Z"></path>
+                </svg>
+              </button>
+              <button id="prevTrackBtn" class="round-control transport-control" type="button" aria-label="上一首" title="上一首">
+                <svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M6 5h2.4v14H6zM10 12l8-6.4v12.8z"></path>
+                </svg>
+              </button>
+              <button id="playPauseBtn" class="round-control transport-control main-control play-control" type="button" aria-label="播放 / 暫停" title="播放 / 暫停" data-state="play">
+                <svg class="control-icon icon-play" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M8 5.4v13.2L18.5 12z"></path>
+                </svg>
+                <svg class="control-icon icon-pause" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"></path>
+                </svg>
+              </button>
+              <button id="nextTrackBtn" class="round-control transport-control" type="button" aria-label="下一首" title="下一首">
+                <svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M15.6 5H18v14h-2.4zM6 5.6l8 6.4-8 6.4z"></path>
+                </svg>
+              </button>
+              <button id="stopQueueBtn" class="round-control transport-control danger-control" type="button" aria-label="停止" title="停止" disabled>
+                <svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M7 7h10v10H7z"></path>
+                </svg>
+              </button>
+            </div>
+
+            <div class="saved-queue-tools">
+              <input id="queueNameInput" type="text" placeholder="清單名稱" data-ui-placeholder="queue_name_placeholder">
+              <button id="saveQueueBtn" type="button" data-ui-key="save">Save</button>
+              <select id="savedQueueSelect" aria-label="Saved queue list"></select>
+              <button id="loadQueueBtn" type="button" data-ui-key="load">Load</button>
+              <button id="deleteSavedQueueBtn" type="button" data-ui-key="delete">Delete</button>
+            </div>
+
+            <div class="queue-heading">
+              <div class="queue-title-group">
+                <h3 data-ui-key="queue_title">播放序列</h3>
+                <label class="check-field compact preload-inline">
+                  <input id="advancedPreloadToggle" type="checkbox">
+                  <span data-ui-key="advanced_preload_label">進階測試：跨影片前 10 秒預開緩衝視窗</span>
+                </label>
+              </div>
+              <div class="queue-heading-actions">
+                <span id="queueCountBadge" class="panel-badge">0 songs</span>
+                <button id="clearQueueBtn" class="delete-queue-btn" type="button" data-ui-key="delete">Delete</button>
+              </div>
+            </div>
+            <div id="queueList" class="queue-list"></div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="databasePanel" class="view-panel" data-view-panel="database">
+        <div class="database-workspace">
+          <article class="panel database-video-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow" data-ui-key="database_eyebrow">Database</p>
+                <h2 data-ui-key="database_title">資料庫</h2>
+              </div>
+            </div>
+            <div class="toolbar-row">
+              <input id="databaseSearch" type="search" placeholder="搜尋影片 / 直播" data-ui-placeholder="database_search_placeholder">
+              <button id="refreshDatabaseBtn" type="button" data-ui-key="refresh">Refresh</button>
+            </div>
+            <div id="databaseVideoList" class="database-video-list"></div>
+          </article>
+
+          <article class="panel database-editor-panel">
+            <div class="database-editor-header">
+              <div class="database-editor-cover-shell">
+                <img id="databaseEditorCover" class="database-editor-cover" alt="">
+              </div>
+              <div class="database-editor-copy">
+                <p class="eyebrow" data-ui-key="playlist_items">Playlist Items</p>
+                <div id="databaseTitleText" class="database-title-text" data-empty-key="database_select_video">選擇左側影片 / 直播</div>
+                <div class="database-editor-meta">
+                  <span id="databaseItemCountBadge" class="panel-badge">0 songs</span>
+                  <span id="databaseStatus" class="status-text"></span>
+                </div>
+              </div>
+              <button id="databaseAddItemBtn" class="primary" type="button" disabled data-ui-key="add_segment">新增段落</button>
+            </div>
+            <div id="databaseTrackList" class="database-track-list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="offlinePanel" class="view-panel" data-view-panel="offline">
+        <article class="panel panel-offline">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow" data-ui-key="offline_eyebrow">Offline Detection</p>
+              <h2 data-ui-key="offline_title">本機音訊檔離線分析</h2>
+            </div>
+          </div>
+          <div class="form-grid two-col">
+            <label class="field wide">
+              <span data-ui-key="audio_file">音訊檔</span>
+              <input id="offlineAudioInput" type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.flac,.ogg">
+            </label>
+            <label class="field">
+              <span data-ui-key="start_seconds">開始秒數</span>
+              <input id="offlineStartSec" type="number" min="0" step="1" placeholder="0">
+            </label>
+            <label class="field">
+              <span data-ui-key="end_seconds">結束秒數</span>
+              <input id="offlineEndSec" type="number" min="0" step="1" placeholder="留空代表檔案結尾" data-ui-placeholder="end_seconds_placeholder">
+            </label>
+            <label class="field">
+              <span data-ui-key="save_to_video_id">儲存到 videoId</span>
+              <input id="offlineVideoId" type="text" placeholder="例如 -25jwY-5MT7I" data-ui-placeholder="video_id_example">
+            </label>
+            <label class="field">
+              <span data-ui-key="display_title">顯示標題</span>
+              <input id="offlineTitle" type="text" placeholder="可選，寫入 playlist meta" data-ui-placeholder="optional_playlist_meta">
+            </label>
+            <label class="field">
+              <span data-ui-key="settings_min_segment">最短片段秒數</span>
+              <input id="offlineMinSegmentSec" type="number" min="15" max="600" step="1" placeholder="90">
+            </label>
+            <label class="check-field compact wide">
+              <input id="offlineSplitMedleyToggle" type="checkbox">
+              <span data-ui-key="split_medley_label">串燒切分</span>
+            </label>
+          </div>
+
+          <div class="button-row">
+            <button id="offlineAnalyzeBtn" class="primary" type="button" data-ui-key="analyze_local_audio">Analyze Local Audio</button>
+            <button id="offlineSaveBtn" type="button" disabled data-ui-key="save_segments">Save Segments</button>
+          </div>
+
+          <div class="progress-shell">
+            <div id="offlineProgressBar" class="progress-bar"></div>
+          </div>
+          <div id="offlineStatus" class="status-text"></div>
+          <div id="offlineSummary" class="summary-row"></div>
+          <div id="offlineBoundaryDebug" class="boundary-debug" hidden></div>
+          <div id="offlineResults" class="results-table"></div>
+        </article>
+      </section>
+
+      <section id="settingsPanel" class="view-panel" data-view-panel="settings">
+        <article class="panel settings-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow" data-ui-key="settings_eyebrow">Settings</p>
+              <h2 data-ui-key="settings_title">設定</h2>
+            </div>
+          </div>
+
+          <div class="settings-grid">
+            <label class="field">
+              <span data-ui-key="settings_language">介面語言</span>
+              <select id="settingsLanguageSelect">
+                <option value="auto" data-ui-key="settings_language_auto">依照瀏覽器語言</option>
+                <option value="zh" data-ui-key="settings_language_zh">中文</option>
+                <option value="en" data-ui-key="settings_language_en">English</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span data-ui-key="settings_min_segment">最短歌曲片段秒數</span>
+              <input id="settingsMinSegmentSec" type="number" min="15" max="600" step="1" placeholder="90">
+            </label>
+
+            <label class="check-field settings-check">
+              <input id="settingsSplitMedleyDefault" type="checkbox">
+              <span data-ui-key="settings_split_medley">離線分析預設啟用串燒切分</span>
+            </label>
+
+            <label class="check-field settings-check">
+              <input id="settingsAdvancedPreloadDefault" type="checkbox">
+              <span data-ui-key="settings_advanced_preload">播放序列預設啟用跨影片預開緩衝</span>
+            </label>
+          </div>
+
+          <div class="button-row">
+            <button id="saveSettingsBtn" class="primary" type="button" data-ui-key="settings_save">儲存設定</button>
+          </div>
+          <div id="settingsStatus" class="status-text"></div>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <div id="toastHost" class="toast-host" aria-live="polite"></div>
+
+  <script src="lib/vendor/onnxruntime/ort.min.js"></script>
+  <script type="module" src="workbench.js"></script>
+</body>
+</html>

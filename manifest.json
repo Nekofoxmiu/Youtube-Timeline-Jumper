@@ -1,16 +1,32 @@
 {
   "manifest_version": 3,
   "name": "YouTube Auto Jump",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Automatically jump to a specific time on YouTube videos.",
   "permissions": [
     "storage",
     "activeTab",
-    "tabs"
+    "tabs",
+    "tabCapture",
+    "offscreen"
     ],
+  "host_permissions": [
+    "*://*.youtube.com/*",
+    "*://youtube.com/*",
+    "*://youtu.be/*"
+  ],
   "background": {
     "service_worker": "background.js",
     "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  },
+  "cross_origin_embedder_policy": {
+    "value": "require-corp"
+  },
+  "cross_origin_opener_policy": {
+    "value": "same-origin"
   },
   "action": {
     "default_icon": {
@@ -51,7 +67,12 @@
       ],
       "resources": [
         "images/ui/*",
-        "lib/*"
+        "lib/*",
+        "lib/songDetection/*",
+        "lib/vendor/onnxruntime/*",
+        "models/fireredvad/aed/*",
+        "offscreen.html",
+        "offscreen.js"
       ]
     }
   ]

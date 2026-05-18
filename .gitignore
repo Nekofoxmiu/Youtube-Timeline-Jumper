@@ -4,3 +4,38 @@
 web-bundles
 .github
 .vscode
+.tmp_ort/
+dist/
+tmp_eval/
+__pycache__/
+tools/**/__pycache__/
+
+# Local model, training, and evaluation artifacts.
+models/
+pretrained_models/
+training_runs/
+tools/data/
+tools/external/
+
+# Large binary artifacts generated or downloaded during detector experiments.
+*.m4a
+*.wav
+*.onnx
+*.pt
+*.pth
+*.pth.tar
+*.wasm
+
+# Runtime model and WASM assets required by the packaged extension.
+!models/
+models/*
+!models/fireredvad/
+models/fireredvad/*
+!models/fireredvad/aed/
+models/fireredvad/aed/*
+!models/fireredvad/aed/cmvn.json
+!models/fireredvad/aed/firered_song_head.meta.json
+!models/fireredvad/aed/firered_song_head.onnx
+!models/fireredvad/aed/model.meta.json
+!models/fireredvad/aed/model.onnx
+!lib/vendor/onnxruntime/*.wasm

@@ -1,0 +1,25 @@
+{
+  "modelType": "firered-vad-aed",
+  "detectorVersion": "firered-aed-onnx-v1",
+  "inputName": "features",
+  "outputName": "event_probs",
+  "labels": [
+    "speech",
+    "singing",
+    "music"
+  ],
+  "sampleRate": 16000,
+  "frameLengthMs": 25,
+  "frameShiftMs": 10,
+  "featureDim": 80,
+  "songThreshold": 0.56,
+  "analysisWindowSec": 12.0,
+  "evidenceWindowSec": 4.0,
+  "minAudioSec": 1.2,
+  "sampleScale": 32768.0,
+  "preemphasis": 0.97,
+  "melMinHz": 20,
+  "melMaxHz": 7600,
+  "sourceModelDir": "C:\\Users\\Nekofox\\Desktop\\Dev_coding\\Youtube-Timeline-Jumper\\pretrained_models\\FireRedVAD\\AED",
+  "notes": "Browser runtime expects local 16 kHz mono fbank features with CMVN from cmvn.json."
+}

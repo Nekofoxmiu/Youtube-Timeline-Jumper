@@ -360,3 +360,21 @@ body.light-theme .ytj-popup {
     cursor: pointer;
     color: var(--text-color);
 }
+
+.ytj-auto-song-item {
+    border-left: 3px solid #0ea5e9;
+    background-color: rgba(14, 165, 233, 0.08);
+}
+
+.ytj-auto-song-item:hover {
+    background-color: rgba(14, 165, 233, 0.14);
+}
+
+.ytj-auto-song-item .ytj-playlist-item-title {
+    font-style: italic;
+}
+
+.ytj-auto-song-provisional {
+    border-left-style: dashed;
+    opacity: 0.86;
+}

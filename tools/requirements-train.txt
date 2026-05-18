@@ -1,0 +1,7 @@
+torch>=2.1.0
+torchaudio>=2.1.0
+torchcodec
+numpy
+onnx
+onnxruntime>=1.17.0
+kaldiio

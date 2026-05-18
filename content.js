@@ -17,6 +17,7 @@
     let getVideoInfoModule;
     let editModule;
     let stateManagerModule;
+    let playlistControllerModule;
 
     try {
         dataClassModule            = await import('./lib/dataclass.js');
@@ -28,6 +29,7 @@
         editModule                 = await import('./lib/editModule.js');
         getVideoInfoModule         = await import('./lib/getVideoInfo.js');
         stateManagerModule         = await import('./lib/stateManager.js');
+        playlistControllerModule   = await import('./lib/playlistController.js');
     } catch (error) {
         console.error('Module loading failed:', error);
     }
@@ -57,6 +59,7 @@
     const { fetchVideoUploadTime }                          = getVideoInfoModule;
     const { enableEditMode }                                = editModule;
     const { PlaylistStateManager }                          = stateManagerModule;
+    const { PlaylistController }                             = playlistControllerModule;
 
     // === [ 三、全域變數與常數 ] ======================================================
     // 共用 DOM 元素或容器
@@ -77,16 +80,111 @@
     let mouseEventHandler;
     let playlistTimeManager;
     let stateManager;
+    let playlistController;
 
     // 常數（選擇器等）
     const sidebarQuery              = '#related.style-scope.ytd-watch-flexy';
     const appPlayListContainerQuery = '#ytj-playlist-container';
+    const AUTO_SONG_TYPE            = 'auto-song';
 
     // === [ 四、Chrome 訊息監聽與狀態控制 ] ============================================
+    function roundNumber(value, digits = 3) {
+        const num = Number(value);
+        if (!Number.isFinite(num)) return 0;
+        const factor = 10 ** digits;
+        return Math.round(num * factor) / factor;
+    }
+
     // 監聽來自 background.js 的訊息
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-        // handle quick content-scoped requests first
-        if (request && request.action === 'getUploadTime') {
+        if (!request) return false;
+
+        // quick sync handlers
+        if (request.action === 'getCurrentVideoId') {
+            sendResponse({ videoId: getCurrentVideoId() || null });
+            return false;
+        }
+
+        if (request.action === 'getCurrentVideoTime') {
+            const video = document.querySelector('video');
+            sendResponse({
+                videoId: getCurrentVideoId() || null,
+                currentTime: video ? Number(video.currentTime) : null,
+                duration: video && Number.isFinite(Number(video.duration)) ? Number(video.duration) : null,
+                paused: video ? Boolean(video.paused) : null,
+                playbackRate: video ? Number(video.playbackRate) : null,
+                muted: video ? Boolean(video.muted) : null
+            });
+            return false;
+        }
+
+        if (request.action === 'workbenchQueueControl') {
+            try {
+                const video = document.querySelector('video');
+                if (!video) {
+                    sendResponse({ success: false, message: 'No YouTube video element found.' });
+                    return false;
+                }
+
+                const patch = request.patch || {};
+                if (Number.isFinite(Number(patch.currentTime))) {
+                    const duration = Number.isFinite(Number(video.duration)) ? Number(video.duration) : Infinity;
+                    video.currentTime = Math.max(0, Math.min(duration, Number(patch.currentTime)));
+                }
+                if (Number.isFinite(Number(patch.playbackRate))) {
+                    video.playbackRate = Math.max(0.25, Math.min(16, Number(patch.playbackRate)));
+                }
+                if (typeof patch.muted === 'boolean') {
+                    video.muted = patch.muted;
+                }
+                if (patch.command === 'play') {
+                    const playPromise = video.play();
+                    if (playPromise && typeof playPromise.catch === 'function') {
+                        playPromise.catch((error) => console.debug('Workbench video.play failed:', error));
+                    }
+                } else if (patch.command === 'pause') {
+                    video.pause();
+                }
+
+                sendResponse({
+                    success: true,
+                    videoId: getCurrentVideoId() || null,
+                    currentTime: Number(video.currentTime),
+                    duration: Number.isFinite(Number(video.duration)) ? Number(video.duration) : null,
+                    paused: Boolean(video.paused),
+                    ended: Boolean(video.ended),
+                    playbackRate: Number(video.playbackRate),
+                    muted: Boolean(video.muted)
+                });
+            } catch (error) {
+                sendResponse({ success: false, message: error?.message || String(error) });
+            }
+            return false;
+        }
+
+        if (request.action === 'songDetectionStatusChanged') {
+            sendResponse({ success: true });
+            return false;
+        }
+
+        // async handlers
+        if (request.action === 'songSegmentsUpdated') {
+            sendResponse({ success: true, accepted: true });
+            (async () => {
+                try {
+                    const currentVideoId = getCurrentVideoId();
+                    if (request.videoId && currentVideoId && request.videoId !== currentVideoId) {
+                        return;
+                    }
+                    await refreshPlaylistFromStorage();
+                } catch (error) {
+                    console.debug('songSegmentsUpdated refresh failed:', error);
+                }
+            })();
+            return false;
+        }
+
+        if (request.action === 'getUploadTime') {
             (async () => {
                 try {
                     const vid = getCurrentVideoId();
@@ -101,17 +199,39 @@
             return true;
         }
 
+        if (request.action === 'playPlaylist') {
+            (async () => {
+                try {
+                    if (!playlistController) {
+                        sendResponse({ success: false, message: 'Playlist controller is not ready.' });
+                        return;
+                    }
+                    await playlistController.playRange(request.startIndex, request.endIndex);
+                    sendResponse({ success: true });
+                } catch (error) {
+                    sendResponse({ success: false, message: error?.message || String(error) });
+                }
+            })();
+            return true;
+        }
+
+        if (!['removePlaylist', 'initializePlaylist'].includes(request.action)) {
+            return false;
+        }
+
+        sendResponse({ success: true, accepted: true });
         (async () => {
-            await handleRuntimeMessage(request, sender, sendResponse, {
+            await handleRuntimeMessage(request, sender, () => {}, {
                 deleteAppElement,
                 main,
                 sidebarQuery,
                 appPlayListContainerQuery,
                 document
             });
-        })();
-        // 需回傳 true 以保持 sendResponse 的持續狀態
-        return true;
+        })().catch((error) => {
+            console.debug('Runtime message handling failed after acknowledgement:', error);
+        });
+        return false;
     });
 
     // 從 local storage 取得「插件是否啟動」的狀態並決定是否載入
@@ -201,10 +321,6 @@
         // 初始化狀態管理器
         stateManager = new PlaylistStateManager(getCurrentVideoId());
 
-        // 產生事件處理器
-        mouseEventHandler     = new MouseEventHandler(ul, playlistContainer, playlistState, stateManager);
-        playlistTimeManager   = new PlaylistTimeManager(playlistContainer, playlistState, stateManager);
-
         // 從 local storage 讀取該影片所對應的播放列表資料
         const videoId = getCurrentVideoId();
         if (!videoId) {
@@ -212,30 +328,22 @@
             return;
         }
 
-        const savedState = await stateManager.load();
-        if (Array.isArray(savedState)) {
-            // load playlist-level meta (uploadTime/lastModified) from meta store
-            let meta = null;
-            try {
-                meta = await stateManager.loadMeta();
-            } catch (e) {
-                meta = null;
+        playlistController = new PlaylistController({
+            videoId,
+            playlistContainer,
+            listElement: ul,
+            playButton,
+            toggleSwitch,
+            createPopupTextBox,
+            createImportPopupTextBox,
+            legacyState: playlistState,
+            getCurrentTimeSeconds: () => {
+                const timeObj = getCurrentVideoTime();
+                return timeObj ? timeObj.getTotalseconds() : 0;
             }
-
-            const now = new Date().toISOString();
-            savedState.forEach(itemData => {
-                const startTime = TimeSlot.fromObject(itemData.start);
-                const endTime   = TimeSlot.fromObject(itemData.end);
-                // Prefer per-item values if present (backwards compatibility), else use playlist-level meta, else now
-                const itemLastModified = itemData.lastModified || (meta && meta.lastModified) || now;
-                const itemUploadTime = itemData.uploadTime || (meta && meta.uploadTime) || now;
-                const newItem   = createPlaylistItem(startTime, endTime, itemData.title, { lastModified: itemLastModified, uploadTime: itemUploadTime });
-                playlistState.playlistItems.push(newItem);
-                ul.appendChild(newItem);
-            });
-            playlistContainer.appendChild(ul);
-            playlistState.state = savedState;
-        }
+        });
+        playlistController.bind();
+        await playlistController.loadFromStorage();
 
         // 將 import/export/編輯 按鈕加入到 importexportContainer
         importexportContainer.appendChild(importPlaylistButton);
@@ -253,61 +361,59 @@
         sidebarElm.insertBefore(buttonContainer, sidebarElm.firstChild);
 
         // === [ 事件監聽 ] ===
-        // 1) 拖曳事件（以事件委派方式監聽 ul 的 mousedown）
-        ul.addEventListener('mousedown', handleMouseDown);
-
-        // 2) 點擊事件：偵測是否點擊了播放列表項目的文字（進入編輯）
-        playlistContainer.addEventListener('click', handleClick);
-
-        // 3) 監聽「新增到播放列表」按鈕點擊
         addToPlaylistButton.addEventListener('click', addToPlaylist);
+    }
 
-        // 4) 播放按鈕點擊事件
-        playButton.addEventListener('click', async () => {
-            const tabId = await chrome.runtime.sendMessage({ action: 'getTabId' });
-            if (!tabId) {
-                console.error('Failed to retrieve tabId');
-                return;
-            }
+    function extractPlaylistItemOptions(itemData) {
+        const itemType = itemData && itemData.type === AUTO_SONG_TYPE ? AUTO_SONG_TYPE : 'manual';
+        const confidence = Number(itemData && itemData.confidence);
+        return {
+            type: itemType,
+            confidence: Number.isFinite(confidence) ? confidence : null,
+            provisional: typeof itemData?.provisional === 'boolean' ? itemData.provisional : null,
+            detectorVersion: itemData && itemData.detectorVersion ? itemData.detectorVersion : null
+        };
+    }
 
-            const video = document.querySelector('video');
-            if (!video) return;
-            
-            if (!playButton.classList.contains('playing')) {
-                // 尚未在播放，開始播放
-                await Promise.all(styleModificationPromises);
-                styleModificationPromises.length = 0;
-                await playPlaylist(0, playlistState.getPlaylistStateLength());
-            } else {
-                // 已在播放中，點擊後停止
-                if (playButton.classList.contains('playing')) {
-                    // 恢復 UI 樣式
-                    const styleModificationPromise = new Promise(resolve => {
-                        document.querySelectorAll('.ytj-playing-item')
-                                .forEach(item => item.classList.remove('ytj-playing-item'));
-                        document.querySelectorAll('.ytj-drag-handle.playing')
-                                .forEach(handle => handle.classList.remove('playing'));
-                        resolve();
-                    });
-                    styleModificationPromises.push(styleModificationPromise);
-                    await styleModificationPromise;
+    function renderPlaylistItems(savedState, meta) {
+        playlistState.clearAll();
+        if (ul) ul.innerHTML = '';
+
+        const now = new Date().toISOString();
+        if (Array.isArray(savedState)) {
+            savedState.forEach(itemData => {
+                try {
+                    if (!itemData || typeof itemData !== 'object' || !itemData.start || !itemData.end) return;
+                    const startTime = TimeSlot.fromObject(itemData.start);
+                    const endTime = TimeSlot.fromObject(itemData.end);
+                    const itemLastModified = itemData.lastModified || (meta && meta.lastModified) || now;
+                    const itemUploadTime = itemData.uploadTime || (meta && meta.uploadTime) || now;
+                    const options = extractPlaylistItemOptions(itemData);
+                    const newItem = createPlaylistItem(
+                        startTime,
+                        endTime,
+                        itemData.title,
+                        { lastModified: itemLastModified, uploadTime: itemUploadTime },
+                        options
+                    );
+                    playlistState.playlistItems.push(newItem);
+                    ul.appendChild(newItem);
+                } catch (error) {
+                    console.debug('Failed to render playlist item:', error);
                 }
-                await Promise.all(styleModificationPromises);
-                styleModificationPromises.length = 0;
+            });
+        }
 
-                playButton.classList.remove('playing');
-                video.pause();
-                //console.log(tabId)
-                await chrome.storage.local.set({ [`currentPlayId_${tabId}`]: 0 });
-                
-            }
-        });
+        if (playlistContainer && ul && ul.parentNode !== playlistContainer) {
+            playlistContainer.appendChild(ul);
+        }
+        playlistState.state = Array.isArray(savedState) ? savedState : [];
+    }
 
-        // 5) 匯入 / 匯出按鈕（其實在 createImportExportContainer 時已經綁定，也可保留此處做保險）
-        const importButton = document.querySelector('#ytj-import-playlist-text');
-        const exportButton = document.querySelector('#ytj-export-playlist');
-        if (importButton) importButton.addEventListener('click', importPlaylistFromText);
-        if (exportButton) exportButton.addEventListener('click', exportPlaylist);
+    async function refreshPlaylistFromStorage() {
+        if (playlistController) {
+            await playlistController.loadFromStorage();
+        }
     }
 
     // === [ 七、主要事件或 DOM 操作函式 ] ============================================
@@ -340,6 +446,11 @@
      * 刪除整個插件產生的 DOM（當切換影片或重新載入時可能需要用到）
      */
     async function deleteAppElement() {
+        if (playlistController) {
+            playlistController.destroy();
+            playlistController = null;
+        }
+
         // 清除資料
         playlistState.clearAll();
 
@@ -365,8 +476,8 @@
         if (oldUl)                    oldUl.remove();
 
         // 清空容器內容
-        playlistContainer.innerHTML = '';
-        ul.innerHTML               = '';
+        if (playlistContainer) playlistContainer.innerHTML = '';
+        if (ul) ul.innerHTML = '';
 
         // 重新創建容器和按鈕
         playlistContainer     = createPlaylistContainer(getCurrentVideoId());
@@ -383,9 +494,8 @@
         // 重新初始化狀態管理器
         stateManager         = new PlaylistStateManager(getCurrentVideoId());
 
-        // 重新創建事件處理程序
-        mouseEventHandler    = new MouseEventHandler(ul, playlistContainer, playlistState, stateManager);
-        playlistTimeManager  = new PlaylistTimeManager(playlistContainer, playlistState, stateManager);
+        mouseEventHandler    = null;
+        playlistTimeManager  = null;
     }
 
     // === [ 八、播放列表的核心功能函式 ] ==============================================
@@ -394,6 +504,10 @@
      * 新增一個播放列表項目
      */
     function addToPlaylist() {
+        if (playlistController) {
+            playlistController.addAtCurrentTime();
+            return;
+        }
     const now = new Date().toISOString();
     const newItem = createPlaylistItem(null, null, '', { lastModified: now, uploadTime: now });
         playlistState.playlistItems.push(newItem);
@@ -423,7 +537,7 @@
     * @param {string} [title] - 項目標題（可選）
      * @returns {HTMLElement} 新建立的播放列表項目
      */
-    function createPlaylistItem(startTime, endTime, title, meta) {
+    function createPlaylistItem(startTime, endTime, title, meta, options = {}) {
         // 確認起訖時間是否合法，若不合法則自動修正
         if (startTime != null && endTime != null) {
             const timeObj  = PlaylistTimeManager.checkStartAndEnd(startTime, endTime);
@@ -431,11 +545,17 @@
             endTime   = timeObj.end;
         }
 
-        const newItem    = document.createElement('li');
+        const itemType = options.type || 'manual';
+        const isAutoSongItem = itemType === AUTO_SONG_TYPE;
+        const isProvisional = isAutoSongItem && Boolean(options.provisional);
+
+        const newItem = document.createElement('li');
         newItem.classList.add('ytj-playlist-item');
+        if (isAutoSongItem) newItem.classList.add('ytj-auto-song-item');
+        if (isProvisional) newItem.classList.add('ytj-auto-song-provisional');
 
         // 拖曳把手
-    const dragHandle = document.createElement('div');
+        const dragHandle = document.createElement('div');
         dragHandle.classList.add('ytj-drag-handle');
         dragHandle.draggable = true;
         dragHandle.addEventListener('dragstart', mouseEventHandler.handleDragStart);
@@ -445,7 +565,7 @@
         const startTimeText    = TimeTextElements.startElement;
         const endTimeText      = TimeTextElements.endElement;
 
-    // UI 上的功能按鈕
+        // UI 上的功能按鈕
         const setStartTimeButton = createSetStartTimeButton();
         const setEndTimeButton   = createSetEndTimeButton();
         const deleteButton       = createDeleteButton(newItem);
@@ -453,12 +573,21 @@
 
         // 播放列表項目標題 input
         const titleInput         = createTitleInput();
-        titleInput.value         = title || '';
+        const fallbackTitle = isProvisional ? 'Auto Song (Provisional)' : (isAutoSongItem ? 'Auto Song' : '');
+        titleInput.value         = title || fallbackTitle;
 
-    // attach metadata to DOM dataset
-    const now = new Date().toISOString();
-    newItem.dataset.lastModified = (meta && meta.lastModified) ? meta.lastModified : now;
-    newItem.dataset.uploadTime = (meta && meta.uploadTime) ? meta.uploadTime : now;
+        // attach metadata to DOM dataset
+        const now = new Date().toISOString();
+        newItem.dataset.lastModified = (meta && meta.lastModified) ? meta.lastModified : now;
+        newItem.dataset.uploadTime = (meta && meta.uploadTime) ? meta.uploadTime : now;
+        newItem.dataset.itemType = itemType;
+        if (options.detectorVersion) newItem.dataset.detectorVersion = options.detectorVersion;
+        if (options.confidence !== null && options.confidence !== undefined && Number.isFinite(Number(options.confidence))) {
+            newItem.dataset.confidence = String(roundNumber(options.confidence, 3));
+        }
+        if (typeof options.provisional === 'boolean') {
+            newItem.dataset.provisional = String(options.provisional);
+        }
 
         // 將上述元素組合到 newItem
         newItem.appendChild(dragHandle);
@@ -623,6 +752,10 @@
      * 播放 playlist（呼叫 background.js 處理實際進度控管）
      */
     async function playPlaylist(startIndex = 0, endIndex = 0) {
+        if (playlistController) {
+            await playlistController.playRange(startIndex, endIndex);
+            return;
+        }
         await chrome.runtime.sendMessage({
             action: 'playPlaylist',
             startIndex: startIndex,
@@ -637,6 +770,10 @@
      * 從使用者貼上的文字匯入播放列表
      */
     async function importPlaylistFromText() {
+        if (playlistController) {
+            playlistController.openImportDialog();
+            return;
+        }
         createImportPopupTextBox('Import Playlist', async (text, additionalSeconds) => {
             if (!text) return;
 
@@ -732,6 +869,10 @@
      * 使用者可直接編輯整段播放列表文本，再一次性套用
      */
     async function editPlaylistFromText() {
+        if (playlistController) {
+            playlistController.openBulkEditDialog();
+            return;
+        }
         // 把目前列表的內容先變成文字
         const items = playlistState.playlistItems.map(item => {
             const start = item.querySelector('.ytj-playlist-item-text-start').innerText;
@@ -799,6 +940,10 @@
      * 將播放列表匯出成文字，使用者可自行複製
      */
     function exportPlaylist() {
+        if (playlistController) {
+            playlistController.openExportDialog();
+            return;
+        }
         const items = playlistState.playlistItems.map(item => {
             const start = item.querySelector('.ytj-playlist-item-text-start').innerText;
             const end   = item.querySelector('.ytj-playlist-item-text-end').innerText;
