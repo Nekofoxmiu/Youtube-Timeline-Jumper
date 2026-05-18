@@ -8,13 +8,11 @@ const DETECTION_CONFIG_KEY = 'songDetectionConfig';
 const APP_PREFERENCES_KEY = 'ytjUserPreferences';
 const APP_PREFERENCES_DEFAULTS_VERSION = 'defaults-off-2026-05-18';
 const DEFAULT_MIN_SEGMENT_DURATION_SEC = 90;
+const DEFAULT_PRELOAD_LOOKAHEAD_SEC = 20;
 const QUEUE_STORAGE_KEY = 'workbench_cross_video_queue';
 const SAVED_QUEUES_STORAGE_KEY = 'workbench_cross_video_saved_queues';
 const HOP_SEC = 0.5;
-const PRELOAD_LOOKAHEAD_SEC = 10;
 const PLAYBACK_POLL_MS = 250;
-const WINDOW_WIDTH = 1100;
-const WINDOW_HEIGHT = 760;
 const OFFLINE_ANALYSIS_CHUNK_SEC = 20;
 const TRACKER_CONFIG = Object.freeze({ hopSeconds: HOP_SEC, candidateMinDurationSec: 18, candidateMaxDurationSec: 75, minCandidateAnchors: 5, minCandidateAnchorSpanSec: 4, candidateGapSec: 8, tailStartRequiredWindows: 4, tailEndRequiredWindows: 3, tailMaxDurationSec: 40, tailPaddingSec: 40, minSegmentDurationSec: 90, mergeGapSec: 8, provisionalMinDurationSec: 12 });
 const MODEL_RUN_SEGMENT_RULES = Object.freeze({
@@ -91,6 +89,7 @@ const UI_TEXT = Object.freeze({
     settings_min_segment: 'Minimum song segment seconds',
     settings_split_medley: 'Enable medley splitting by default for offline analysis',
     settings_advanced_preload: 'Enable cross-video preload by default for playback queue',
+    settings_advanced_preload_seconds: 'Cross-video preload seconds',
     settings_save: 'Save settings',
     settings_saved: 'Settings saved.',
     settings_save_failed: 'Failed to save settings: $1',
@@ -108,7 +107,7 @@ const UI_TEXT = Object.freeze({
     load: 'Load',
     delete: 'Delete',
     queue_title: 'Playback Queue',
-    advanced_preload_label: 'Advanced test: preload the next video 10 seconds before switching',
+    advanced_preload_label: 'Advanced test: preload the next video tab $1 seconds before switching',
     database_eyebrow: 'Database',
     database_title: 'Database',
     database_search_placeholder: 'Search videos or streams',
@@ -203,6 +202,7 @@ const UI_TEXT = Object.freeze({
     settings_min_segment: '最短歌曲片段秒數',
     settings_split_medley: '離線分析預設啟用串燒切分',
     settings_advanced_preload: '播放序列預設啟用跨影片預開緩衝',
+    settings_advanced_preload_seconds: '跨影片預開緩衝秒數',
     settings_save: '儲存設定',
     settings_saved: '設定已儲存。',
     settings_save_failed: '儲存設定失敗：$1',
@@ -220,7 +220,7 @@ const UI_TEXT = Object.freeze({
     load: '載入',
     delete: '刪除',
     queue_title: '播放序列',
-    advanced_preload_label: '進階測試：跨影片前 10 秒預開緩衝視窗',
+    advanced_preload_label: '進階測試：跨影片前 $1 秒預開緩衝分頁',
     database_eyebrow: '資料庫',
     database_title: '資料庫',
     database_search_placeholder: '搜尋影片 / 直播',
@@ -347,6 +347,7 @@ const prevTrackBtn = $('prevTrackBtn');
 const playPauseBtn = $('playPauseBtn');
 const nextTrackBtn = $('nextTrackBtn');
 const advancedPreloadToggle = $('advancedPreloadToggle');
+const advancedPreloadLabel = $('advancedPreloadLabel');
 const stopQueueBtn = $('stopQueueBtn');
 const clearQueueBtn = $('clearQueueBtn');
 const queueNameInput = $('queueNameInput');
@@ -360,6 +361,7 @@ const settingsLanguageSelect = $('settingsLanguageSelect');
 const settingsMinSegmentSec = $('settingsMinSegmentSec');
 const settingsSplitMedleyDefault = $('settingsSplitMedleyDefault');
 const settingsAdvancedPreloadDefault = $('settingsAdvancedPreloadDefault');
+const settingsAdvancedPreloadLookaheadSec = $('settingsAdvancedPreloadLookaheadSec');
 const saveSettingsBtn = $('saveSettingsBtn');
 const settingsStatus = $('settingsStatus');
 
@@ -385,6 +387,7 @@ let userPreferences = {
   language: 'auto',
   offlineSplitMedleyDefault: false,
   advancedPreloadDefault: false,
+  advancedPreloadLookaheadSec: DEFAULT_PRELOAD_LOOKAHEAD_SEC,
 };
 
 function createIdlePlaybackState() { return { runId: 0, playing: false, paused: false, activeIndex: -1, requestedIndex: null, activeQueueId: null, activeHandle: null, activeVideoId: null, preloadHandles: new Map(), pausedPolls: 0 }; }
@@ -396,6 +399,12 @@ function normalizeMinSegmentDurationSec(value, fallback = DEFAULT_MIN_SEGMENT_DU
   const num = Number(value);
   if (!Number.isFinite(num)) return fallback;
   return Math.max(15, Math.min(600, Math.round(num)));
+}
+function normalizePreloadLookaheadSec(value, fallback = DEFAULT_PRELOAD_LOOKAHEAD_SEC) {
+  if (value === null || value === undefined || value === '') return fallback;
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(5, Math.min(120, Math.round(num)));
 }
 function normalizeLanguagePreference(value) {
   const key = String(value || 'auto').trim().toLowerCase();
@@ -423,6 +432,14 @@ function tr(key, substitutions = []) {
   });
 }
 function songsLabel(count) { return tr('songs_count', [count]); }
+function getAdvancedPreloadLookaheadSec() {
+  return normalizePreloadLookaheadSec(userPreferences.advancedPreloadLookaheadSec);
+}
+function updateAdvancedPreloadLabel() {
+  if (advancedPreloadLabel) {
+    advancedPreloadLabel.textContent = tr('advanced_preload_label', [getAdvancedPreloadLookaheadSec()]);
+  }
+}
 function applyWorkbenchLanguage() {
   document.documentElement.lang = resolveWorkbenchLanguage() === 'zh' ? 'zh-TW' : 'en';
   document.querySelectorAll('[data-ui-key]').forEach((element) => {
@@ -445,6 +462,7 @@ function applyWorkbenchLanguage() {
   if (databaseVideoList) renderDatabaseVideoList();
   if (databaseTrackList) renderDatabaseEditor();
   if (savedQueueSelect) renderSavedQueueSelect();
+  updateAdvancedPreloadLabel();
 }
 function normalizeUserPreferences(raw = {}) {
   return {
@@ -452,6 +470,7 @@ function normalizeUserPreferences(raw = {}) {
     language: normalizeLanguagePreference(raw.language),
     offlineSplitMedleyDefault: Boolean(raw.offlineSplitMedleyDefault),
     advancedPreloadDefault: Boolean(raw.advancedPreloadDefault),
+    advancedPreloadLookaheadSec: normalizePreloadLookaheadSec(raw.advancedPreloadLookaheadSec),
   };
 }
 async function loadUserPreferences() {
@@ -527,23 +546,33 @@ function renderSettingsForm(detectionConfig = {}) {
   if (settingsAdvancedPreloadDefault) {
     settingsAdvancedPreloadDefault.checked = Boolean(userPreferences.advancedPreloadDefault);
   }
+  if (settingsAdvancedPreloadLookaheadSec) {
+    settingsAdvancedPreloadLookaheadSec.value = String(normalizePreloadLookaheadSec(userPreferences.advancedPreloadLookaheadSec));
+  }
+  updateAdvancedPreloadLabel();
 }
 async function saveSettingsFromForm() {
   const minSegmentDurationSec = normalizeMinSegmentDurationSec(
     readNumberInput(settingsMinSegmentSec, DEFAULT_MIN_SEGMENT_DURATION_SEC)
   );
+  const advancedPreloadLookaheadSec = normalizePreloadLookaheadSec(
+    readNumberInput(settingsAdvancedPreloadLookaheadSec, DEFAULT_PRELOAD_LOOKAHEAD_SEC)
+  );
   if (settingsMinSegmentSec) settingsMinSegmentSec.value = String(minSegmentDurationSec);
   if (offlineMinSegmentSec) offlineMinSegmentSec.value = String(minSegmentDurationSec);
+  if (settingsAdvancedPreloadLookaheadSec) settingsAdvancedPreloadLookaheadSec.value = String(advancedPreloadLookaheadSec);
 
   await saveSongDetectionConfig({ minSegmentDurationSec });
   await saveUserPreferences({
     language: settingsLanguageSelect?.value || 'auto',
     offlineSplitMedleyDefault: Boolean(settingsSplitMedleyDefault?.checked),
     advancedPreloadDefault: Boolean(settingsAdvancedPreloadDefault?.checked),
+    advancedPreloadLookaheadSec,
   });
 
   if (offlineSplitMedleyToggle) offlineSplitMedleyToggle.checked = Boolean(userPreferences.offlineSplitMedleyDefault);
   if (advancedPreloadToggle) advancedPreloadToggle.checked = Boolean(userPreferences.advancedPreloadDefault);
+  updateAdvancedPreloadLabel();
   setStatus(settingsStatus, tr('settings_saved'));
   showToast(tr('settings_saved'));
 }
@@ -1821,7 +1850,7 @@ async function saveNamedQueue() {
 async function loadNamedQueue() {
   const list = savedQueues.find((item) => item.id === savedQueueSelect.value);
   if (!list) { showToast(tr('no_queue_to_load'), { warning: true }); return; }
-  if (playbackState.playing) await stopQueuePlayback({ reason: tr('loaded_another_queue'), closeWindows: true, silentToast: true });
+  if (playbackState.playing) await stopQueuePlayback({ reason: tr('loaded_another_queue'), closePlaybackTabs: true, silentToast: true });
   queueItems = list.items.filter((item) => item && item.videoId && Number.isFinite(Number(item.startSec))).map(cloneForQueue);
   await persistQueue();
   renderQueue();
@@ -2163,53 +2192,68 @@ async function waitForQueueTabReady(tabId, expectedVideoId = null, timeoutMs = 2
   throw new Error(lastError?.message || 'Timed out waiting for YouTube tab.');
 }
 
-async function createPlaybackWindow(item, { focused = true, preload = false } = {}) {
-  const win = await chrome.windows.create({
+async function getStudioWindowId() {
+  try {
+    const currentTab = await chrome.tabs.getCurrent();
+    if (Number.isFinite(currentTab?.windowId)) return currentTab.windowId;
+  } catch (error) {
+    // Fall back to the current window below.
+  }
+  const currentWindow = await chrome.windows.getCurrent();
+  if (!Number.isFinite(currentWindow?.id)) throw new Error('Failed to locate Playlist Studio window.');
+  return currentWindow.id;
+}
+
+async function createPlaybackTab(item, { focused = true, preload = false } = {}) {
+  const windowId = await getStudioWindowId();
+  const tab = await chrome.tabs.create({
+    windowId,
     url: getYoutubeUrl(item),
-    type: 'popup',
-    width: WINDOW_WIDTH,
-    height: WINDOW_HEIGHT,
-    focused,
+    active: Boolean(focused),
   });
-  const tabId = win.tabs?.[0]?.id;
+  const tabId = tab?.id;
   if (!Number.isFinite(tabId)) throw new Error('Failed to create playback tab.');
   await waitForQueueTabReady(tabId, item.videoId);
   if (preload) {
     await sendQueueControl(tabId, { currentTime: item.startSec, muted: true, command: 'pause' }).catch(() => {});
   }
-  return { windowId: win.id, tabId, videoId: item.videoId, queueId: item.queueId, preload };
+  return { windowId: tab.windowId || windowId, tabId, videoId: item.videoId, queueId: item.queueId, preload };
 }
 
 async function closeHandle(handle) {
-  if (!handle?.windowId) return;
+  if (!handle?.tabId) return;
   try {
-    await chrome.windows.remove(handle.windowId);
+    await chrome.tabs.remove(handle.tabId);
   } catch (error) {
-    // Window was already closed.
+    // Tab was already closed.
   }
 }
 
-async function closeAllPlaybackWindows() {
+async function closeAllPlaybackTabs() {
   const handles = playbackState.activeHandle ? [playbackState.activeHandle] : [];
   for (const handle of playbackState.preloadHandles.values()) handles.push(handle);
   await Promise.all(handles.map(closeHandle));
 }
 
 async function ensureHandleAlive(handle) {
-  if (!handle?.tabId) throw new Error('Playback window was closed.');
+  if (!handle?.tabId) throw new Error('Playback tab was closed.');
   try {
-    await chrome.tabs.get(handle.tabId);
+    const tab = await chrome.tabs.get(handle.tabId);
+    handle.windowId = tab.windowId;
   } catch (error) {
-    throw new Error('Playback window was closed by the user.');
+    throw new Error('Playback tab was closed by the user.');
   }
 }
 
 async function focusHandle(handle) {
   if (!handle) return;
   try {
-    await chrome.windows.update(handle.windowId, { focused: true });
+    const tab = await chrome.tabs.get(handle.tabId);
+    handle.windowId = tab.windowId;
+    await chrome.windows.update(tab.windowId, { focused: true });
+    await chrome.tabs.update(handle.tabId, { active: true });
   } catch (error) {
-    // Window may have been closed between checks.
+    // Tab may have been closed between checks.
   }
 }
 
@@ -2230,11 +2274,11 @@ async function prepareActiveHandle(item, usePreload, runId) {
     playbackState.activeHandle = preloaded;
     playbackState.activeVideoId = item.videoId;
     await focusHandle(preloaded);
-    if (previous && previous.windowId !== preloaded.windowId) await closeHandle(previous);
+    if (previous && previous.tabId !== preloaded.tabId) await closeHandle(previous);
     return preloaded;
   }
   if (!playbackState.activeHandle) {
-    playbackState.activeHandle = await createPlaybackWindow(item, { focused: true });
+    playbackState.activeHandle = await createPlaybackTab(item, { focused: true });
     playbackState.activeVideoId = item.videoId;
     return playbackState.activeHandle;
   }
@@ -2242,7 +2286,7 @@ async function prepareActiveHandle(item, usePreload, runId) {
   if (playbackState.activeVideoId !== item.videoId) {
     if (usePreload) {
       const previous = playbackState.activeHandle;
-      playbackState.activeHandle = await createPlaybackWindow(item, { focused: true });
+      playbackState.activeHandle = await createPlaybackTab(item, { focused: true });
       playbackState.activeVideoId = item.videoId;
       await closeHandle(previous);
     } else {
@@ -2254,18 +2298,19 @@ async function prepareActiveHandle(item, usePreload, runId) {
   return playbackState.activeHandle;
 }
 
-async function preloadUpcomingWindows(currentIndex, currentTimeSec, runId) {
+async function preloadUpcomingTabs(currentIndex, currentTimeSec, runId) {
   if (!advancedPreloadToggle.checked || playbackState.runId !== runId) return;
   const currentItem = queueItems[currentIndex];
   if (!currentItem) return;
+  const preloadLookaheadSec = getAdvancedPreloadLookaheadSec();
   let secondsUntilTransition = Math.max(0, currentItem.endSec - currentTimeSec);
   for (let nextIndex = currentIndex + 1; nextIndex < queueItems.length; nextIndex += 1) {
-    if (secondsUntilTransition > PRELOAD_LOOKAHEAD_SEC) break;
+    if (secondsUntilTransition > preloadLookaheadSec) break;
     const previous = queueItems[nextIndex - 1];
     const next = queueItems[nextIndex];
     if (next.videoId !== previous.videoId && !playbackState.preloadHandles.has(next.queueId)) {
       try {
-        playbackState.preloadHandles.set(next.queueId, await createPlaybackWindow(next, { focused: false, preload: true }));
+        playbackState.preloadHandles.set(next.queueId, await createPlaybackTab(next, { focused: false, preload: true }));
         setStatus(queueStatus, `Preloaded ${next.title}`);
       } catch (error) {
         showToast(`預開緩衝失敗：${error?.message || String(error)}`, { warning: true });
@@ -2325,7 +2370,7 @@ async function playQueue(startIndex = 0) {
           playbackState.pausedPolls = 0;
         }
         const currentTime = Number(snapshot.currentTime) || 0;
-        await preloadUpcomingWindows(index, currentTime, runId);
+        await preloadUpcomingTabs(index, currentTime, runId);
         if (snapshot.ended || currentTime >= item.endSec) break;
       }
 
@@ -2338,17 +2383,17 @@ async function playQueue(startIndex = 0) {
     }
 
     if (playbackState.runId === runId) {
-      await stopQueuePlayback({ reason: 'Queue finished.', closeWindows: true, silentToast: true });
+      await stopQueuePlayback({ reason: 'Queue finished.', closePlaybackTabs: true, silentToast: true });
       showToast('播放佇列已完成。');
     }
   } catch (error) {
     if (playbackState.runId === runId) {
-      await stopQueuePlayback({ reason: error?.message || String(error), closeWindows: true, warning: true });
+      await stopQueuePlayback({ reason: error?.message || String(error), closePlaybackTabs: true, warning: true });
     }
   }
 }
 
-async function stopQueuePlayback({ reason = 'Stopped.', closeWindows = true, warning = false, silentToast = false } = {}) {
+async function stopQueuePlayback({ reason = 'Stopped.', closePlaybackTabs = true, warning = false, silentToast = false } = {}) {
   const wasPlaying = playbackState.playing;
   playbackState.runId += 1;
   playbackState.playing = false;
@@ -2356,7 +2401,7 @@ async function stopQueuePlayback({ reason = 'Stopped.', closeWindows = true, war
   playbackState.activeIndex = -1;
   playbackState.requestedIndex = null;
   playbackState.activeQueueId = null;
-  if (closeWindows) await closeAllPlaybackWindows();
+  if (closePlaybackTabs) await closeAllPlaybackTabs();
   playbackState.activeHandle = null;
   playbackState.activeVideoId = null;
   playbackState.preloadHandles = new Map();
@@ -2514,7 +2559,7 @@ function bindEvents() {
       .then(() => renderSettingsForm({ minSegmentDurationSec: offlineMinSegmentSec.value }))
       .catch((error) => showToast(tr('settings_save_failed', [error?.message || String(error)]), { warning: true }));
   });
-  stopQueueBtn.addEventListener('click', () => runQueueAction(() => stopQueuePlayback({ reason: 'Stopped by user.', closeWindows: true })));
+  stopQueueBtn.addEventListener('click', () => runQueueAction(() => stopQueuePlayback({ reason: 'Stopped by user.', closePlaybackTabs: true })));
   clearQueueBtn.addEventListener('click', () => runQueueAction(clearQueue));
   saveQueueBtn.addEventListener('click', () => runQueueAction(saveNamedQueue));
   loadQueueBtn.addEventListener('click', () => runQueueAction(loadNamedQueue));

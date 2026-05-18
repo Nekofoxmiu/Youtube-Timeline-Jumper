@@ -113,7 +113,7 @@
                 <h3 data-ui-key="queue_title">播放序列</h3>
                 <label class="check-field compact preload-inline">
                   <input id="advancedPreloadToggle" type="checkbox">
-                  <span data-ui-key="advanced_preload_label">進階測試：跨影片前 10 秒預開緩衝視窗</span>
+                  <span id="advancedPreloadLabel" data-ui-key="advanced_preload_label">進階測試：跨影片前 20 秒預開緩衝分頁</span>
                 </label>
               </div>
               <div class="queue-heading-actions">
@@ -248,6 +248,11 @@
             <label class="check-field settings-check">
               <input id="settingsAdvancedPreloadDefault" type="checkbox">
               <span data-ui-key="settings_advanced_preload">播放序列預設啟用跨影片預開緩衝</span>
+            </label>
+
+            <label class="field">
+              <span data-ui-key="settings_advanced_preload_seconds">跨影片預開緩衝秒數</span>
+              <input id="settingsAdvancedPreloadLookaheadSec" type="number" min="5" max="120" step="1" placeholder="20">
             </label>
           </div>
 

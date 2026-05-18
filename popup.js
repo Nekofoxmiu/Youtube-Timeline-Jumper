@@ -5,7 +5,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const FEATURE_NOTICE_ID = 'release-3.0.0-major-features';
     const FEATURE_NOTICE_STORAGE_KEY = 'popupFeatureNoticeState';
     const FEATURE_NOTICE_FROM_VERSION = '2.0';
-    const FEATURE_NOTICE_TO_VERSION = chrome.runtime?.getManifest?.().version || '3.0.0';
+    const FEATURE_NOTICE_TO_VERSION = '3.0.0';
     const UI_TEXT = {
         en: {
             extensionName: 'YouTube Auto Jump',

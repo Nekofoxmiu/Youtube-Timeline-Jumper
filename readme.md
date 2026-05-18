@@ -2,7 +2,7 @@
 
 YouTube Timeline Jumper is a Chrome Extension for managing timestamped playlists directly on YouTube.
 
-It lets you save moments or songs with start/end times, jump between them, reorder entries, import/export playlist data, and manage cross-video playback queues. Version 3.0.0 also adds local song-segment detection and Playlist Studio for offline analysis and database editing.
+It lets you save moments or songs with start/end times, jump between them, reorder entries, import/export playlist data, and manage cross-video playback queues. Version 3.x also adds local song-segment detection and Playlist Studio for offline analysis and database editing.
 
 Chrome Web Store: https://chromewebstore.google.com/detail/youtube-auto-jump/afnhppglcmibpbelgjbphhfcjndnmhhb
 
@@ -163,6 +163,17 @@ The packaging script includes only runtime files required by the extension and e
 - `tools/`: Training, diagnostics, conversion, smoothing, and packaging utilities.
 
 ## Release Notes
+
+### v3.0.1
+
+Patch update for Playlist Studio playback behavior and preload configuration.
+
+- Playback queue now opens YouTube playback tabs in the same Chrome window as Playlist Studio instead of creating separate popup windows.
+- Cross-video preload now opens background tabs in the same window.
+- Cross-video preload lookahead default changed from 10 seconds to 20 seconds.
+- Added a settings field for cross-video preload lookahead seconds.
+- Preload lookahead can be configured from 5 to 120 seconds.
+- Updated preload wording from "window" to "tab" where applicable.
 
 ### v3.0.0
 
