@@ -530,6 +530,8 @@ async function startSongDetectionForTab(tabId, videoIdHint = null, detectorModeH
   const detectorMode = DEFAULT_DETECTOR_MODE;
   const minSegmentDurationSec = normalizeMinSegmentDurationSec(config.minSegmentDurationSec);
 
+  const videoId = videoIdHint || await requestCurrentVideoIdFromTab(tabId);
+
   await ensureOffscreenDocument();
 
   const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
@@ -537,7 +539,6 @@ async function startSongDetectionForTab(tabId, videoIdHint = null, detectorModeH
     throw new Error('Failed to get tab capture stream id.');
   }
 
-  const videoId = videoIdHint || await requestCurrentVideoIdFromTab(tabId);
   const response = await chrome.runtime.sendMessage({
     action: 'offscreenStartSongDetection',
     tabId,
@@ -593,7 +594,7 @@ function formatSongDetectionStartError(error) {
   const lower = message.toLowerCase();
 
   if (lower.includes('extension has not been invoked for the current page')) {
-    return 'Tab capture 權限尚未授權目前分頁。已可用 Start 後彈出的 popup 進行授權，請在 popup 內按「Start Detect」。';
+    return 'Tab capture 權限尚未授權目前分頁。請切換到要偵測的 YouTube 分頁，點擊擴充功能圖示後再按「Start Detect」。';
   }
   if (lower.includes('chrome pages cannot be captured')) {
     return '目前分頁無法被 capture。請切換到 YouTube 網頁分頁後再啟動偵測。';

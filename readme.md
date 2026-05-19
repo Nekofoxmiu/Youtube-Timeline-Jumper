@@ -164,6 +164,15 @@ The packaging script includes only runtime files required by the extension and e
 
 ## Release Notes
 
+### v3.0.2
+
+Critical fix for live tab audio capture startup.
+
+- Fixed a race where the tabCapture stream ID could expire before the offscreen document consumed it.
+- Live detection now resolves the current YouTube video before requesting the tabCapture stream ID.
+- Start Detect now only targets the currently active YouTube tab that invoked the extension, avoiding Chrome activeTab authorization failures on unrelated YouTube tabs.
+- Improved user guidance when the active tab is not a capturable YouTube page.
+
 ### v3.0.1
 
 Patch update for Playlist Studio playback behavior and preload configuration.

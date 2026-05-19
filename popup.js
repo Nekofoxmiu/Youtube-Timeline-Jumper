@@ -53,6 +53,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             no_active_youtube_tab_in_window: 'No active YouTube tab in this window.',
             permission_required: 'Permission required. Click "Start Detect" to grant tabCapture.',
             waiting_authorization: 'Still waiting for tabCapture authorization. Keep the popup open and retry.',
+            switch_to_youtube_tab_for_capture: 'Switch to the YouTube tab you want to detect, click the extension icon there, then press "Start Detect".',
             start_detection_failed: 'Start detection failed.',
             stop_detection_failed: 'Stop detection failed.',
             set_min_failed: 'Failed to update minimum segment duration.',
@@ -110,6 +111,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             no_active_youtube_tab_in_window: '目前視窗沒有可用的 YouTube 分頁。',
             permission_required: '需要授權。請點擊「開始偵測」授權分頁音訊擷取。',
             waiting_authorization: '仍在等待分頁音訊擷取授權。請保持 popup 開啟後重試。',
+            switch_to_youtube_tab_for_capture: '請切換到要偵測的 YouTube 分頁，從該分頁點擊擴充功能圖示後再按「開始偵測」。',
             start_detection_failed: '開始偵測失敗。',
             stop_detection_failed: '停止偵測失敗。',
             set_min_failed: '更新最短片段秒數失敗。',
@@ -383,6 +385,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         return youtubeTabs[0] || null;
     }
 
+    async function getInvokedYouTubeTab() {
+        const activeLastFocusedWindowTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        const activeLastFocused = activeLastFocusedWindowTabs && activeLastFocusedWindowTabs[0];
+        if (activeLastFocused && isYouTubeUrl(activeLastFocused.url)) {
+            return activeLastFocused;
+        }
+        return null;
+    }
+
     async function refreshDetectionPanel() {
         try {
             const [configResult, pendingResult] = await Promise.all([
@@ -451,11 +462,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     authorizeStartBtn.addEventListener('click', async () => {
         try {
-            const context = await chrome.runtime.sendMessage({ action: 'getSongDetectionAuthorizationContext' });
-            const preferredTabId = context?.success && context.pending ? context.pending.tabId : null;
-            const targetTab = await getActiveYouTubeTab(preferredTabId);
+            const targetTab = await getInvokedYouTubeTab();
             if (!targetTab) {
-                showToast(t('no_active_youtube_tab'));
+                detectHint.textContent = t('switch_to_youtube_tab_for_capture');
+                showToast(t('switch_to_youtube_tab_for_capture'), 5200);
                 return;
             }
 
@@ -473,7 +483,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             if (!result || !result.success) {
                 if (result && result.requiresPopupAuthorization) {
-                    detectHint.textContent = t('waiting_authorization');
+                    detectHint.textContent = t('switch_to_youtube_tab_for_capture');
                 }
                 setDetectionStatus('Error', {
                     error: (result && result.message) ? result.message : t('start_detection_failed')
