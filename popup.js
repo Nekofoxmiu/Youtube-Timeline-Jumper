@@ -2,10 +2,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     const DETECTION_CONFIG_KEY = 'songDetectionConfig';
     const APP_PREFERENCES_KEY = 'ytjUserPreferences';
     const DEFAULT_MIN_SEGMENT_DURATION_SEC = 90;
-    const FEATURE_NOTICE_ID = 'release-3.0.0-major-features';
+    const FEATURE_NOTICE_ID = 'release-3.0.2-update-and-onboarding';
     const FEATURE_NOTICE_STORAGE_KEY = 'popupFeatureNoticeState';
+    const FEATURE_NOTICE_CONTEXT_KEY = 'popupFeatureNoticeContext';
     const FEATURE_NOTICE_FROM_VERSION = '2.0';
-    const FEATURE_NOTICE_TO_VERSION = '3.0.0';
+    const FEATURE_NOTICE_TO_VERSION = chrome.runtime.getManifest?.().version || '3.0.2';
     const UI_TEXT = {
         en: {
             extensionName: 'YouTube Auto Jump',
@@ -35,12 +36,20 @@ document.addEventListener('DOMContentLoaded', async () => {
             stop_detect: 'Stop Detect',
             min_segment_seconds: 'Min segment seconds',
             playlist_studio: 'Playlist Studio',
-            feature_notice_title: `What's new in ${FEATURE_NOTICE_TO_VERSION}`,
-            feature_notice_intro: `Compared with the previous ${FEATURE_NOTICE_FROM_VERSION} release, this version adds:`,
-            feature_notice_items: [
+            feature_update_title: `What's new in ${FEATURE_NOTICE_TO_VERSION}`,
+            feature_update_intro: `Compared with the previous $1 release, this version adds:`,
+            feature_update_items: [
                 'Local song segment detection for YouTube videos and live streams.',
-                'Offline detection tools for downloaded audio, with results saved back into the timeline database.',
-                'Playlist Studio for cross-video playlists, playback queues, and database editing.',
+                'Playlist Studio with cross-video playback queues, database editing, and settings.',
+                'Offline audio analysis with waveform/spectrogram editing, batch jobs, and automatic videoId parsing from filenames.',
+                'Better post-processing for medleys, long BGM/music-only false positives, and configurable minimum segment duration.',
+            ],
+            feature_install_title: 'Welcome to YouTube Timeline Jumper',
+            feature_install_intro: 'This extension helps you save, edit, detect, and replay YouTube timeline segments locally.',
+            feature_install_items: [
+                'Turn the extension on from this popup, then open a YouTube video to edit timestamps on the page.',
+                'Use Playlist Studio for global playlists, cross-video queues, database editing, and offline analysis.',
+                'Start Detect requires opening this popup from the target YouTube tab so Chrome can grant tab audio capture.',
             ],
             feature_notice_dismiss: 'Got it',
             status_label: 'Status',
@@ -62,8 +71,17 @@ document.addEventListener('DOMContentLoaded', async () => {
             song_detection_started: 'Song detection started.',
             song_detection_stopped: 'Song detection stopped.',
             runtime_threads: 'WASM threads: $1',
+            runtime_threads_with_reason: 'WASM threads: $1 ($2)',
+            runtime_webgpu: 'Runtime: WebGPU',
+            runtime_webgpu_with_head: 'Runtime: WebGPU (head: $1)',
+            runtime_wasm_fallback: 'Runtime: WASM fallback',
+            runtime_thread_reason_forced_single: 'single-thread mode',
+            runtime_thread_reason_no_isolation: 'cross-origin isolation disabled for tabCapture compatibility',
+            runtime_thread_reason_no_sab: 'SharedArrayBuffer unavailable',
+            runtime_thread_reason_low_cores: 'single CPU core reported',
             warning_prefix: 'Warning: $1',
             error_prefix: 'Error: $1',
+            debug_prefix: 'Debug: $1',
         },
         zh: {
             extensionName: 'YouTube 自動跳轉',
@@ -93,12 +111,20 @@ document.addEventListener('DOMContentLoaded', async () => {
             stop_detect: '停止偵測',
             min_segment_seconds: '最短片段秒數',
             playlist_studio: '播放清單工作台',
-            feature_notice_title: `${FEATURE_NOTICE_TO_VERSION} 主要更新`,
-            feature_notice_intro: `相較於上一個 ${FEATURE_NOTICE_FROM_VERSION} 發行版，這次新增：`,
-            feature_notice_items: [
+            feature_update_title: `${FEATURE_NOTICE_TO_VERSION} 主要更新`,
+            feature_update_intro: `相較於上一個 $1 發行版，這次新增：`,
+            feature_update_items: [
                 'YouTube 影片與直播的本機歌曲片段偵測。',
-                '離線音訊偵測工具，可將已下載音訊的結果寫回時間軸資料庫。',
-                '播放清單工作台，支援跨影片播放清單、播放佇列與資料庫編輯。',
+                '播放清單工作台，支援跨影片播放佇列、資料庫編輯與設定頁。',
+                '離線音訊分析，包含波型 / 頻譜編輯、批次工作與從檔名自動解析 videoId。',
+                '改善串燒切分、長時間 BGM / 純音樂誤判排除，以及可調整最短片段秒數。',
+            ],
+            feature_install_title: '歡迎使用 YouTube Timeline Jumper',
+            feature_install_intro: '此擴充功能可在本機儲存、編輯、偵測與播放 YouTube 時間軸片段。',
+            feature_install_items: [
+                '先在 popup 啟用擴充功能，再開啟 YouTube 影片即可在頁面中編輯時間軸。',
+                '使用播放清單工作台管理總播放清單、跨影片播放佇列、資料庫與離線分析。',
+                '開始偵測需從目標 YouTube 分頁點開此 popup，讓 Chrome 授權分頁音訊擷取。',
             ],
             feature_notice_dismiss: '知道了',
             status_label: '狀態',
@@ -120,12 +146,26 @@ document.addEventListener('DOMContentLoaded', async () => {
             song_detection_started: '歌曲偵測已開始。',
             song_detection_stopped: '歌曲偵測已停止。',
             runtime_threads: 'WASM 執行緒：$1',
+            runtime_threads_with_reason: 'WASM 執行緒：$1（$2）',
+            runtime_webgpu: '執行後端：WebGPU',
+            runtime_webgpu_with_head: '執行後端：WebGPU（head：$1）',
+            runtime_wasm_fallback: '執行後端：WASM fallback',
+            runtime_thread_reason_forced_single: '固定單執行緒模式',
+            runtime_thread_reason_no_isolation: '為了相容 tabCapture 已停用 cross-origin isolation',
+            runtime_thread_reason_no_sab: 'SharedArrayBuffer 不可用',
+            runtime_thread_reason_low_cores: '瀏覽器回報只有單核心',
             warning_prefix: '警告：$1',
             error_prefix: '錯誤：$1',
+            debug_prefix: '除錯：$1',
         },
     };
     let localePreviewOverride = 'auto';
     let userPreferences = { language: 'auto' };
+    let featureNoticeContext = {
+        reason: 'update',
+        previousVersion: FEATURE_NOTICE_FROM_VERSION,
+        currentVersion: FEATURE_NOTICE_TO_VERSION,
+    };
 
     function normalizeLanguagePreference(value) {
         const key = String(value || 'auto').trim().toLowerCase();
@@ -161,15 +201,35 @@ document.addEventListener('DOMContentLoaded', async () => {
         return t(`status_${normalized}`) || String(status || 'Idle');
     }
 
+    function normalizeFeatureNoticeContext(raw = {}) {
+        const reason = String(raw.reason || '').toLowerCase() === 'install' ? 'install' : 'update';
+        return {
+            reason,
+            previousVersion: raw.previousVersion || FEATURE_NOTICE_FROM_VERSION,
+            currentVersion: raw.currentVersion || FEATURE_NOTICE_TO_VERSION,
+            updatedAt: raw.updatedAt || null,
+        };
+    }
+
+    function getFeatureNoticeMode() {
+        return featureNoticeContext.reason === 'install' ? 'install' : 'update';
+    }
+
     function renderFeatureNoticeContent() {
         const title = document.getElementById('featureNoticeTitle');
         const intro = document.getElementById('featureNoticeIntro');
         const list = document.getElementById('featureNoticeList');
-        if (title) title.textContent = t('feature_notice_title');
-        if (intro) intro.textContent = t('feature_notice_intro');
+        const mode = getFeatureNoticeMode();
+        const previousVersion = featureNoticeContext.previousVersion || FEATURE_NOTICE_FROM_VERSION;
+        if (title) title.textContent = t(`feature_${mode}_title`);
+        if (intro) {
+            intro.textContent = mode === 'update'
+                ? t('feature_update_intro', [previousVersion])
+                : t('feature_install_intro');
+        }
         if (list) {
             list.innerHTML = '';
-            for (const item of t('feature_notice_items')) {
+            for (const item of t(`feature_${mode}_items`)) {
                 const li = document.createElement('li');
                 li.textContent = item;
                 list.appendChild(li);
@@ -331,8 +391,66 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     function formatRuntimeHint(runtimeInfo) {
         if (!runtimeInfo || !Number.isFinite(Number(runtimeInfo.numThreads))) return '';
+        const provider = String(runtimeInfo.executionProvider || 'wasm').toLowerCase();
+        if (provider === 'webgpu') {
+            const headProvider = runtimeInfo.temporalHeadExecutionProvider
+                ? String(runtimeInfo.temporalHeadExecutionProvider).toUpperCase()
+                : '';
+            return headProvider && headProvider !== 'WEBGPU'
+                ? t('runtime_webgpu_with_head', [headProvider])
+                : t('runtime_webgpu');
+        }
         const count = Math.max(1, Math.floor(Number(runtimeInfo.numThreads)));
+        const reasons = [];
+        if (runtimeInfo.webGpuRunFallbackError || runtimeInfo.providerAttempts?.length) {
+            reasons.push(t('runtime_wasm_fallback'));
+        }
+        if (runtimeInfo.forcedSingleThread === true) {
+            reasons.push(t('runtime_thread_reason_forced_single'));
+        } else if (runtimeInfo.crossOriginIsolated === false) {
+            reasons.push(t('runtime_thread_reason_no_isolation'));
+        }
+        if (runtimeInfo.sharedArrayBufferAvailable === false) {
+            reasons.push(t('runtime_thread_reason_no_sab'));
+        }
+        if (Number(runtimeInfo.hardwareConcurrency) < 2) {
+            reasons.push(t('runtime_thread_reason_low_cores'));
+        }
+        if (count === 1 && reasons.length) {
+            return t('runtime_threads_with_reason', [count, reasons.join(', ')]);
+        }
         return t('runtime_threads', [count]);
+    }
+
+    function formatDetectionDebugTrace(debugTrace) {
+        const trace = Array.isArray(debugTrace) ? debugTrace.filter(Boolean) : [];
+        if (!trace.length) return '';
+        const last = trace[trace.length - 1];
+        const target = last.targetTab || null;
+        const activeLastFocused = Array.isArray(last.activeLastFocusedWindowTabs)
+            ? last.activeLastFocusedWindowTabs[0]
+            : null;
+        const capturedCount = Array.isArray(last.capturedTabs) ? last.capturedTabs.length : 'n/a';
+        const responseMessage = last.extra?.response?.message || '';
+        const errorMessage = last.extra?.error?.message || responseMessage || '';
+        const parts = [
+            `phase=${last.phase || 'unknown'}`,
+            `source=${last.source || 'background'}`,
+        ];
+        if (target) {
+            parts.push(`targetTab=${target.id} active=${target.active} status=${target.status || 'n/a'}`);
+        }
+        if (activeLastFocused) {
+            parts.push(`activeLastFocused=${activeLastFocused.id}`);
+        }
+        parts.push(`capturedTabs=${capturedCount}`);
+        if (last.hasOffscreenDocument !== undefined) {
+            parts.push(`offscreen=${last.hasOffscreenDocument}`);
+        }
+        if (errorMessage) {
+            parts.push(`error=${errorMessage}`);
+        }
+        return parts.join(' | ');
     }
 
     function setDetectionStatus(status, options = {}) {
@@ -342,6 +460,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const warning = options.warning || '';
         const error = options.error || '';
         const runtimeHint = formatRuntimeHint(options.runtimeInfo);
+        const debugHint = formatDetectionDebugTrace(options.debugTrace);
 
         detectStatusText.textContent = `${t('status_label')}: ${statusLabel(normalized)} (FireRed AED)`;
         const isRunning = normalized === 'Listening' || normalized === 'Detecting';
@@ -352,11 +471,30 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (runtimeHint) hints.push(runtimeHint);
         if (warning) hints.push(t('warning_prefix', [warning]));
         if (error) hints.push(t('error_prefix', [error]));
+        if (debugHint) hints.push(t('debug_prefix', [debugHint]));
         detectHint.textContent = hints.join(' ');
     }
 
     function isYouTubeUrl(url) {
         return /^https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//i.test(url || '');
+    }
+
+    function getVideoIdFromUrl(url) {
+        try {
+            const parsed = new URL(url || '');
+            const host = parsed.hostname.replace(/^www\./i, '').toLowerCase();
+            if (host === 'youtu.be') {
+                return parsed.pathname.split('/').filter(Boolean)[0] || null;
+            }
+            if (host.endsWith('youtube.com')) {
+                return parsed.searchParams.get('v')
+                    || (parsed.pathname.startsWith('/shorts/') ? parsed.pathname.split('/').filter(Boolean)[1] : null)
+                    || (parsed.pathname.startsWith('/live/') ? parsed.pathname.split('/').filter(Boolean)[1] : null);
+            }
+        } catch (error) {
+            // Invalid URL; ignore.
+        }
+        return null;
     }
 
     async function getActiveYouTubeTab(preferredTabId = null) {
@@ -428,7 +566,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 setDetectionStatus(statusResult.status, {
                     warning: statusResult.warning || '',
                     error: statusResult.error || '',
-                    runtimeInfo: statusResult.runtimeInfo || null
+                    runtimeInfo: statusResult.runtimeInfo || null,
+                    debugTrace: statusResult.debugTrace || null
                 });
             }
 
@@ -478,6 +617,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             const result = await chrome.runtime.sendMessage({
                 action: 'startSongDetectionForActiveTab',
                 tabId: targetTab.id,
+                videoId: getVideoIdFromUrl(targetTab.url),
                 detectorMode: 'firered-aed'
             });
 
@@ -486,8 +626,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                     detectHint.textContent = t('switch_to_youtube_tab_for_capture');
                 }
                 setDetectionStatus('Error', {
-                    error: (result && result.message) ? result.message : t('start_detection_failed')
+                    error: (result && result.message) ? result.message : t('start_detection_failed'),
+                    debugTrace: result && result.debugTrace ? result.debugTrace : null
                 });
+                if (result && result.debugTrace) {
+                    console.warn('[song-detection] start debug trace', result.debugTrace);
+                }
                 showToast((result && result.message) ? result.message : t('start_detection_failed'));
                 return;
             }
@@ -503,7 +647,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         } catch (error) {
             setDetectionStatus('Error', {
-                error: error?.message || String(error)
+                error: error?.message || String(error),
+                debugTrace: error?.debugTrace || null
             });
             showToast(t('error_prefix', [error?.message || String(error)]));
         }
@@ -555,10 +700,28 @@ document.addEventListener('DOMContentLoaded', async () => {
         return stored[FEATURE_NOTICE_STORAGE_KEY] || {};
     }
 
+    async function getFeatureNoticeContext() {
+        const stored = await chrome.storage.local.get(FEATURE_NOTICE_CONTEXT_KEY);
+        return normalizeFeatureNoticeContext(stored[FEATURE_NOTICE_CONTEXT_KEY] || {});
+    }
+
+    async function setFeatureNoticeContext(patch = {}) {
+        featureNoticeContext = normalizeFeatureNoticeContext({
+            ...featureNoticeContext,
+            ...patch,
+            updatedAt: new Date().toISOString(),
+        });
+        await chrome.storage.local.set({ [FEATURE_NOTICE_CONTEXT_KEY]: featureNoticeContext });
+        renderFeatureNoticeContent();
+        return featureNoticeContext;
+    }
+
     async function markFeatureNoticeSeen() {
         await chrome.storage.local.set({
             [FEATURE_NOTICE_STORAGE_KEY]: {
                 lastSeenId: FEATURE_NOTICE_ID,
+                lastSeenReason: getFeatureNoticeMode(),
+                lastSeenVersion: FEATURE_NOTICE_TO_VERSION,
                 lastSeenAt: new Date().toISOString(),
             },
         });
@@ -575,6 +738,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     async function maybeShowFeatureNotice({ force = false } = {}) {
         if (!featureNotice) return false;
+        featureNoticeContext = await getFeatureNoticeContext();
+        renderFeatureNoticeContent();
         if (force) {
             showFeatureNotice();
             return true;
@@ -597,11 +762,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     window.YTJDev = {
         featureNoticeId: FEATURE_NOTICE_ID,
         showFeatureNotice: () => maybeShowFeatureNotice({ force: true }),
+        showInstallNotice: async () => {
+            await setFeatureNoticeContext({ reason: 'install', previousVersion: null, currentVersion: FEATURE_NOTICE_TO_VERSION });
+            return maybeShowFeatureNotice({ force: true });
+        },
+        showUpdateNotice: async (previousVersion = FEATURE_NOTICE_FROM_VERSION) => {
+            await setFeatureNoticeContext({ reason: 'update', previousVersion, currentVersion: FEATURE_NOTICE_TO_VERSION });
+            return maybeShowFeatureNotice({ force: true });
+        },
         resetFeatureNotice: async () => {
             await chrome.storage.local.remove(FEATURE_NOTICE_STORAGE_KEY);
             return maybeShowFeatureNotice({ force: true });
         },
         getFeatureNoticeState,
+        getFeatureNoticeContext,
+        setFeatureNoticeContext,
         checkFeatureNotice: () => maybeShowFeatureNotice(),
         getLanguageState: () => ({
             activeLanguage: resolvePopupLanguage(),
@@ -770,6 +945,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     function displayPlaylists(list) {
     playlistContainer.innerHTML = '';
     // helper to format a time token (TimeSlot object, number seconds, or string)
+    function formatSecondsWithFraction(seconds) {
+        const total = Math.max(0, Number(seconds) || 0);
+        const rounded = Math.round(total * 1000) / 1000;
+        const h = Math.floor(rounded / 3600);
+        const m = Math.floor((rounded - (h * 3600)) / 60);
+        const sec = rounded - (h * 3600) - (m * 60);
+        const wholeSec = Math.floor(sec);
+        const fraction = sec - wholeSec;
+        const secondText = fraction > 1e-6
+            ? `${String(wholeSec).padStart(2, '0')}${fraction.toFixed(3).slice(1).replace(/0+$/, '')}`
+            : String(wholeSec).padStart(2, '0');
+        return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${secondText}`;
+    }
+
     function formatTimeToken(tok) {
         try {
             if (!tok && tok !== 0) return '';
@@ -781,21 +970,13 @@ document.addEventListener('DOMContentLoaded', async () => {
                     const h = Number(tok.hours) || 0;
                     const m = Number(tok.minutes) || 0;
                     const s = Number(tok.seconds) || 0;
-                    const parts = [];
-                    if (h) parts.push(String(h));
-                    parts.push(String(m).padStart(2, '0'));
-                    parts.push(String(s).padStart(2, '0'));
-                    return parts.join(':');
+                    return formatSecondsWithFraction((h * 3600) + (m * 60) + s);
                 }
                 return String(tok);
             }
             // number of seconds
             if (typeof tok === 'number') {
-                const s = Math.floor(tok);
-                const h = Math.floor(s / 3600);
-                const m = Math.floor((s % 3600) / 60);
-                const sec = s % 60;
-                return (h ? `${h}:` : '') + `${String(m).padStart(h ? 2 : 1, '0')}:${String(sec).padStart(2, '0')}`;
+                return formatSecondsWithFraction(tok);
             }
             // string: maybe it's already formatted
             return String(tok);
@@ -832,11 +1013,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     function formatAlignedTimeToken(tok) {
         const seconds = timeTokenToSeconds(tok);
         if (seconds === null) return formatTimeToken(tok) || '00:00:00';
-        const total = Math.max(0, Math.floor(seconds));
-        const h = Math.floor(total / 3600);
-        const m = Math.floor((total % 3600) / 60);
-        const s = total % 60;
-        return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+        return formatSecondsWithFraction(seconds);
     }
 
     list.forEach(({ videoId, playlist, title }) => {

@@ -9,6 +9,7 @@ import {
 
 // 清單(manifest)版本
 const CURRENT_VERSION = chrome.runtime.getManifest().version;
+const POPUP_FEATURE_NOTICE_CONTEXT_KEY = 'popupFeatureNoticeContext';
 const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
 const AUTO_SONG_TYPE = 'auto-song';
 const DETECTION_CONFIG_KEY = 'songDetectionConfig';
@@ -192,6 +193,7 @@ async function notifySongDetectionStatus(tabId, status, extra = {}) {
   const existingSession = getOrCreateDetectionSession(tabId);
   const detectorMode = normalizeDetectorMode(extra.detectorMode || existingSession.detectorMode || DEFAULT_DETECTOR_MODE);
   const hasRuntimeInfo = Object.prototype.hasOwnProperty.call(extra, 'runtimeInfo');
+  const hasDebugTrace = Object.prototype.hasOwnProperty.call(extra, 'debugTrace');
   const session = updateDetectionSession(tabId, {
     status: normalizedStatus,
     isRunning: normalizedStatus === 'Listening' || normalizedStatus === 'Detecting',
@@ -201,6 +203,7 @@ async function notifySongDetectionStatus(tabId, status, extra = {}) {
     error: extra.error || null,
     warning: extra.warning || existingSession.warning || null,
     runtimeInfo: hasRuntimeInfo ? extra.runtimeInfo : existingSession.runtimeInfo || null,
+    debugTrace: hasDebugTrace ? extra.debugTrace : existingSession.debugTrace || null,
     minSegmentDurationSec: normalizeMinSegmentDurationSec(
       extra.minSegmentDurationSec,
       existingSession.minSegmentDurationSec
@@ -217,6 +220,7 @@ async function notifySongDetectionStatus(tabId, status, extra = {}) {
     error: session.error,
     warning: session.warning,
     runtimeInfo: session.runtimeInfo,
+    debugTrace: session.debugTrace,
     minSegmentDurationSec: session.minSegmentDurationSec,
   });
 
@@ -485,6 +489,93 @@ function isPopupAuthorizationRequiredError(error) {
     || message.includes('activeTab permission'.toLowerCase());
 }
 
+function summarizeTabForDebug(tab) {
+  if (!tab) return null;
+  return {
+    id: tab.id,
+    windowId: tab.windowId,
+    active: Boolean(tab.active),
+    highlighted: Boolean(tab.highlighted),
+    status: tab.status || null,
+    audible: Boolean(tab.audible),
+    muted: Boolean(tab.mutedInfo?.muted),
+    url: tab.url || tab.pendingUrl || null,
+    title: tab.title || null,
+  };
+}
+
+function serializeErrorForDebug(error) {
+  return {
+    name: error?.name || null,
+    message: error?.message || String(error || ''),
+    stack: error?.stack || null,
+  };
+}
+
+async function collectTabCaptureDebug(tabId, phase, extra = {}) {
+  const debug = {
+    phase,
+    tabId: typeof tabId === 'number' ? tabId : null,
+    timestamp: new Date().toISOString(),
+    extra,
+  };
+
+  try {
+    debug.targetTab = typeof tabId === 'number'
+      ? summarizeTabForDebug(await chrome.tabs.get(tabId))
+      : null;
+  } catch (error) {
+    debug.targetTabError = error?.message || String(error);
+  }
+
+  try {
+    debug.activeCurrentWindowTabs = (await chrome.tabs.query({ active: true, currentWindow: true }))
+      .map(summarizeTabForDebug);
+  } catch (error) {
+    debug.activeCurrentWindowError = error?.message || String(error);
+  }
+
+  try {
+    debug.activeLastFocusedWindowTabs = (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))
+      .map(summarizeTabForDebug);
+  } catch (error) {
+    debug.activeLastFocusedWindowError = error?.message || String(error);
+  }
+
+  try {
+    debug.capturedTabs = chrome.tabCapture?.getCapturedTabs
+      ? await chrome.tabCapture.getCapturedTabs()
+      : null;
+  } catch (error) {
+    debug.capturedTabsError = error?.message || String(error);
+  }
+
+  try {
+    debug.hasOffscreenDocument = await hasOffscreenDocument();
+  } catch (error) {
+    debug.hasOffscreenDocumentError = error?.message || String(error);
+  }
+
+  return debug;
+}
+
+function formatDebugLine(debug) {
+  if (!debug) return '';
+  const target = debug.targetTab;
+  const active = Array.isArray(debug.activeLastFocusedWindowTabs)
+    ? debug.activeLastFocusedWindowTabs[0]
+    : null;
+  const capturedCount = Array.isArray(debug.capturedTabs) ? debug.capturedTabs.length : 'n/a';
+  return [
+    `phase=${debug.phase}`,
+    `target=${target?.id ?? 'n/a'} active=${target?.active ?? 'n/a'} status=${target?.status ?? 'n/a'}`,
+    `activeLastFocused=${active?.id ?? 'n/a'}`,
+    `capturedTabs=${capturedCount}`,
+    `offscreen=${debug.hasOffscreenDocument ?? 'n/a'}`,
+    `error=${debug.extra?.error?.message || debug.extra?.retryError?.message || 'n/a'}`,
+  ].join(' | ');
+}
+
 function clearPendingAuthorizationForTab(tabId) {
   if (!pendingAuthorizationRequest) return;
   if (typeof tabId === 'number' && pendingAuthorizationRequest.tabId !== tabId) return;
@@ -521,6 +612,7 @@ async function startSongDetectionForTab(tabId, videoIdHint = null, detectorModeH
     throw new Error('Invalid tabId for startSongDetectionForTab');
   }
 
+  const debugTrace = [];
   const existing = detectionSessions.get(tabId);
   if (existing && existing.isRunning) {
     await stopSongDetectionForTab(tabId, { notifyTab: false, removeSession: false });
@@ -530,14 +622,42 @@ async function startSongDetectionForTab(tabId, videoIdHint = null, detectorModeH
   const detectorMode = DEFAULT_DETECTOR_MODE;
   const minSegmentDurationSec = normalizeMinSegmentDurationSec(config.minSegmentDurationSec);
 
-  const videoId = videoIdHint || await requestCurrentVideoIdFromTab(tabId);
-
-  await ensureOffscreenDocument();
-
-  const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
-  if (!streamId) {
-    throw new Error('Failed to get tab capture stream id.');
+  try {
+    await ensureOffscreenDocument();
+  } catch (error) {
+    const debug = await collectTabCaptureDebug(tabId, 'ensure-offscreen-failed', {
+      error: serializeErrorForDebug(error),
+    });
+    debugTrace.push(debug);
+    console.warn('[song-detection] ensure offscreen failed', debug);
+    error.debugTrace = debugTrace;
+    throw error;
   }
+
+  let streamId = null;
+  try {
+    console.info('[song-detection] requesting tab capture stream id', { tabId });
+    streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
+  } catch (error) {
+    const debug = await collectTabCaptureDebug(tabId, 'getMediaStreamId-targetTabId-failed', {
+      error: serializeErrorForDebug(error),
+    });
+    debugTrace.push(debug);
+    console.warn('[song-detection] tabCapture.getMediaStreamId failed', debug);
+    error.debugTrace = debugTrace;
+    throw error;
+  }
+
+  if (!streamId) {
+    const debug = await collectTabCaptureDebug(tabId, 'getMediaStreamId-empty-stream-id');
+    debugTrace.push(debug);
+    const error = new Error('Failed to get tab capture stream id.');
+    error.debugTrace = debugTrace;
+    console.warn('[song-detection] tabCapture returned empty stream id', debug);
+    throw error;
+  }
+
+  const videoId = videoIdHint || null;
 
   const response = await chrome.runtime.sendMessage({
     action: 'offscreenStartSongDetection',
@@ -546,10 +666,18 @@ async function startSongDetectionForTab(tabId, videoIdHint = null, detectorModeH
     videoId: videoId || null,
     detectorMode,
     minSegmentDurationSec,
+    debugTrace,
   });
 
   if (!response || !response.success) {
-    throw new Error(response?.message || 'offscreen start failed.');
+    const debug = await collectTabCaptureDebug(tabId, 'offscreenStartSongDetection-failed', {
+      response: response || null,
+    });
+    debugTrace.push(debug);
+    const error = new Error(response?.message || 'offscreen start failed.');
+    error.debugTrace = debugTrace.concat(Array.isArray(response?.debugTrace) ? response.debugTrace : []);
+    console.warn('[song-detection] offscreen start failed', error.debugTrace);
+    throw error;
   }
 
   const resolvedMode = normalizeDetectorMode(response.detectorMode || detectorMode);
@@ -564,6 +692,7 @@ async function startSongDetectionForTab(tabId, videoIdHint = null, detectorModeH
     warning: response.warning || null,
     runtimeInfo: response.runtimeInfo || null,
     minSegmentDurationSec,
+    debugTrace: debugTrace.concat(Array.isArray(response.debugTrace) ? response.debugTrace : []),
   });
 
   clearPendingAuthorizationForTab(tabId);
@@ -586,6 +715,7 @@ async function startSongDetectionForTab(tabId, videoIdHint = null, detectorModeH
     detectorVersion: session.detectorVersion,
     warning: session.warning,
     runtimeInfo: session.runtimeInfo,
+    debugTrace: session.debugTrace,
   };
 }
 
@@ -601,6 +731,9 @@ function formatSongDetectionStartError(error) {
   }
   if (lower.includes('not allowed')) {
     return 'Chrome 拒絕 tabCapture。請確認你在一般 YouTube 分頁（非 chrome://、擴充功能頁）並重新嘗試。';
+  }
+  if (lower.includes('error starting tab capture')) {
+    return 'Chrome 回報 Error starting tab capture。請依 popup 下方除錯資訊確認失敗階段。';
   }
   return message;
 }
@@ -896,11 +1029,19 @@ async function checkMetaOnStartup() {
 }
 
 // ── onInstalled：安裝/更新時處理預設值與遷移
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async (details = {}) => {
   try {
     await ensureDefaultState();
     await runMigrationsIfNeeded();
     await checkMetaOnStartup();
+    await chrome.storage.local.set({
+      [POPUP_FEATURE_NOTICE_CONTEXT_KEY]: {
+        reason: details.reason || 'unknown',
+        previousVersion: details.previousVersion || null,
+        currentVersion: CURRENT_VERSION,
+        updatedAt: new Date().toISOString(),
+      },
+    });
   } catch (err) {
     console.error('Error during installation/update:', err);
   }
@@ -922,6 +1063,7 @@ const BACKGROUND_ACTIONS = new Set([
   'getTabId',
   'startSongDetectionForActiveTab',
   'stopSongDetectionForActiveTab',
+  'prepareSongDetectionOffscreen',
   'getSongDetectionStatus',
   'getSongDetectionConfig',
   'setSongDetectionMode',
@@ -1012,12 +1154,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         } catch (error) {
           const friendly = formatSongDetectionStartError(error);
           const requiresPopupAuthorization = isPopupAuthorizationRequiredError(error);
-          await notifySongDetectionStatus(tabId, 'Error', { error: friendly });
+          const debugTrace = Array.isArray(error?.debugTrace) ? error.debugTrace : [];
+          console.warn('[song-detection] startSongDetectionForActiveTab failed', {
+            tabId,
+            message: error?.message || String(error),
+            friendly,
+            debugTrace,
+          });
+          await notifySongDetectionStatus(tabId, 'Error', { error: friendly, debugTrace });
           sendResponse({
             success: false,
             tabId,
             message: friendly,
             requiresPopupAuthorization,
+            debugTrace,
           });
         }
         return;
@@ -1034,6 +1184,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         return;
       }
 
+      if (request.action === 'prepareSongDetectionOffscreen') {
+        await ensureOffscreenDocument();
+        sendResponse({ success: true });
+        return;
+      }
+
       if (request.action === 'getSongDetectionStatus') {
         const tabId = await resolveTargetTabId(sender, request);
         if (typeof tabId !== 'number') {
@@ -1047,6 +1203,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             error: null,
             warning: null,
             runtimeInfo: null,
+            debugTrace: null,
           });
           return;
         }
@@ -1061,6 +1218,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           error: session.error,
           warning: session.warning,
           runtimeInfo: session.runtimeInfo,
+          debugTrace: session.debugTrace || null,
           minSegmentDurationSec: session.minSegmentDurationSec,
         });
         return;

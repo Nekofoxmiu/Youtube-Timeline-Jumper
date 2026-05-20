@@ -70,5 +70,134 @@
   "import_failed": {
     "message": "匯入失敗，請確認檔案格式正確。",
     "description": "匯入失敗通知"
+  },
+  "ytj_import_playlist": {
+    "message": "匯入播放清單"
+  },
+  "ytj_edit_playlist": {
+    "message": "編輯播放清單"
+  },
+  "ytj_export_playlist": {
+    "message": "匯出播放清單"
+  },
+  "ytj_single_playback": {
+    "message": "單曲播放"
+  },
+  "ytj_import": {
+    "message": "匯入"
+  },
+  "ytj_save": {
+    "message": "儲存"
+  },
+  "ytj_cancel": {
+    "message": "取消"
+  },
+  "ytj_copy": {
+    "message": "複製"
+  },
+  "ytj_close": {
+    "message": "關閉"
+  },
+  "ytj_simple_editor": {
+    "message": "簡易編輯"
+  },
+  "ytj_text_mode": {
+    "message": "文字模式"
+  },
+  "ytj_default_duration": {
+    "message": "預設長度"
+  },
+  "ytj_delimiter": {
+    "message": "分隔符"
+  },
+  "ytj_custom": {
+    "message": "自訂"
+  },
+  "ytj_custom_delimiter": {
+    "message": "自訂分隔符"
+  },
+  "ytj_numbering": {
+    "message": "編號"
+  },
+  "ytj_auto_detect": {
+    "message": "自動辨識"
+  },
+  "ytj_delimiter_space": {
+    "message": "空格"
+  },
+  "ytj_numbering_none": {
+    "message": "無"
+  },
+  "ytj_delete": {
+    "message": "刪除"
+  },
+  "ytj_add_row": {
+    "message": "新增列"
+  },
+  "ytj_drag": {
+    "message": "拖曳"
+  },
+  "ytj_drag_playlist_item": {
+    "message": "拖曳播放清單項目"
+  },
+  "ytj_drag_to_reorder": {
+    "message": "拖曳排序"
+  },
+  "ytj_currently_playing": {
+    "message": "播放中"
+  },
+  "ytj_play_from_here": {
+    "message": "從這裡播放"
+  },
+  "ytj_set_start_time": {
+    "message": "設定開始時間"
+  },
+  "ytj_set_end_time": {
+    "message": "設定結束時間"
+  },
+  "ytj_title_placeholder": {
+    "message": "標題"
+  },
+  "ytj_import_placeholder": {
+    "message": "貼上格式範例：1. 00:01:23 - 00:02:34 - 歌曲標題"
+  },
+  "ytj_duration_placeholder": {
+    "message": "例如：30"
+  },
+  "ytj_time_placeholder": {
+    "message": "00:00:00"
+  },
+  "ytj_auto_song": {
+    "message": "自動歌曲"
+  },
+  "ytj_auto_song_provisional": {
+    "message": "自動歌曲（暫定）"
+  },
+  "ytj_time_delimiter": {
+    "message": "時間分隔符"
+  },
+  "ytj_title_delimiter": {
+    "message": "標題分隔符"
+  },
+  "ytj_numbering_padding": {
+    "message": "編號補齊"
+  },
+  "ytj_padding_none": {
+    "message": "不補齊"
+  },
+  "ytj_padding_zero": {
+    "message": "補 0"
+  },
+  "ytj_padding_space": {
+    "message": "補空格"
+  },
+  "ytj_padding_width": {
+    "message": "寬度"
+  },
+  "ytj_round_export_seconds": {
+    "message": "四捨五入到整數秒"
+  },
+  "ytj_import_flexible_hint": {
+    "message": "匯入判定相當寬鬆，常見時間軸格式都可以直接貼上試試。"
   }
 }

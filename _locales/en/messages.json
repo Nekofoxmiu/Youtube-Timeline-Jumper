@@ -70,5 +70,134 @@
   "import_failed": {
     "message": "Import failed — please check file format.",
     "description": "Toast when import fails"
+  },
+  "ytj_import_playlist": {
+    "message": "Import Playlist"
+  },
+  "ytj_edit_playlist": {
+    "message": "Edit Playlist"
+  },
+  "ytj_export_playlist": {
+    "message": "Export Playlist"
+  },
+  "ytj_single_playback": {
+    "message": "Single Playback"
+  },
+  "ytj_import": {
+    "message": "Import"
+  },
+  "ytj_save": {
+    "message": "Save"
+  },
+  "ytj_cancel": {
+    "message": "Cancel"
+  },
+  "ytj_copy": {
+    "message": "Copy"
+  },
+  "ytj_close": {
+    "message": "Close"
+  },
+  "ytj_simple_editor": {
+    "message": "Simple editor"
+  },
+  "ytj_text_mode": {
+    "message": "Text mode"
+  },
+  "ytj_default_duration": {
+    "message": "Default duration"
+  },
+  "ytj_delimiter": {
+    "message": "Delimiter"
+  },
+  "ytj_custom": {
+    "message": "Custom"
+  },
+  "ytj_custom_delimiter": {
+    "message": "Custom delimiter"
+  },
+  "ytj_numbering": {
+    "message": "Numbering"
+  },
+  "ytj_auto_detect": {
+    "message": "Auto detect"
+  },
+  "ytj_delimiter_space": {
+    "message": "Space"
+  },
+  "ytj_numbering_none": {
+    "message": "None"
+  },
+  "ytj_delete": {
+    "message": "Delete"
+  },
+  "ytj_add_row": {
+    "message": "Add row"
+  },
+  "ytj_drag": {
+    "message": "Drag"
+  },
+  "ytj_drag_playlist_item": {
+    "message": "Drag playlist item"
+  },
+  "ytj_drag_to_reorder": {
+    "message": "Drag to reorder"
+  },
+  "ytj_currently_playing": {
+    "message": "Currently playing"
+  },
+  "ytj_play_from_here": {
+    "message": "Play from here"
+  },
+  "ytj_set_start_time": {
+    "message": "Set start time"
+  },
+  "ytj_set_end_time": {
+    "message": "Set end time"
+  },
+  "ytj_title_placeholder": {
+    "message": "Title"
+  },
+  "ytj_import_placeholder": {
+    "message": "Paste lines like: 1. 00:01:23 - 00:02:34 - Song title"
+  },
+  "ytj_duration_placeholder": {
+    "message": "e.g., 30"
+  },
+  "ytj_time_placeholder": {
+    "message": "00:00:00"
+  },
+  "ytj_auto_song": {
+    "message": "Auto Song"
+  },
+  "ytj_auto_song_provisional": {
+    "message": "Auto Song (Provisional)"
+  },
+  "ytj_time_delimiter": {
+    "message": "Time delimiter"
+  },
+  "ytj_title_delimiter": {
+    "message": "Title delimiter"
+  },
+  "ytj_numbering_padding": {
+    "message": "Number padding"
+  },
+  "ytj_padding_none": {
+    "message": "None"
+  },
+  "ytj_padding_zero": {
+    "message": "Zero fill"
+  },
+  "ytj_padding_space": {
+    "message": "Space fill"
+  },
+  "ytj_padding_width": {
+    "message": "Width"
+  },
+  "ytj_round_export_seconds": {
+    "message": "Round to whole seconds"
+  },
+  "ytj_import_flexible_hint": {
+    "message": "Parsing is intentionally flexible. You can paste most common timestamp formats and try importing directly."
   }
 }

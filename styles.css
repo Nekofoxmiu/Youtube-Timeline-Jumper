@@ -10,6 +10,21 @@
     --hover-background-dark: #333;
     --img-filter-light: brightness(1) contrast(1);
     --img-filter-dark: brightness(2.5) contrast(1.5);
+    --secondary-text-light: #606060;
+    --secondary-text-dark: #aaa;
+    --control-hover-light: rgba(0, 0, 0, 0.08);
+    --control-hover-dark: rgba(255, 255, 255, 0.12);
+    --field-hover-light: rgba(0, 0, 0, 0.04);
+    --field-hover-dark: rgba(255, 255, 255, 0.08);
+    --icon-color-light: #5f6368;
+    --icon-color-dark: #e8eaed;
+    --ytj-icon-add: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' d='M9.5 1h5v8.5H23v5h-8.5V23h-5v-8.5H1v-5h8.5z'/%3E%3C/svg%3E");
+    --ytj-icon-delete: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' d='M3.2 1 12 9.1 20.8 1 23 3.2 14.9 12 23 20.8 20.8 23 12 14.9 3.2 23 1 20.8 9.1 12 1 3.2z'/%3E%3C/svg%3E");
+    --ytj-icon-handle: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' d='M5 9h14v1.5H5zM5 15h14v1.5H5z'/%3E%3C/svg%3E");
+    --ytj-icon-play: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' d='M1 1 23 12 1 23z'/%3E%3C/svg%3E");
+    --ytj-icon-set-end: var(--ytj-icon-add);
+    --ytj-icon-set-start: var(--ytj-icon-add);
+    --ytj-icon-stop: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect fill='black' x='1' y='1' width='22' height='22' rx='1.5'/%3E%3C/svg%3E");
 }
 
 /* 應用主題樣式 */
@@ -19,6 +34,10 @@ body.light-theme {
     --border-color: var(--border-color-light);
     --hover-background: var(--hover-background-light);
     --img-filter: var(--img-filter-light);
+    --secondary-text: var(--secondary-text-light);
+    --control-hover: var(--control-hover-light);
+    --field-hover: var(--field-hover-light);
+    --icon-color: var(--icon-color-light);
 }
 
 body.dark-theme {
@@ -27,6 +46,10 @@ body.dark-theme {
     --border-color: var(--border-color-dark);
     --hover-background: var(--hover-background-dark);
     --img-filter: var(--img-filter-dark);
+    --secondary-text: var(--secondary-text-dark);
+    --control-hover: var(--control-hover-dark);
+    --field-hover: var(--field-hover-dark);
+    --icon-color: var(--icon-color-dark);
 }
 
 /* 播放列表容器 */
@@ -58,17 +81,21 @@ ul {
     padding: 0;
     display: flex;
     align-items: center;
-    padding: 10px;
+    min-height: 28px;
+    padding: 5px 8px;
     border-bottom: 1px solid var(--border-color);
-    transition: background-color 0.2s ease-in-out;
+    transition: background-color 0.18s ease-in-out;
     position: relative; /* 確保父容器設置相對定位 */
+    gap: 0;
+    min-width: 0;
 }
 
 .ytj-playlist-item:last-child {
     border-bottom: none;
 }
 
-.ytj-playlist-item:hover {
+.ytj-playlist-item:hover,
+.ytj-playlist-item:focus-within {
     background-color: var(--hover-background);
 }
 
@@ -77,7 +104,7 @@ ul {
     padding: 0;
     display: flex;
     align-items: center;
-    padding: 10px;
+    padding: 5px 8px;
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
 }
 
@@ -88,23 +115,27 @@ ul {
 
 /* 拖放圖標 */
 .ytj-drag-handle {
-    flex: 0 0 16px;  /* 固定寬度 */
-    width: 16px;
+    flex: 0 0 0;
+    width: 0;
     height: 16px;
-    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/handle.png');
-    background-size: cover;
-    background-repeat: no-repeat;
-    margin-right: 5px;
+    background: transparent;
+    margin-right: 0;
     display: flex;
     align-items: center;
     justify-content: center;
     opacity: 0;
-    transition: opacity 0.3s ease;
+    overflow: hidden;
+    transition: flex-basis 0.18s ease, width 0.18s ease, margin-right 0.18s ease, opacity 0.18s ease;
     cursor: grab;
-    filter: var(--img-filter);
+    color: var(--icon-color, currentColor);
 }
 
-.ytj-playlist-item:hover .ytj-drag-handle {
+.ytj-playlist-item:hover .ytj-drag-handle,
+.ytj-playlist-item:focus-within .ytj-drag-handle,
+.ytj-playlist-item.ytj-controls-expanded .ytj-drag-handle {
+    flex-basis: 16px;
+    width: 16px;
+    margin-right: 5px;
     opacity: 1;
 }
 
@@ -112,41 +143,128 @@ ul {
     flex: 0 0 16px;
     width: 16px;
     height: 16px;
-    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/handle.png');
-    background-size: cover;
-    background-repeat: no-repeat;
+    background: transparent;
     margin-right: 5px;
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: grabbing;
-    filter: var(--img-filter);
+    color: var(--icon-color, currentColor);
+}
+
+.ytj-drag-handle::before,
+.ytj-drag-handle-clicked::before,
+.ytj-set-start-time::before,
+.ytj-set-end-time::before,
+.ytj-delete-item::before,
+.ytj-start-from-here::before,
+.ytj-playing-indicator::before,
+.ytj-add-to-playlist::before,
+.ytj-play-playlist::before {
+    content: "";
+    display: block;
+    width: 14px;
+    height: 14px;
+    background-color: currentColor;
+    -webkit-mask: var(--ytj-icon-handle) center / contain no-repeat;
+    mask: var(--ytj-icon-handle) center / contain no-repeat;
+}
+
+.ytj-drag-handle::before,
+.ytj-drag-handle-clicked::before {
+    width: 16px;
+    height: 16px;
+}
+
+.ytj-set-start-time::before,
+.ytj-set-end-time::before,
+.ytj-delete-item::before,
+.ytj-start-from-here::before,
+.ytj-playing-indicator::before {
+    width: 20px;
+    height: 20px;
+}
+
+.ytj-add-to-playlist::before,
+.ytj-play-playlist::before {
+    width: 24px;
+    height: 24px;
+}
+
+.ytj-start-from-here::before,
+.ytj-playing-indicator::before,
+.ytj-play-playlist::before {
+    -webkit-mask-image: var(--ytj-icon-play);
+    mask-image: var(--ytj-icon-play);
+}
+
+#ytj-play-playlist.playing::before {
+    -webkit-mask-image: var(--ytj-icon-stop);
+    mask-image: var(--ytj-icon-stop);
+}
+
+.ytj-add-to-playlist::before {
+    -webkit-mask-image: var(--ytj-icon-add);
+    mask-image: var(--ytj-icon-add);
+}
+
+.ytj-delete-item::before {
+    -webkit-mask-image: var(--ytj-icon-delete);
+    mask-image: var(--ytj-icon-delete);
+}
+
+.ytj-set-start-time::before {
+    -webkit-mask-image: var(--ytj-icon-set-start);
+    mask-image: var(--ytj-icon-set-start);
+}
+
+.ytj-set-end-time::before {
+    -webkit-mask-image: var(--ytj-icon-set-end);
+    mask-image: var(--ytj-icon-set-end);
 }
 
 /* 播放列表項目文字 */
 .ytj-playlist-item-title {
     font-family: Roboto, Arial, sans-serif;
     margin-right: 5px;
-    width: 200px;
-    max-width: 200px;
+    flex: 1 1 200px;
+    width: auto;
+    min-width: 28px;
+    max-width: none;
     border: none;
+    border-radius: 3px;
     background-color: transparent;
     font-size: 12px;
-    overflow: scroll;
+    line-height: 16px;
+    overflow: hidden;
+    padding: 1px 4px;
     white-space: nowrap;
     position: relative;
     z-index: 1;
     color: var(--text-color);
+    text-overflow: ellipsis;
+}
+
+.ytj-playlist-item-title:hover,
+.ytj-playlist-item-title:focus {
+    background-color: var(--field-hover, transparent);
+    outline: none;
 }
 
 .ytj-playlist-item-text-start, .ytj-playlist-item-text-end {
-    flex: 0 0 60px;  /* 固定寬度 */
+    flex: 0 0 88px;
+    width: 88px;
+    box-sizing: border-box;
     font-family: Roboto, Arial, sans-serif;
     margin-right: 5px;
     font-size: 12px;
+    line-height: 16px;
     overflow: hidden;
+    padding: 1px 2px;
     white-space: nowrap;
-    color: var(--text-color);
+    color: var(--secondary-text, var(--text-color));
+    font-variant-numeric: tabular-nums;
+    text-align: left;
 }
 
 .ytj-button-container {
@@ -160,13 +278,11 @@ ul {
     align-items: center;
 }
 
-.ytj-set-start-time, .ytj-set-end-time, .ytj-delete-item, .ytj-start-from-here {
-    flex: 0 0 16px;
-    width: 16px;
-    height: 16px;
+.ytj-set-start-time, .ytj-set-end-time, .ytj-delete-item, .ytj-start-from-here, .ytj-playing-indicator {
+    flex: 0 0 20px;
+    width: 20px;
+    height: 20px;
     border: none;
-    background-size: cover;
-    background-repeat: no-repeat;
     background-color: transparent;
     display: flex;
     align-items: center;
@@ -174,27 +290,38 @@ ul {
     border-radius: 2px;
     cursor: pointer;
     opacity: 0;
-    transition: opacity 0.3s ease;
-    filter: var(--img-filter);
+    transition: opacity 0.18s ease;
+    color: var(--icon-color, currentColor);
+    z-index: 3;
 }
 
 .ytj-playlist-item:hover .ytj-set-start-time,
 .ytj-playlist-item:hover .ytj-set-end-time,
 .ytj-playlist-item:hover .ytj-delete-item,
-.ytj-playlist-item:hover .ytj-start-from-here{
+.ytj-playlist-item:hover .ytj-start-from-here,
+.ytj-playlist-item:focus-within .ytj-set-start-time,
+.ytj-playlist-item:focus-within .ytj-set-end-time,
+.ytj-playlist-item:focus-within .ytj-delete-item,
+.ytj-playlist-item:focus-within .ytj-start-from-here,
+.ytj-playlist-item.ytj-controls-expanded .ytj-set-start-time,
+.ytj-playlist-item.ytj-controls-expanded .ytj-set-end-time,
+.ytj-playlist-item.ytj-controls-expanded .ytj-delete-item,
+.ytj-playlist-item.ytj-controls-expanded .ytj-start-from-here {
     opacity: 1;
 }
 
-.ytj-set-start-time:hover, .ytj-set-end-time:hover, .ytj-delete-item:hover {
-    background-color: rgba(201, 201, 201, 0.7);
+.ytj-set-start-time:hover,
+.ytj-set-end-time:hover,
+.ytj-delete-item:hover,
+.ytj-start-from-here:hover {
+    background-color: var(--control-hover, rgba(201, 201, 201, 0.7));
 }
 
 .ytj-set-start-time {
-    position: absolute; 
-    right: 20px; 
-    bottom: 0; 
+    position: absolute;
+    right: 22px;
+    bottom: 0;
     border: 1px solid var(--border-color);
-    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/set-start.png');
 }
 
 .ytj-set-end-time {
@@ -202,7 +329,6 @@ ul {
     right: 0px; 
     bottom: 0; 
     border: 1px solid var(--border-color);
-    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/set-end.png');
 }
 
 .ytj-delete-item {
@@ -210,22 +336,54 @@ ul {
     right: 0px;
     top: 0; 
     border: none;
-    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/delete.png');
-    filter: var(--img-filter);
 }
 
 .ytj-start-from-here {
+    flex: 0 0 0;
+    width: 0;
     border: none;
+    margin-right: 0;
+    overflow: hidden;
+    transition: flex-basis 0.18s ease, width 0.18s ease, margin-right 0.18s ease, opacity 0.18s ease;
+}
+
+.ytj-playing-indicator {
+    flex: 0 0 0;
+    width: 0;
+    height: 16px;
+    border: none;
+    margin-right: 0;
+    overflow: hidden;
+    padding: 0;
+    line-height: 0;
+    pointer-events: none;
+    transition: flex-basis 0.18s ease, width 0.18s ease, margin-right 0.18s ease, opacity 0.18s ease;
+}
+
+.ytj-playing-indicator::before {
+    width: 16px;
+    height: 16px;
+}
+
+.ytj-playlist-item:hover .ytj-start-from-here,
+.ytj-playlist-item:focus-within .ytj-start-from-here,
+.ytj-playlist-item.ytj-controls-expanded .ytj-start-from-here {
+    flex-basis: 20px;
+    width: 20px;
     margin-right: 5px;
-    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/play.png');
+}
+
+.ytj-playing-item:not(:hover):not(:focus-within):not(.ytj-controls-expanded) .ytj-playing-indicator.playing {
+    flex-basis: 16px;
+    width: 16px;
+    margin-right: 5px;
+    opacity: 1;
 }
 
 .ytj-add-to-playlist, .ytj-play-playlist {
     flex: 0 0 24px;
     width: 24px;
     height: 24px;
-    background-size: cover;
-    background-repeat: no-repeat;
     background-color: transparent;
     display: flex;
     align-items: center;
@@ -233,25 +391,23 @@ ul {
     border-radius: 2px;
     margin-right: 8px;
     cursor: pointer;
-    filter: var(--img-filter);
+    color: var(--icon-color, currentColor);
 }
 
 .ytj-add-to-playlist:hover, .ytj-play-playlist:hover {
-    background-color: rgba(201, 201, 201, 0.7);
+    background-color: var(--control-hover, rgba(201, 201, 201, 0.7));
 }
 
 .ytj-play-playlist {
     border: none;
     margin-top: 10px;
     margin-bottom: 10px;
-    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/play.png');
 }
 
 .ytj-add-to-playlist {
     border: 1px solid var(--border-color);
     margin-top: 10px;
     margin-bottom: 10px;
-    background-image: url('chrome-extension://__MSG_@@extension_id__/images/ui/add.png');
 }
 
 .ytj-playing-item {
@@ -260,19 +416,6 @@ ul {
 
 .ytj-playing-item:hover {
     background-color: rgba(255, 60, 60, 0.2); /* 將背景變為紅色 */
-}
-
-.ytj-drag-handle.playing {
-    /* 新增播放樣式 */
-    opacity: 1;
-    background: url('chrome-extension://__MSG_@@extension_id__/images/ui/play.png');
-    background-size: contain;
-}
-
-#ytj-play-playlist.playing {
-    /* 新增暫停按鈕樣式 */
-    background: url('chrome-extension://__MSG_@@extension_id__/images/ui/stop.png');
-    background-size: contain;
 }
 
 .ytj-overlay {
@@ -291,47 +434,246 @@ ul {
 .ytj-popup {
     font-family: Roboto, Arial, sans-serif;
     background-color: var(--background-color);
-    padding: 20px;
-    border-radius: 8px;
-    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+    padding: 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.25);
     width: 80%;
-    max-width: 600px;
+    max-width: 720px;
+    max-height: min(760px, 90vh);
+    overflow: auto;
     color: var(--text-color);
 }
 
 .ytj-popup h2 {
     font-family: Roboto, Arial, sans-serif;
     margin-top: 0;
+    margin-bottom: 12px;
+    font-size: 16px;
+    line-height: 1.3;
 }
 
 .ytj-popup-textarea {
     width: 100%;
     max-width: 100%;
-    height: 400px;
+    min-height: 320px;
+    height: min(420px, 52vh);
     line-height: 1.5;
     letter-spacing: 0.5px;
-    margin-bottom: 10px;
+    margin: 0 0 12px;
+    padding: 10px;
+    box-sizing: border-box;
     font-family: Roboto, Arial, sans-serif;
     background-color: var(--background-color);
     color: var(--text-color);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    resize: vertical;
 }
 
 .ytj-popup-button-container {
     font-family: Roboto, Arial, sans-serif;
-    text-align: right;
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
 }
 
 .ytj-popup-button-container button {
     font-family: Roboto, Arial, sans-serif;
-    margin-right: 10px;
     font-size: 12px;
-    background: none;
+    background: transparent;
     border: 1px solid var(--border-color);
     justify-content: center;
-    border-radius: 2px;
-    padding: 5px;
+    border-radius: 999px;
+    padding: 6px 12px;
     cursor: pointer;
     color: var(--text-color);
+}
+
+.ytj-popup-button-container button:hover,
+.ytj-popup-secondary-button:hover,
+.ytj-popup-tabs button:hover {
+    background-color: var(--control-hover, rgba(201, 201, 201, 0.7));
+}
+
+.ytj-popup-button-container .ytj-popup-primary-button {
+    border-color: #0ea5e9;
+    color: #0ea5e9;
+}
+
+.ytj-popup-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 12px;
+    padding: 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background-color: var(--field-hover, transparent);
+}
+
+.ytj-popup-hint {
+    margin: 0 0 10px;
+    color: var(--secondary-text, var(--text-color));
+    font-family: Roboto, Arial, sans-serif;
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.ytj-popup-inline-fields {
+    display: contents;
+}
+
+.ytj-popup-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 130px;
+    font-family: Roboto, Arial, sans-serif;
+    font-size: 11px;
+    color: var(--secondary-text, var(--text-color));
+}
+
+.ytj-popup-checkbox-field {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 28px;
+    padding-top: 16px;
+    color: var(--secondary-text, var(--text-color));
+    font-family: Roboto, Arial, sans-serif;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.ytj-popup-checkbox-field input {
+    margin: 0;
+}
+
+.ytj-popup-input,
+.ytj-popup-select {
+    min-height: 28px;
+    box-sizing: border-box;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 4px 8px;
+    background-color: var(--background-color);
+    color: var(--text-color);
+    font-family: Roboto, Arial, sans-serif;
+    font-size: 12px;
+}
+
+.ytj-popup-custom-delimiter:disabled {
+    opacity: 0.5;
+}
+
+.ytj-popup-tabs {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+
+.ytj-popup-tabs button,
+.ytj-popup-secondary-button {
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    padding: 6px 12px;
+    background: transparent;
+    color: var(--text-color);
+    font-family: Roboto, Arial, sans-serif;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.ytj-popup-tabs button.active {
+    border-color: #0ea5e9;
+    color: #0ea5e9;
+    background-color: rgba(14, 165, 233, 0.12);
+}
+
+.ytj-edit-pane.hidden {
+    display: none;
+}
+
+.ytj-edit-row-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 10px;
+    max-height: 420px;
+    overflow: auto;
+}
+
+.ytj-edit-row {
+    display: grid;
+    grid-template-columns: 24px 32px 96px 96px minmax(160px, 1fr) auto;
+    gap: 6px;
+    align-items: center;
+    padding: 6px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+}
+
+.ytj-edit-row-dragging {
+    opacity: 0;
+}
+
+.ytj-edit-row-display-dragging {
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+    background-color: var(--background-color);
+}
+
+.ytj-edit-row-index {
+    color: var(--secondary-text, var(--text-color));
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+.ytj-edit-row-handle {
+    width: 24px;
+    height: 24px;
+    border: none;
+    background: transparent;
+    color: var(--icon-color, currentColor);
+    cursor: grab;
+    padding: 0;
+}
+
+.ytj-edit-row-handle:active {
+    cursor: grabbing;
+}
+
+.ytj-edit-row-handle::before {
+    content: "";
+    display: block;
+    width: 16px;
+    height: 16px;
+    margin: auto;
+    background-color: currentColor;
+    -webkit-mask: var(--ytj-icon-handle) center / contain no-repeat;
+    mask: var(--ytj-icon-handle) center / contain no-repeat;
+}
+
+.ytj-edit-row button {
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-color);
+    cursor: pointer;
+    padding: 4px 6px;
+    font-size: 11px;
+}
+
+.ytj-edit-row .ytj-edit-row-handle {
+    border: none;
+}
+
+.ytj-edit-row button:hover {
+    background-color: var(--control-hover, rgba(201, 201, 201, 0.7));
+}
+
+.ytj-edit-time {
+    font-variant-numeric: tabular-nums;
 }
 
 /* 新增的深色主題和亮色主題的CSS樣式 */
@@ -349,16 +691,40 @@ body.light-theme .ytj-popup {
 
 .ytj-import-playlist-text, .ytj-export-playlist, .ytj-edit-playlist-text{
     font-family: Roboto, Arial, sans-serif;
-    margin-right: 5px;
-    margin-bottom: 5px;
+    margin: 0;
     font-size: 12px;
-    background: none;
+    background: transparent;
     border: 1px solid var(--border-color);
     justify-content: center;
-    border-radius: 2px;
-    padding: 5px;
+    padding: 6px 9px;
     cursor: pointer;
     color: var(--text-color);
+}
+
+.ytj-import-playlist-text:hover,
+.ytj-export-playlist:hover,
+.ytj-edit-playlist-text:hover {
+    background-color: var(--control-hover, rgba(201, 201, 201, 0.7));
+}
+
+.ytj-importexport-container {
+    gap: 0;
+    margin-top: 4px;
+    margin-bottom: 6px;
+}
+
+.ytj-importexport-container .ytj-import-playlist-text {
+    border-radius: 8px 0 0 8px;
+}
+
+.ytj-importexport-container .ytj-edit-playlist-text {
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+}
+
+.ytj-importexport-container .ytj-export-playlist {
+    border-radius: 0 8px 8px 0;
 }
 
 .ytj-auto-song-item {

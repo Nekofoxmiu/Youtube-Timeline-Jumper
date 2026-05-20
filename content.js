@@ -18,6 +18,7 @@
     let editModule;
     let stateManagerModule;
     let playlistControllerModule;
+    let i18nModule;
 
     try {
         dataClassModule            = await import('./lib/dataclass.js');
@@ -30,6 +31,7 @@
         getVideoInfoModule         = await import('./lib/getVideoInfo.js');
         stateManagerModule         = await import('./lib/stateManager.js');
         playlistControllerModule   = await import('./lib/playlistController.js');
+        i18nModule                 = await import('./lib/i18n.js');
     } catch (error) {
         console.error('Module loading failed:', error);
     }
@@ -50,16 +52,19 @@
         createPlaylistItemsContainer,
         createPopupTextBox,
         createImportPopupTextBox,
+        createEditPlaylistPopup,
+        createExportPlaylistPopup,
         createTimeTextElements,
         createToggleSwitch
     } = uiModule;
     const { applyTheme }                                    = themeModule;
     const { handleRuntimeMessage }                          = runtimeHandlerModule;
-    const { getCurrentVideoId, getCurrentVideoTime }        = getVideoInfoModule;
+    const { getCurrentVideoId, getRoundedCurrentVideoTime } = getVideoInfoModule;
     const { fetchVideoUploadTime }                          = getVideoInfoModule;
     const { enableEditMode }                                = editModule;
     const { PlaylistStateManager }                          = stateManagerModule;
     const { PlaylistController }                             = playlistControllerModule;
+    const { t }                                               = i18nModule;
 
     // === [ 三、全域變數與常數 ] ======================================================
     // 共用 DOM 元素或容器
@@ -336,9 +341,11 @@
             toggleSwitch,
             createPopupTextBox,
             createImportPopupTextBox,
+            createEditPlaylistPopup,
+            createExportPlaylistPopup,
             legacyState: playlistState,
             getCurrentTimeSeconds: () => {
-                const timeObj = getCurrentVideoTime();
+                const timeObj = getRoundedCurrentVideoTime();
                 return timeObj ? timeObj.getTotalseconds() : 0;
             }
         });
@@ -560,6 +567,13 @@
         dragHandle.draggable = true;
         dragHandle.addEventListener('dragstart', mouseEventHandler.handleDragStart);
 
+        const playingIndicator = document.createElement('button');
+        playingIndicator.type = 'button';
+        playingIndicator.classList.add('ytj-playing-indicator');
+        playingIndicator.tabIndex = -1;
+        playingIndicator.title = t('ytj_currently_playing');
+        playingIndicator.setAttribute('aria-hidden', 'true');
+
         // 時間文字（start / end）
         const TimeTextElements = createTimeTextElements(startTime, endTime);
         const startTimeText    = TimeTextElements.startElement;
@@ -573,7 +587,7 @@
 
         // 播放列表項目標題 input
         const titleInput         = createTitleInput();
-        const fallbackTitle = isProvisional ? 'Auto Song (Provisional)' : (isAutoSongItem ? 'Auto Song' : '');
+        const fallbackTitle = isProvisional ? t('ytj_auto_song_provisional') : (isAutoSongItem ? t('ytj_auto_song') : '');
         titleInput.value         = title || fallbackTitle;
 
         // attach metadata to DOM dataset
@@ -590,6 +604,7 @@
         }
 
         // 將上述元素組合到 newItem
+        newItem.appendChild(playingIndicator);
         newItem.appendChild(dragHandle);
         newItem.appendChild(startFromHereBtn);
         newItem.appendChild(startTimeText);
@@ -608,6 +623,7 @@
     function createStartFromHereButton(listItem) {
         const button = document.createElement('button');
         button.classList.add('ytj-start-from-here');
+        button.title = t('ytj_play_from_here');
         button.addEventListener('click', async (event) => {
             try {
                 const video = document.querySelector('video');
@@ -620,8 +636,8 @@
                     const styleModificationPromise = new Promise(resolve => {
                         document.querySelectorAll('.ytj-playing-item')
                                 .forEach(item => item.classList.remove('ytj-playing-item'));
-                        document.querySelectorAll('.ytj-drag-handle.playing')
-                                .forEach(handle => handle.classList.remove('playing'));
+                        document.querySelectorAll('.ytj-playing-indicator.playing')
+                                .forEach(button => button.classList.remove('playing'));
                         resolve();
                     });
                     styleModificationPromises.push(styleModificationPromise);
@@ -652,11 +668,12 @@
     function createSetStartTimeButton() {
         const button = document.createElement('button');
         button.classList.add('ytj-set-start-time');
+        button.title = t('ytj_set_start_time');
         button.addEventListener('click', (event) => {
             const listItem      = event.target.closest('.ytj-playlist-item');
             const startTimeText = listItem.querySelector('.ytj-playlist-item-text-start');
             const originalTime  = Number(startTimeText.getAttribute('timeat'));
-            const timeObj       = getCurrentVideoTime();
+            const timeObj       = getRoundedCurrentVideoTime();
 
             if (timeObj) {
                 startTimeText.innerText = timeObj.toformatString();
@@ -680,12 +697,13 @@
     function createSetEndTimeButton() {
         const button = document.createElement('button');
         button.classList.add('ytj-set-end-time');
+        button.title = t('ytj_set_end_time');
         button.addEventListener('click', (event) => {
             try {
                 const listItem     = event.target.closest('.ytj-playlist-item');
                 const endTimeText  = listItem.querySelector('.ytj-playlist-item-text-end');
                 const originalTime = Number(endTimeText.getAttribute('timeat'));
-                const timeObj      = getCurrentVideoTime();
+                const timeObj      = getRoundedCurrentVideoTime();
                 if (timeObj) {
                     endTimeText.innerText = timeObj.toformatString();
                     endTimeText.setAttribute('timeat', timeObj.getTotalseconds().toString());
@@ -710,6 +728,7 @@
     function createDeleteButton(listItem) {
         const button = document.createElement('button');
         button.classList.add('ytj-delete-item');
+        button.title = t('ytj_delete');
     button.addEventListener('click', async () => {
             try {
                 playlistTimeManager.deletePlaylistItem(listItem);
@@ -743,7 +762,7 @@
         const input = document.createElement('input');
         input.type  = 'text';
         input.classList.add('ytj-playlist-item-title', 'editable');
-        input.placeholder = 'Title';
+        input.placeholder = t('ytj_title_placeholder');
         input.readOnly    = true; // 初始只讀
         return input;
     }
@@ -774,7 +793,7 @@
             playlistController.openImportDialog();
             return;
         }
-        createImportPopupTextBox('Import Playlist', async (text, additionalSeconds) => {
+        createImportPopupTextBox(t('ytj_import_playlist'), async (text, additionalSeconds) => {
             if (!text) return;
 
             // 檢查 additionalSeconds
@@ -786,14 +805,14 @@
 
             // === 小工具函式 ===
             const isTimeToken = tok => {
-                // 允許 1:23 或 1:23:45；全部都是數字與冒號
-                const parts = tok.split(':');
+                // 允許 1:23.5 或 1:23:45.125；只有最後秒數欄可含小數
+                const parts = String(tok || '').split(':');
                 if (parts.length < 2 || parts.length > 3) return false;
-                return parts.every(p => /^\d+$/.test(p));
+                return parts.every((p, index) => (index === parts.length - 1 ? /^\d+(?:\.\d+)?$/.test(p) : /^\d+$/.test(p)));
             };
 
             const timeTokenToSeconds = tok => {
-                const nums = tok.split(':').map(Number); // [m,s] 或 [h,m,s]
+                const nums = String(tok || '').split(':').map((part, index, parts) => (index === parts.length - 1 ? parseFloat(part) : Number(part))); // [m,s] 或 [h,m,s]
                 if (nums.length === 2) {               // mm:ss  or m:ss
                     return nums[0] * 60 + nums[1];
                 } else {                               // h:mm:ss
@@ -883,7 +902,7 @@
         const originText = items.join('\n');
 
         // 建立彈窗，顯示舊文字供使用者修改
-        createPopupTextBox('Edit Playlist', async (text) => {
+        createPopupTextBox(t('ytj_edit_playlist'), async (text) => {
             // 先刪除所有項目再重新匯入
             playlistTimeManager.deleteAllPlaylistItems();
             playlistState.state = getandUpdatePlaylistState(playlistState);
@@ -895,7 +914,8 @@
             if (!text) return;
 
             const lines = text.split('\n');
-            const regex = /(\d{1,3}:\d{2}(?::\d{2})?)\s*(?:\D*\s*(\d{1,3}:\d{2}(?::\d{2})?))?\s*(.*)/;
+            const timePattern = String.raw`\d{1,3}:\d{1,2}(?::\d{1,2})?(?:\.\d+)?`;
+            const regex = new RegExp(`(${timePattern})\\s*(?:\\D*\\s*(${timePattern}))?\\s*(.*)`);
 
             for (const line of lines) {
                 const match = line.match(regex);
@@ -951,7 +971,7 @@
             return `${start} ${end !== start ? end : ''} ${title}`.trim();
         });
         const text = items.join('\n');
-        createPopupTextBox('Export Playlist', () => { })
+        createPopupTextBox(t('ytj_export_playlist'), () => { })
             .querySelector('textarea').value = text;
     }
 

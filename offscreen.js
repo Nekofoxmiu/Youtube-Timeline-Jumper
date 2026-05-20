@@ -153,6 +153,20 @@ function segmentsOverlap(a, b) {
   return aStart < bEnd && bStart < aEnd;
 }
 
+function sortReportSegments(segments, { provisional = null } = {}) {
+  return (Array.isArray(segments) ? segments : [])
+    .map((segment) => ({
+      ...segment,
+      provisional: provisional === null ? Boolean(segment?.provisional) : Boolean(provisional),
+    }))
+    .filter((segment) => {
+      const startSec = Number(segment?.startSec);
+      const endSec = Number(segment?.endSec);
+      return Number.isFinite(startSec) && Number.isFinite(endSec) && endSec >= startSec;
+    })
+    .sort((a, b) => Number(a.startSec) - Number(b.startSec) || Number(a.endSec) - Number(b.endSec));
+}
+
 function getCachedGlobalSmoothing(session, currentTimeSec, { finalizeAll = false } = {}) {
   if (!session || session.detectorMode !== DETECTOR_MODES.FIRERED_AED) return null;
 
@@ -184,14 +198,14 @@ function getCachedGlobalSmoothing(session, currentTimeSec, { finalizeAll = false
   return result;
 }
 
-function buildLiveReportSegments(session, currentTimeSec, { finalizeAll = false } = {}) {
+function buildActiveReportSegments(session, currentTimeSec, { finalizeAll = false } = {}) {
   const allFinalSegments = session.segmentTracker.getFinalSegments();
   const trackerProvisionalSegments = session.segmentTracker.getProvisionalSegments(currentTimeSec);
 
   if (session.detectorMode !== DETECTOR_MODES.FIRERED_AED) {
     return {
-      finalSegments: allFinalSegments,
-      provisionalSegments: trackerProvisionalSegments,
+      finalSegments: sortReportSegments(allFinalSegments),
+      provisionalSegments: sortReportSegments(trackerProvisionalSegments, { provisional: true }),
       refinedBy: null,
       smoothingMethod: null,
     };
@@ -201,7 +215,7 @@ function buildLiveReportSegments(session, currentTimeSec, { finalizeAll = false 
   if (smoothing && Array.isArray(smoothing.segments)) {
     if (finalizeAll) {
       return {
-        finalSegments: smoothing.segments,
+        finalSegments: sortReportSegments(smoothing.segments),
         provisionalSegments: [],
         refinedBy: GLOBAL_SMOOTHING_VERSION,
         smoothingMethod: smoothing.method || null,
@@ -229,8 +243,8 @@ function buildLiveReportSegments(session, currentTimeSec, { finalizeAll = false 
     }
 
     return {
-      finalSegments,
-      provisionalSegments,
+      finalSegments: sortReportSegments(finalSegments),
+      provisionalSegments: sortReportSegments(provisionalSegments, { provisional: true }),
       refinedBy: GLOBAL_SMOOTHING_VERSION,
       smoothingMethod: smoothing.method || null,
     };
@@ -249,11 +263,125 @@ function buildLiveReportSegments(session, currentTimeSec, { finalizeAll = false 
   }
 
   return {
-    finalSegments,
-    provisionalSegments: [...delayedFinalSegments, ...trackerProvisionalSegments],
+    finalSegments: sortReportSegments(finalSegments),
+    provisionalSegments: sortReportSegments([...delayedFinalSegments, ...trackerProvisionalSegments], { provisional: true }),
     refinedBy: null,
     smoothingMethod: null,
   };
+}
+
+function getCompletedRangeSegments(session) {
+  const ranges = Array.isArray(session.completedAnalysisRanges) ? session.completedAnalysisRanges : [];
+  return ranges.flatMap((range) => Array.isArray(range.finalSegments) ? range.finalSegments : []);
+}
+
+function mergeReportSegments(completedSegments, activeSegments) {
+  return sortReportSegments([...completedSegments, ...activeSegments])
+    .filter((segment, index, list) => {
+      const duplicateIndex = list.findIndex((candidate) => (
+        Math.abs(Number(candidate.startSec) - Number(segment.startSec)) < 0.001
+        && Math.abs(Number(candidate.endSec) - Number(segment.endSec)) < 0.001
+      ));
+      return duplicateIndex === index;
+    });
+}
+
+function buildCompletedRangesSummary(session, activeSummary = null) {
+  const ranges = Array.isArray(session.completedAnalysisRanges) ? session.completedAnalysisRanges : [];
+  if (!ranges.length) return activeSummary;
+
+  const completedFrameCount = ranges.reduce((total, range) => (
+    total + (Number(range?.analysisCacheSummary?.frameCount) || 0)
+  ), 0);
+  const completedSegmentCount = ranges.reduce((total, range) => (
+    total + (Array.isArray(range?.finalSegments) ? range.finalSegments.length : 0)
+  ), 0);
+
+  return {
+    ...(activeSummary || {}),
+    smoothingVersion: GLOBAL_SMOOTHING_VERSION,
+    completedRangeCount: ranges.length,
+    completedFrameCount,
+    activeFrameCount: Number(activeSummary?.frameCount) || 0,
+    frameCount: completedFrameCount + (Number(activeSummary?.frameCount) || 0),
+    segmentCount: completedSegmentCount + (Number(activeSummary?.segmentCount) || 0),
+    discontinuities: Number(session.analysisCacheDiscontinuities) || 0,
+  };
+}
+
+function buildLiveReportSegments(session, currentTimeSec, { finalizeAll = false } = {}) {
+  const activeReport = buildActiveReportSegments(session, currentTimeSec, { finalizeAll });
+  const completedSegments = getCompletedRangeSegments(session);
+
+  return {
+    ...activeReport,
+    finalSegments: mergeReportSegments(completedSegments, activeReport.finalSegments),
+    provisionalSegments: sortReportSegments(activeReport.provisionalSegments, { provisional: true }),
+  };
+}
+
+function captureCompletedAnalysisRange(session, finalTimeSec, reason = 'discontinuity') {
+  const frames = Array.isArray(session.analysisCache) ? session.analysisCache : [];
+  const activeReport = buildActiveReportSegments(session, finalTimeSec, { finalizeAll: true });
+  const finalSegments = sortReportSegments(activeReport.finalSegments);
+  if (!frames.length && !finalSegments.length) return false;
+
+  const firstFrame = frames[0] || null;
+  const lastFrame = frames[frames.length - 1] || null;
+  const analysisCacheSummary = buildAnalysisCacheSummary(session, finalSegments);
+  const range = {
+    reason,
+    startSec: roundNumber(firstFrame?.timeSec ?? finalSegments[0]?.startSec ?? finalTimeSec, 3),
+    endSec: roundNumber(Math.max(
+      Number(finalTimeSec) || 0,
+      Number(lastFrame?.timeSec) || 0,
+      Number(finalSegments[finalSegments.length - 1]?.endSec) || 0
+    ), 3),
+    finalSegments,
+    refinedBy: activeReport.refinedBy || null,
+    smoothingMethod: activeReport.smoothingMethod || null,
+    analysisCacheSummary,
+  };
+
+  if (!Array.isArray(session.completedAnalysisRanges)) session.completedAnalysisRanges = [];
+  session.completedAnalysisRanges.push(range);
+  return true;
+}
+
+function computeNextIntegerSecond(currentTimeSec) {
+  const current = Math.max(0, Number(currentTimeSec) || 0);
+  const rounded = Math.round(current);
+  if (Math.abs(current - rounded) <= 0.02) return rounded;
+  return Math.ceil(current);
+}
+
+function isWaitingForIntegerStart(session, currentTimeSec) {
+  if (!session?.integerStartPending) return false;
+  if (!Number.isFinite(Number(session.startAnalysisAtSec))) {
+    session.startAnalysisAtSec = computeNextIntegerSecond(currentTimeSec);
+  }
+  return Number(currentTimeSec) + 0.001 < Number(session.startAnalysisAtSec);
+}
+
+function isAnalysisGateClosed(session) {
+  return Boolean(session?.integerStartPending);
+}
+
+function openAnalysisGate(session, currentTimeSec) {
+  session.integerStartPending = false;
+  session.startAnalysisAtSec = null;
+  session.eventDecisionHistory = [];
+  session.eventDecisionSnapshot = null;
+  session.lastSingingAnchorSec = null;
+  session.analysisCache = [];
+  session.liveSmoothingCache = null;
+  if (typeof session.segmentTracker?.reset === 'function') {
+    session.segmentTracker.reset();
+  }
+  if (typeof session.detector?.resetAnalysisState === 'function') {
+    session.detector.resetAnalysisState();
+  }
+  markPlaybackClock(session, currentTimeSec);
 }
 
 function getTrackerDebugState(tracker) {
@@ -319,6 +447,27 @@ function appendDebugTrace(session, currentTimeSec, analysis, decisionResult, upd
   if (session.debugTrace.length > MAX_DEBUG_TRACE_FRAMES) {
     session.debugTrace.splice(0, session.debugTrace.length - MAX_DEBUG_TRACE_FRAMES);
   }
+}
+
+function serializeStartupError(error) {
+  return {
+    name: error?.name || null,
+    message: error?.message || String(error || ''),
+    stack: error?.stack || null,
+  };
+}
+
+function makeStartupDebug(phase, extra = {}) {
+  return {
+    source: 'offscreen',
+    phase,
+    timestamp: new Date().toISOString(),
+    location: globalThis.location ? globalThis.location.href : null,
+    userAgent: navigator?.userAgent || null,
+    crossOriginIsolated: globalThis.crossOriginIsolated === true,
+    sharedArrayBufferAvailable: typeof globalThis.SharedArrayBuffer === 'function',
+    extra,
+  };
 }
 
 function buildMonoChunk(inputBuffer) {
@@ -484,6 +633,12 @@ async function maybeReport(session, currentTimeSec, { force = false, finalizeAll
   const status = (session.segmentTracker.isSong || provisionalSegments.length > 0)
     ? 'Detecting'
     : 'Listening';
+  const activeSummary = finalizeAll && session.detectorMode === DETECTOR_MODES.FIRERED_AED
+    ? buildAnalysisCacheSummary(session, finalSegments)
+    : null;
+  const analysisCacheSummary = finalizeAll
+    ? buildCompletedRangesSummary(session, activeSummary)
+    : null;
   const signature = buildSignature(
     finalSegments,
     provisionalSegments,
@@ -517,6 +672,7 @@ async function maybeReport(session, currentTimeSec, { force = false, finalizeAll
       liveLookaheadSec: session.detectorMode === DETECTOR_MODES.FIRERED_AED ? LIVE_LOOKAHEAD_SEC : null,
       refinedBy: finalizeAll ? refinedBy : null,
       smoothingMethod: finalizeAll ? smoothingMethod : null,
+      analysisCacheSummary,
       minSegmentDurationSec: session.minSegmentDurationSec,
     });
   } catch (error) {
@@ -888,6 +1044,10 @@ function reconcilePlaybackClock(session, currentTimeSec, snapshot = {}) {
   const looksLikeSeek = delta < -2
     || (delta > PLAYBACK_CLOCK_SEEK_JUMP_SEC && !isContinuousPlaybackJump(session, delta, snapshot));
   if (looksLikeSeek) {
+    const forcedTransition = session.segmentTracker
+      ? session.segmentTracker.finalizeAt(Math.max(0, last))
+      : false;
+    captureCompletedAnalysisRange(session, Math.max(0, last), delta < 0 ? 'seek-backward' : 'seek-forward');
     session.eventDecisionHistory = [];
     session.eventDecisionSnapshot = null;
     session.lastSingingAnchorSec = null;
@@ -897,9 +1057,9 @@ function reconcilePlaybackClock(session, currentTimeSec, snapshot = {}) {
     if (typeof session.detector?.resetAnalysisState === 'function') {
       session.detector.resetAnalysisState();
     }
-    const forcedTransition = session.segmentTracker
-      ? session.segmentTracker.finalizeAt(Math.max(0, last))
-      : false;
+    if (typeof session.segmentTracker?.reset === 'function') {
+      session.segmentTracker.reset();
+    }
     markPlaybackClock(session, current);
     return { shouldAnalyze: true, forcedTransition };
   }
@@ -994,6 +1154,18 @@ async function analyzeSession(tabId) {
 
     session.videoId = playbackSnapshot.videoId || session.videoId || null;
     const currentTimeSec = toSeconds(playbackSnapshot.currentTime);
+
+    if (isWaitingForIntegerStart(session, currentTimeSec)) {
+      markPlaybackClock(session, currentTimeSec);
+      await notifyStatus(session, 'Listening');
+      return;
+    }
+    if (isAnalysisGateClosed(session)) {
+      openAnalysisGate(session, currentTimeSec);
+      await notifyStatus(session, 'Listening');
+      return;
+    }
+
     const clockState = reconcilePlaybackClock(session, currentTimeSec, playbackSnapshot);
     if (!clockState.shouldAnalyze) {
       await notifyStatus(session, session.segmentTracker.isSong ? 'Detecting' : 'Listening');
@@ -1104,12 +1276,42 @@ function buildTrackerConfig(session) {
   };
 }
 
-async function startSession({ tabId, streamId, videoId, detectorMode, minSegmentDurationSec }) {
+async function startSession({ tabId, streamId, videoId, detectorMode, minSegmentDurationSec, startupDebugTrace }) {
+  const debugTrace = Array.isArray(startupDebugTrace) ? startupDebugTrace.slice() : [];
   await stopSession(tabId, { emitStopped: false, skipFinalReport: true });
 
-  const stream = await createTabAudioStream(streamId);
-  const audioContext = new AudioContext();
-  await audioContext.resume();
+  let stream = null;
+  try {
+    stream = await createTabAudioStream(streamId);
+  } catch (error) {
+    const debug = makeStartupDebug('offscreen-createTabAudioStream-failed', {
+      tabId,
+      hasStreamId: Boolean(streamId),
+      error: serializeStartupError(error),
+    });
+    debugTrace.push(debug);
+    console.warn('[song-detection] offscreen getUserMedia failed', debug);
+    error.debugTrace = debugTrace;
+    throw error;
+  }
+
+  let audioContext = null;
+  try {
+    audioContext = new AudioContext();
+    await audioContext.resume();
+  } catch (error) {
+    if (stream) {
+      stream.getTracks().forEach((track) => track.stop());
+    }
+    const debug = makeStartupDebug('offscreen-audio-context-failed', {
+      tabId,
+      error: serializeStartupError(error),
+    });
+    debugTrace.push(debug);
+    console.warn('[song-detection] offscreen AudioContext failed', debug);
+    error.debugTrace = debugTrace;
+    throw error;
+  }
 
   const source = audioContext.createMediaStreamSource(stream);
   const analyser = audioContext.createAnalyser();
@@ -1149,8 +1351,9 @@ async function startSession({ tabId, streamId, videoId, detectorMode, minSegment
     lastSingingAnchorSec: null,
     analysisCache: [],
     liveSmoothingCache: null,
+    completedAnalysisRanges: [],
     analysisCacheDiscontinuities: 0,
-    debugTrace: [],
+    debugTrace,
     trackerThresholds: null,
     songThreshold: null,
     runtimeInfo: null,
@@ -1163,6 +1366,8 @@ async function startSession({ tabId, streamId, videoId, detectorMode, minSegment
     playbackClockCalibration: null,
     playbackSnapshotFailureCount: 0,
     nextPlaybackSnapshotRetryAt: null,
+    integerStartPending: true,
+    startAnalysisAtSec: null,
     videoId: currentVideoId || null,
     lastReportSignature: '',
     lastReportAt: 0,
@@ -1173,11 +1378,13 @@ async function startSession({ tabId, streamId, videoId, detectorMode, minSegment
     session.videoId = initialPlaybackSnapshot.videoId || session.videoId || null;
     calibratePlaybackClock(session, initialPlaybackSnapshot);
     markPlaybackClock(session, initialPlaybackSnapshot.currentTime);
+    session.startAnalysisAtSec = computeNextIntegerSecond(initialPlaybackSnapshot.currentTime);
   }
 
   const captureNodes = await createCaptureTap(audioContext, source, (monoChunk) => {
     const liveSession = sessions.get(tabId);
     if (!liveSession || liveSession.stopping || !liveSession.detector) return;
+    if (isAnalysisGateClosed(liveSession)) return;
     if (typeof liveSession.detector.pushAudioChunk !== 'function') return;
     liveSession.detector.pushAudioChunk(monoChunk);
     const audioClockSec = Number(liveSession.audioContext?.currentTime);
@@ -1217,6 +1424,7 @@ async function startSession({ tabId, streamId, videoId, detectorMode, minSegment
   });
 
   await maybeReport(session, 0, { force: true });
+  scheduleAnalyzeSession(tabId, { force: true });
 
   return {
     status: 'Listening',
@@ -1225,68 +1433,8 @@ async function startSession({ tabId, streamId, videoId, detectorMode, minSegment
     warning: session.warning,
     runtimeInfo: session.runtimeInfo,
     minSegmentDurationSec: session.minSegmentDurationSec,
+    debugTrace: session.debugTrace,
   };
-}
-
-function buildRefinedLiveSegments(session, finalTimeSec) {
-  if (session.detectorMode !== DETECTOR_MODES.FIRERED_AED) return null;
-  const cache = Array.isArray(session.analysisCache) ? session.analysisCache : [];
-  if (cache.length < 20 || !cache.some((frame) => frame.temporalHeadReady)) return null;
-
-  const firstFrame = cache[0];
-  const lastFrame = cache[cache.length - 1];
-  const endSec = Math.max(
-    Number(finalTimeSec) || 0,
-    Number(lastFrame?.timeSec) || 0
-  );
-  const smoothing = smoothFireRedAnalyses(cache, endSec, {
-    startSec: Number(firstFrame?.timeSec) || 0,
-    minSegmentDurationSec: session.minSegmentDurationSec,
-  });
-
-  return {
-    ...smoothing,
-    analysisCacheSummary: buildAnalysisCacheSummary(session, smoothing.segments),
-  };
-}
-
-async function reportRefinedLiveSegments(session, finalTimeSec, refinedResult) {
-  if (!session.videoId || !refinedResult) return false;
-
-  const finalSegments = Array.isArray(refinedResult.segments) ? refinedResult.segments : [];
-  const reportStatus = session.segmentTracker.isSong ? 'Detecting' : 'Listening';
-  const signature = buildSignature(
-    finalSegments,
-    [],
-    reportStatus,
-    session.videoId,
-    session.detectorVersion,
-    session.detectorMode
-  );
-
-  session.lastReportSignature = signature;
-  session.lastReportAt = Date.now();
-
-  try {
-    await chrome.runtime.sendMessage({
-      action: 'songSegmentsUpdated',
-      tabId: session.tabId,
-      videoId: session.videoId,
-      status: reportStatus,
-      detectorMode: session.detectorMode,
-      detectorVersion: session.detectorVersion,
-      finalSegments,
-      provisionalSegments: [],
-      currentTimeSec: roundNumber(finalTimeSec, 3),
-      warning: session.warning || null,
-      refinedBy: GLOBAL_SMOOTHING_VERSION,
-      smoothingMethod: refinedResult.method || null,
-      analysisCacheSummary: refinedResult.analysisCacheSummary || buildAnalysisCacheSummary(session, finalSegments),
-    });
-    return true;
-  } catch (error) {
-    return false;
-  }
 }
 
 async function stopSession(tabId, options = {}) {
@@ -1304,13 +1452,7 @@ async function stopSession(tabId, options = {}) {
   session.segmentTracker.finalizeAt(finalTime);
 
   if (!skipFinalReport) {
-    const refinedResult = buildRefinedLiveSegments(session, finalTime);
-    const refinedReported = refinedResult
-      ? await reportRefinedLiveSegments(session, finalTime, refinedResult)
-      : false;
-    if (!refinedReported) {
-      await maybeReport(session, finalTime, { force: true, finalizeAll: true });
-    }
+    await maybeReport(session, finalTime, { force: true, finalizeAll: true });
   }
 
   const debugTrace = buildDebugTracePayload(session);
@@ -1409,7 +1551,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           return;
         }
 
-        const startResult = await startSession({ tabId, streamId, videoId, detectorMode, minSegmentDurationSec });
+        const startResult = await startSession({
+          tabId,
+          streamId,
+          videoId,
+          detectorMode,
+          minSegmentDurationSec,
+          startupDebugTrace: request.debugTrace,
+        });
         sendResponse({
           success: true,
           status: startResult.status,
@@ -1417,6 +1566,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           detectorVersion: startResult.detectorVersion,
           warning: startResult.warning,
           runtimeInfo: startResult.runtimeInfo,
+          debugTrace: startResult.debugTrace || null,
         });
         return;
       }
@@ -1447,7 +1597,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       }
 
     } catch (error) {
-      sendResponse({ success: false, message: error?.message || String(error) });
+      const debugTrace = Array.isArray(error?.debugTrace) ? error.debugTrace : [
+        makeStartupDebug('offscreen-unhandled-error', {
+          error: serializeStartupError(error),
+        }),
+      ];
+      console.warn('[song-detection] offscreen message failed', debugTrace);
+      sendResponse({
+        success: false,
+        message: error?.message || String(error),
+        debugTrace,
+      });
     }
   })();
 

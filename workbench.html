@@ -173,15 +173,16 @@
           <div class="form-grid two-col">
             <label class="field wide">
               <span data-ui-key="audio_file">音訊檔</span>
-              <input id="offlineAudioInput" type="file" accept="audio/*,.m4a,.mp3,.wav,.aac,.flac,.ogg">
+              <input id="offlineAudioInput" type="file" accept=".m4a,.mp4,audio/mp4,video/mp4" multiple>
+              <small class="field-hint" data-ui-key="offline_supported_formats">Only .m4a and .mp4 are supported.</small>
             </label>
             <label class="field">
               <span data-ui-key="start_seconds">開始秒數</span>
-              <input id="offlineStartSec" type="number" min="0" step="1" placeholder="0">
+              <input id="offlineStartSec" type="number" min="0" step="0.001" placeholder="0">
             </label>
             <label class="field">
               <span data-ui-key="end_seconds">結束秒數</span>
-              <input id="offlineEndSec" type="number" min="0" step="1" placeholder="留空代表檔案結尾" data-ui-placeholder="end_seconds_placeholder">
+              <input id="offlineEndSec" type="number" min="0" step="0.001" placeholder="留空代表檔案結尾" data-ui-placeholder="end_seconds_placeholder">
             </label>
             <label class="field">
               <span data-ui-key="save_to_video_id">儲存到 videoId</span>
@@ -199,18 +200,109 @@
               <input id="offlineSplitMedleyToggle" type="checkbox">
               <span data-ui-key="split_medley_label">串燒切分</span>
             </label>
+            <label class="check-field compact wide">
+              <input id="offlineVisualEditorToggle" type="checkbox" checked>
+              <span data-ui-key="visual_editor_label">Waveform/spectrogram editor</span>
+            </label>
+            <label class="check-field compact wide">
+              <input id="offlineHighResolutionToggle" type="checkbox">
+              <span data-ui-key="high_resolution_visuals_label">High-resolution spectrogram</span>
+            </label>
           </div>
+          <section id="offlineMultiFileStaging" class="offline-multi-staging" hidden>
+            <div class="offline-multi-heading">
+              <div>
+                <p class="eyebrow" data-ui-key="offline_multi_file_eyebrow">Multi-file setup</p>
+                <div id="offlineMultiFileStatus" class="status-text"></div>
+              </div>
+              <button id="offlineSkipMultiSetupBtn" type="button" data-ui-key="offline_skip_multi_setup">Skip setup, analyze full files</button>
+            </div>
+            <div id="offlineMultiFileTabs" class="offline-multi-tabs" role="tablist" aria-label="Offline file setup"></div>
+          </section>
 
           <div class="button-row">
             <button id="offlineAnalyzeBtn" class="primary" type="button" data-ui-key="analyze_local_audio">Analyze Local Audio</button>
+            <button id="offlinePauseBtn" type="button" disabled data-ui-key="pause_analysis">Pause</button>
+            <button id="offlineStopBtn" type="button" disabled data-ui-key="stop_analysis">Stop</button>
+            <button id="offlineSplitBtn" type="button" disabled data-ui-key="run_medley_split">Run Medley Split</button>
             <button id="offlineSaveBtn" type="button" disabled data-ui-key="save_segments">Save Segments</button>
+            <button id="offlineSaveAllBtn" type="button" disabled data-ui-key="save_all_segments">Save All</button>
           </div>
 
           <div class="progress-shell">
             <div id="offlineProgressBar" class="progress-bar"></div>
           </div>
           <div id="offlineStatus" class="status-text"></div>
+          <div id="offlineRuntimeStatus" class="status-text runtime-status"></div>
           <div id="offlineSummary" class="summary-row"></div>
+          <section id="offlinePlayerPanel" class="offline-player-panel" hidden>
+            <audio id="offlineAudioPlayer" preload="metadata"></audio>
+            <div class="offline-player-header">
+              <div>
+                <p class="eyebrow" data-ui-key="offline_player_eyebrow">Waveform Editor</p>
+                <h3 data-ui-key="offline_player_title">波型播放器</h3>
+              </div>
+              <div class="offline-player-controls">
+                <div class="offline-visual-toggle" aria-label="Audio visualization mode">
+                  <button id="offlineSpectrogramModeBtn" type="button" data-offline-visual-mode="spectrogram" data-ui-key="offline_view_spectrogram">Spectrogram</button>
+                  <button id="offlineWaveformModeBtn" type="button" data-offline-visual-mode="waveform" data-ui-key="offline_view_waveform">Waveform</button>
+                </div>
+                <label class="offline-follow-control">
+                  <input id="offlineFollowPlayheadToggle" type="checkbox" checked>
+                  <span data-ui-key="offline_follow_playhead">Follow playhead</span>
+                </label>
+                <button id="offlineZoomOutBtn" class="offline-zoom-btn" type="button" disabled aria-label="Zoom out" title="Zoom out">−</button>
+                <button id="offlineZoomInBtn" class="offline-zoom-btn" type="button" disabled aria-label="Zoom in" title="Zoom in">＋</button>
+                <button id="offlinePlayPauseBtn" class="round-control transport-control play-control" type="button" disabled aria-label="Play" title="Play" data-state="play">
+                  <svg class="control-icon icon-play" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M8 5.4v13.2L18.5 12z"></path>
+                  </svg>
+                  <svg class="control-icon icon-pause" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"></path>
+                  </svg>
+                </button>
+                <label class="offline-volume-control">
+                  <span data-ui-key="offline_volume">Volume</span>
+                  <input id="offlineVolumeSlider" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume">
+                </label>
+                <label class="offline-gain-control">
+                  <span data-ui-key="offline_visual_gain">Gain</span>
+                  <input id="offlineVisualGainSlider" type="range" min="0" max="4" step="0.05" value="1" aria-label="Visual gain">
+                </label>
+                <span id="offlinePlayerTime" class="offline-player-time">00:00:00 / 00:00:00</span>
+              </div>
+            </div>
+            <div id="offlineWaveformShell" class="offline-waveform-shell" role="application" aria-label="Offline waveform editor">
+              <canvas id="offlineWaveformCanvas" class="offline-waveform-canvas"></canvas>
+              <div id="offlineWaveformOverlay" class="offline-waveform-overlay"></div>
+              <div id="offlinePlayhead" class="offline-playhead"></div>
+              <input id="offlineViewScrollBar" class="offline-view-scrollbar" type="range" min="0" max="10000" step="1" value="0" disabled aria-label="Scroll visible audio range">
+              <div id="offlineWaveformEmpty" class="offline-waveform-empty" data-ui-key="offline_waveform_empty">分析完成後會顯示波型與偵測片段。</div>
+            </div>
+            <div id="offlineSegmentEditor" class="offline-segment-editor" hidden>
+              <label class="field">
+                <span data-ui-key="song_title_placeholder">Song title</span>
+                <input id="offlineSegmentTitleInput" type="text" placeholder="Song title" data-ui-placeholder="song_title_placeholder">
+              </label>
+              <label class="field">
+                <span data-ui-key="start_seconds">Start seconds</span>
+                <input id="offlineSegmentStartInput" type="text" placeholder="00:00:00.000">
+              </label>
+              <label class="field">
+                <span data-ui-key="end_seconds">End seconds</span>
+                <input id="offlineSegmentEndInput" type="text" placeholder="00:00:00.000">
+              </label>
+              <button id="offlineDeleteSegmentBtn" class="database-delete-btn" type="button" data-ui-key="delete">Delete</button>
+            </div>
+            <div class="offline-waveform-hint" data-ui-key="offline_waveform_hint">點擊波型可跳轉，拖曳片段可調整時間，雙擊空白處可新增片段。</div>
+          </section>
+          <div class="offline-batch-panel">
+            <div class="offline-batch-heading">
+              <span data-ui-key="offline_batch_queue">Batch Queue</span>
+              <span id="offlineBatchCount" class="summary-chip">0</span>
+            </div>
+            <div id="offlineBatchList" class="offline-batch-list"></div>
+          </div>
           <div id="offlineBoundaryDebug" class="boundary-debug" hidden></div>
           <div id="offlineResults" class="results-table"></div>
         </article>
@@ -243,6 +335,16 @@
             <label class="check-field settings-check">
               <input id="settingsSplitMedleyDefault" type="checkbox">
               <span data-ui-key="settings_split_medley">離線分析預設啟用串燒切分</span>
+            </label>
+
+            <label class="check-field settings-check">
+              <input id="settingsVisualEditorDefault" type="checkbox" checked>
+              <span data-ui-key="settings_visual_editor">離線分析預設產生波型 / 頻譜編輯器</span>
+            </label>
+
+            <label class="check-field settings-check">
+              <input id="settingsHighResolutionDefault" type="checkbox">
+              <span data-ui-key="settings_high_resolution_visuals">離線分析預設啟用高解析頻譜圖</span>
             </label>
 
             <label class="check-field settings-check">
