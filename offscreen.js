@@ -22,7 +22,9 @@ const DEFAULT_DETECTOR_MODE = DETECTOR_MODES.FIRERED_AED;
 const DEFAULT_MIN_SEGMENT_DURATION_SEC = 90;
 const AUDIO_CAPTURE_WORKLET_NAME = 'ytj-audio-capture-worklet';
 const AUDIO_CAPTURE_WORKLET_PATH = 'lib/songDetection/audioCapture.worklet.js';
-const LIVE_LOOKAHEAD_SEC = 12;
+const LIVE_FINALIZE_DELAY_SEC = 90;
+const LIVE_RESMOOTH_INTERVAL_SEC = 5;
+const LIVE_RESMOOTH_WINDOW_SEC = null;
 const MAX_ANALYSIS_CACHE_FRAMES = 12 * 60 * 60 * 2; // 12 hours at 0.5s hop.
 const FIRERED_TRACKER_START_THRESHOLD = 0.54;
 const FIRERED_TRACKER_END_THRESHOLD = 0.28;
@@ -173,20 +175,38 @@ function sortReportSegments(segments, { provisional = null } = {}) {
     .sort((a, b) => Number(a.startSec) - Number(b.startSec) || Number(a.endSec) - Number(b.endSec));
 }
 
+function getLiveSmoothingFrames(frames, currentTimeSec, { finalizeAll = false } = {}) {
+  if (finalizeAll) return frames;
+  if (!Number.isFinite(Number(LIVE_RESMOOTH_WINDOW_SEC)) || Number(LIVE_RESMOOTH_WINDOW_SEC) <= 0) {
+    return frames;
+  }
+  const endSec = Number(currentTimeSec) || Number(frames[frames.length - 1]?.timeSec) || 0;
+  const windowStartSec = Math.max(0, endSec - Number(LIVE_RESMOOTH_WINDOW_SEC));
+  return frames.filter((frame) => Number(frame.timeSec) >= windowStartSec);
+}
+
 function getCachedGlobalSmoothing(session, currentTimeSec, { finalizeAll = false } = {}) {
   if (!session || session.detectorMode !== DETECTOR_MODES.FIRERED_AED) return null;
 
   const frames = Array.isArray(session.analysisCache) ? session.analysisCache : [];
   if (frames.length < 20 || !frames.some((frame) => frame.temporalHeadReady)) return null;
 
-  const firstFrame = frames[0] || null;
+  const smoothingFrames = getLiveSmoothingFrames(frames, currentTimeSec, { finalizeAll });
+  const firstFrame = smoothingFrames[0] || frames[0] || null;
   const lastFrame = frames[frames.length - 1] || null;
   const endSec = Math.max(
     Number(currentTimeSec) || 0,
     Number(lastFrame?.timeSec) || 0
   );
+  if (!finalizeAll && session.liveSmoothingCache?.result) {
+    const lastComputedAtSec = Number(session.liveSmoothingCache.computedAtSec);
+    if (Number.isFinite(lastComputedAtSec) && endSec - lastComputedAtSec < LIVE_RESMOOTH_INTERVAL_SEC) {
+      return session.liveSmoothingCache.result;
+    }
+  }
   const key = [
     frames.length,
+    roundNumber(Number(firstFrame?.timeSec) || 0, 1),
     roundNumber(endSec, 1),
     finalizeAll ? 'final' : 'live',
   ].join(':');
@@ -195,12 +215,12 @@ function getCachedGlobalSmoothing(session, currentTimeSec, { finalizeAll = false
     return session.liveSmoothingCache.result;
   }
 
-  const result = smoothFireRedAnalyses(frames, endSec, {
+  const result = smoothFireRedAnalyses(smoothingFrames, endSec, {
     startSec: Number.isFinite(Number(firstFrame?.timeSec)) ? Number(firstFrame.timeSec) : null,
     minSegmentDurationSec: session.minSegmentDurationSec,
   });
 
-  session.liveSmoothingCache = { key, result };
+  session.liveSmoothingCache = { key, result, computedAtSec: endSec };
   return result;
 }
 
@@ -228,7 +248,7 @@ function buildActiveReportSegments(session, currentTimeSec, { finalizeAll = fals
       };
     }
 
-    const finalCutoffSec = Math.max(0, currentTimeSec - LIVE_LOOKAHEAD_SEC);
+    const finalCutoffSec = Math.max(0, currentTimeSec - LIVE_FINALIZE_DELAY_SEC);
     const finalSegments = [];
     const provisionalSegments = [];
 
@@ -256,7 +276,7 @@ function buildActiveReportSegments(session, currentTimeSec, { finalizeAll = fals
     };
   }
 
-  const finalCutoffSec = Math.max(0, currentTimeSec - LIVE_LOOKAHEAD_SEC);
+  const finalCutoffSec = Math.max(0, currentTimeSec - LIVE_FINALIZE_DELAY_SEC);
   const finalSegments = [];
   const delayedFinalSegments = [];
 
@@ -675,7 +695,10 @@ async function maybeReport(session, currentTimeSec, { force = false, finalizeAll
       provisionalSegments,
       currentTimeSec: roundNumber(currentTimeSec, 3),
       warning: session.warning || null,
-      liveLookaheadSec: session.detectorMode === DETECTOR_MODES.FIRERED_AED ? LIVE_LOOKAHEAD_SEC : null,
+      liveLookaheadSec: session.detectorMode === DETECTOR_MODES.FIRERED_AED ? LIVE_FINALIZE_DELAY_SEC : null,
+      liveFinalizeDelaySec: session.detectorMode === DETECTOR_MODES.FIRERED_AED ? LIVE_FINALIZE_DELAY_SEC : null,
+      liveResmoothWindowSec: session.detectorMode === DETECTOR_MODES.FIRERED_AED ? LIVE_RESMOOTH_WINDOW_SEC : null,
+      liveResmoothIntervalSec: session.detectorMode === DETECTOR_MODES.FIRERED_AED ? LIVE_RESMOOTH_INTERVAL_SEC : null,
       refinedBy: finalizeAll ? refinedBy : null,
       smoothingMethod: finalizeAll ? smoothingMethod : null,
       analysisCacheSummary,

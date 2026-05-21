@@ -60,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-edge-trim-advisor", action="store_true")
     parser.add_argument("--boundary-candidates", action="store_true", help="Emit debug-only intra-segment boundary candidates; never changes output segments.")
     parser.add_argument("--simulate-live", action="store_true")
-    parser.add_argument("--live-lookahead-sec", nargs="*", type=float, default=[20.0, 30.0, 60.0])
+    parser.add_argument("--live-lookahead-sec", nargs="*", type=float, default=[20.0, 30.0, 60.0, 90.0, 120.0])
     parser.add_argument("--live-step-sec", type=float, default=30.0)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--node", default="node")
