@@ -100,7 +100,7 @@ function segmentMatches(predicted, manual) {
 
 const args = parseArgs(process.argv);
 if (!args.frames || !args.manual || !args.out) {
-  throw new Error('Usage: node tools/run_global_smoothing.mjs --frames <frames.json> --manual <manual.txt> --out <summary.json> [--split-medley]');
+  throw new Error('Usage: node tools/run_global_smoothing.mjs --frames <frames.json> --manual <manual.txt> --out <summary.json> [--split-medley] [--segment-filter-predictions <predictions.json>]');
 }
 
 const framesPayload = JSON.parse(await readFile(args.frames, 'utf8'));
@@ -108,7 +108,18 @@ const frames = Array.isArray(framesPayload.frames) ? framesPayload.frames : [];
 const manual = await loadManual(args.manual);
 const endSec = Number(framesPayload.durationSec) || frames.at(-1)?.timeSec || 0;
 const startSec = frames[0]?.timeSec ? Math.max(0, Number(frames[0].timeSec) - Number(framesPayload.hopSec || 0.5)) : 0;
-const smoothing = smoothFireRedAnalyses(frames, endSec, { startSec });
+let segmentFilterPredictions = null;
+if (args['segment-filter-predictions']) {
+  const predictionsPayload = JSON.parse(await readFile(args['segment-filter-predictions'], 'utf8'));
+  segmentFilterPredictions = Array.isArray(predictionsPayload)
+    ? predictionsPayload
+    : predictionsPayload.predictions;
+}
+const smoothing = smoothFireRedAnalyses(frames, endSec, {
+  startSec,
+  segmentFilterEnabled: Boolean(segmentFilterPredictions),
+  segmentFilterPredictions,
+});
 let finalSegments = smoothing.segments;
 let boundarySplit = null;
 if (args['split-medley']) {
@@ -141,6 +152,7 @@ const summary = {
   excludedMusicOnlySpans: smoothing.excludedMusicOnlySpans || [],
   droppedMusicOnlySegments: smoothing.droppedMusicOnlySegments || [],
   spectralEdgeRefinements: smoothing.spectralEdgeRefinements || [],
+  segmentFilterAdjustments: smoothing.segmentFilterAdjustments || [],
   boundarySplit,
   matches: segmentMatches(finalSegments, manual),
 };

@@ -15,7 +15,15 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence
+
+import numpy as np
+
+from segment_filter_features import (
+    DEFAULT_FILTER_POLICY,
+    apply_segment_filter_predictions,
+    build_segment_filter_feature_matrix,
+)
 
 
 VIDEO_RE = re.compile(r"video_(\d+)")
@@ -45,6 +53,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-song-count", type=int, default=2)
     parser.add_argument("--ids", nargs="*", default=None, help="Optional video numbers/keys to evaluate, e.g. 053 video_061.")
     parser.add_argument("--rebuild-diagnostics", action="store_true")
+    parser.add_argument("--segment-filter", action="store_true", help="Apply experimental segment_filter.onnx and report before/after metrics.")
+    parser.add_argument("--segment-filter-model-dir", type=Path, default=Path("models/fireredvad/aed"))
+    parser.add_argument("--segment-filter-threshold", type=float, default=None)
+    parser.add_argument("--segment-filter-trim-threshold", type=float, default=None)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--node", default="node")
     return parser.parse_args()
@@ -246,32 +258,173 @@ def aggregate_metrics(video_summaries: Iterable[Dict[str, object]]) -> Dict[str,
     }
 
 
-def evaluate_sample(args: argparse.Namespace, sample: Sample, repo_root: Path) -> Dict[str, object]:
+def labels_from_segments(times: Sequence[float], segments: Sequence[Dict[str, object]]) -> List[int]:
+    labels: List[int] = []
+    for time_sec in times:
+        labels.append(1 if any(float(segment.get("startSec") or 0) <= time_sec < float(segment.get("endSec") or 0) for segment in segments) else 0)
+    return labels
+
+
+def frame_metrics(pred: Sequence[int], actual: Sequence[int]) -> Dict[str, float]:
+    tp = fp = fn = tn = 0
+    for predicted, target in zip(pred, actual):
+        if predicted and target:
+            tp += 1
+        elif predicted and not target:
+            fp += 1
+        elif not predicted and target:
+            fn += 1
+        else:
+            tn += 1
+    precision = tp / max(1, tp + fp)
+    recall = tp / max(1, tp + fn)
+    f1 = (2 * precision * recall) / max(1e-9, precision + recall)
+    f05 = (1.25 * precision * recall) / max(1e-9, (0.25 * precision) + recall)
+    return {"precision": precision, "recall": recall, "f1": f1, "f0_5": f05, "tp": tp, "fp": fp, "fn": fn, "tn": tn}
+
+
+def segment_matches(predicted: Sequence[Dict[str, object]], manual: Sequence[Dict[str, object]]) -> List[Dict[str, object]]:
+    matches: List[Dict[str, object]] = []
+    for target in manual:
+        best = None
+        for segment in predicted:
+            overlap = overlap_seconds(segment, target)
+            if best is None or overlap > float(best["overlapSec"]):
+                best = {
+                    "overlapSec": overlap,
+                    "predicted": segment,
+                    "recallRatio": overlap / max(1.0, float(target.get("endSec") or 0) - float(target.get("startSec") or 0)),
+                    "predictedPrecisionRatio": overlap / max(1.0, float(segment.get("endSec") or 0) - float(segment.get("startSec") or 0)),
+                    "startDeltaSec": float(segment.get("startSec") or 0) - float(target.get("startSec") or 0),
+                    "endDeltaSec": float(segment.get("endSec") or 0) - float(target.get("endSec") or 0),
+                }
+        matches.append({"manual": target, "best": best})
+    return matches
+
+
+class SegmentFilterRuntime:
+    def __init__(self, model_dir: Path, keep_threshold: Optional[float] = None, trim_threshold: Optional[float] = None) -> None:
+        try:
+            import onnxruntime as ort
+        except Exception as error:  # pragma: no cover - exercised in local tooling only.
+            raise RuntimeError(f"onnxruntime is required for --segment-filter: {error}") from error
+        self.model_path = model_dir / "segment_filter.onnx"
+        self.meta_path = model_dir / "segment_filter.meta.json"
+        if not self.model_path.exists() or not self.meta_path.exists():
+            raise RuntimeError(f"segment filter assets not found in {model_dir}")
+        self.meta = load_json(self.meta_path)
+        self.session = ort.InferenceSession(str(self.model_path), providers=["CPUExecutionProvider"])
+        self.input_name = str(self.meta.get("inputName") or self.session.get_inputs()[0].name)
+        self.output_name = str(self.meta.get("outputName") or self.session.get_outputs()[0].name)
+        self.keep_threshold = float(keep_threshold if keep_threshold is not None else self.meta.get("keepThreshold", DEFAULT_FILTER_POLICY["keep_threshold"]))
+        self.trim_threshold = float(trim_threshold if trim_threshold is not None else self.meta.get("trimConfidenceThreshold", DEFAULT_FILTER_POLICY["trim_confidence_threshold"]))
+        self.trim_clamp_sec = float(self.meta.get("trimClampSec", DEFAULT_FILTER_POLICY["trim_clamp_sec"]))
+        self.min_segment_duration_sec = float(self.meta.get("minSegmentDurationSec", DEFAULT_FILTER_POLICY["min_segment_duration_sec"]))
+
+    def predict(self, segments: Sequence[Dict[str, object]], frames: Sequence[Dict[str, object]], summary: Dict[str, object]) -> List[Dict[str, float]]:
+        if not segments:
+            return []
+        context = {
+            "endSec": float(summary.get("endSec") or 0),
+            "trackerSegments": summary.get("trackerSegments") or [],
+            "modelRunSegments": summary.get("modelRunSegments") or [],
+            "fallbackSegments": summary.get("fallbackSegments") or [],
+            "selectedModelFallbackSegments": summary.get("selectedModelFallbackSegments") or [],
+        }
+        matrix = np.asarray(build_segment_filter_feature_matrix(segments, frames, context), dtype=np.float32)
+        output = self.session.run([self.output_name], {self.input_name: matrix})[0]
+        predictions = []
+        for row in np.asarray(output, dtype=np.float32):
+            predictions.append({
+                "keepProbability": float(np.clip(row[0], 0.0, 1.0)),
+                "startTrimDeltaSec": float(np.clip(row[1], -self.trim_clamp_sec, self.trim_clamp_sec)),
+                "endTrimDeltaSec": float(np.clip(row[2], -self.trim_clamp_sec, self.trim_clamp_sec)),
+            })
+        return predictions
+
+
+def severe_outliers_for_summary(video_key: str, summary: Dict[str, object]) -> List[Dict[str, object]]:
+    severe_outliers: List[Dict[str, object]] = []
+    metrics = summary.get("metrics") or {}
+    if float(metrics.get("f1") or 0) < 0.94:
+        severe_outliers.append({"type": "low-video-f1", "video": video_key, "metrics": metrics})
+    for match in summary.get("matches", []):
+        if isinstance(match, dict):
+            severe_outliers.extend(classify_match_outlier(video_key, match))
+    severe_outliers.extend(classify_prediction_outliers(video_key, summary))
+    return severe_outliers
+
+
+def apply_segment_filter_to_summary(
+    args: argparse.Namespace,
+    sample: Sample,
+    summary: Dict[str, object],
+    frames_payload: Dict[str, object],
+    runtime: SegmentFilterRuntime,
+) -> Dict[str, object]:
+    frames = frames_payload.get("frames", []) if isinstance(frames_payload, dict) else []
+    manual_segments = [match.get("manual") for match in summary.get("matches", []) if isinstance(match, dict) and isinstance(match.get("manual"), dict)]
+    predictions = runtime.predict(summary.get("segments") or [], frames, summary)
+    filtered_segments, adjustments = apply_segment_filter_predictions(
+        summary.get("segments") or [],
+        predictions,
+        start_sec=0.0,
+        end_sec=float(summary.get("endSec") or frames_payload.get("durationSec") or 0),
+        keep_threshold=runtime.keep_threshold,
+        trim_confidence_threshold=runtime.trim_threshold,
+        trim_clamp_sec=runtime.trim_clamp_sec,
+        min_segment_duration_sec=runtime.min_segment_duration_sec,
+    )
+    times = [float(frame.get("timeSec") or 0) for frame in frames]
+    filtered_summary = {
+        **summary,
+        "method": f"{summary.get('method', 'unknown')}+segment-filter",
+        "segments": filtered_segments,
+        "metrics": frame_metrics(labels_from_segments(times, filtered_segments), labels_from_segments(times, manual_segments)),
+        "matches": segment_matches(filtered_segments, manual_segments),
+        "segmentFilter": {
+            "enabled": True,
+            "modelPath": str(runtime.model_path),
+            "metaPath": str(runtime.meta_path),
+            "keepThreshold": runtime.keep_threshold,
+            "trimConfidenceThreshold": runtime.trim_threshold,
+            "predictions": predictions,
+            "adjustments": adjustments,
+        },
+    }
+    filtered_summary["severeOutliers"] = severe_outliers_for_summary(sample.video_key, filtered_summary)
+    out_path = args.out_dir / f"{sample.video_key}.segment_filter_summary.json"
+    out_path.write_text(json.dumps(filtered_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    return filtered_summary
+
+
+def evaluate_sample(args: argparse.Namespace, sample: Sample, repo_root: Path, segment_filter_runtime: Optional[SegmentFilterRuntime] = None) -> Dict[str, object]:
     frames_path = args.out_dir / f"{sample.video_key}.frames.json"
     smoothing_path = args.out_dir / f"{sample.video_key}.smoothing_summary.json"
 
-    diagnose_cmd = [
-        args.python,
-        "-u",
-        "tools/diagnose_offline_detection.py",
-        "--audio",
-        str(sample.audio_path),
-        "--manual",
-        str(sample.manual_path),
-        "--model-dir",
-        str(args.model_dir),
-        "--out-dir",
-        str(args.out_dir),
-        "--chunk-sec",
-        str(args.chunk_sec),
-        "--stats-cache",
-        str(sample.stats_cache_path),
-    ]
-    if args.rebuild_diagnostics:
-        diagnose_cmd.append("--rebuild")
-    diagnose = run_command(diagnose_cmd, repo_root)
-    if diagnose.returncode != 0:
-        raise RuntimeError(f"diagnose failed for {sample.video_key}\n{tail_text(diagnose.stdout)}\n{tail_text(diagnose.stderr)}")
+    if args.rebuild_diagnostics or not frames_path.exists():
+        diagnose_cmd = [
+            args.python,
+            "-u",
+            "tools/diagnose_offline_detection.py",
+            "--audio",
+            str(sample.audio_path),
+            "--manual",
+            str(sample.manual_path),
+            "--model-dir",
+            str(args.model_dir),
+            "--out-dir",
+            str(args.out_dir),
+            "--chunk-sec",
+            str(args.chunk_sec),
+            "--stats-cache",
+            str(sample.stats_cache_path),
+        ]
+        if args.rebuild_diagnostics:
+            diagnose_cmd.append("--rebuild")
+        diagnose = run_command(diagnose_cmd, repo_root)
+        if diagnose.returncode != 0:
+            raise RuntimeError(f"diagnose failed for {sample.video_key}\n{tail_text(diagnose.stdout)}\n{tail_text(diagnose.stderr)}")
 
     smoothing_cmd = [
         args.node,
@@ -283,19 +436,26 @@ def evaluate_sample(args: argparse.Namespace, sample: Sample, repo_root: Path) -
         "--out",
         str(smoothing_path),
     ]
-    smoothing = run_command(smoothing_cmd, repo_root)
-    if smoothing.returncode != 0:
-        raise RuntimeError(f"smoothing failed for {sample.video_key}\n{tail_text(smoothing.stdout)}\n{tail_text(smoothing.stderr)}")
+    if args.rebuild_diagnostics or not smoothing_path.exists():
+        smoothing = run_command(smoothing_cmd, repo_root)
+        if smoothing.returncode != 0:
+            raise RuntimeError(f"smoothing failed for {sample.video_key}\n{tail_text(smoothing.stdout)}\n{tail_text(smoothing.stderr)}")
 
     summary = load_json(smoothing_path)
-    severe_outliers = []
-    metrics = summary.get("metrics") or {}
-    if float(metrics.get("f1") or 0) < 0.94:
-        severe_outliers.append({"type": "low-video-f1", "video": sample.video_key, "metrics": metrics})
-    for match in summary.get("matches", []):
-        if isinstance(match, dict):
-            severe_outliers.extend(classify_match_outlier(sample.video_key, match))
-    severe_outliers.extend(classify_prediction_outliers(sample.video_key, summary))
+    baseline_metrics = summary.get("metrics") or {}
+    baseline_severe_outliers = severe_outliers_for_summary(sample.video_key, summary)
+    active_summary = summary
+    segment_filter_summary_path = None
+    segment_filter_metrics = None
+    segment_filter_outliers = None
+    if segment_filter_runtime is not None:
+        frames_payload = load_json(frames_path)
+        if not isinstance(frames_payload, dict):
+            raise RuntimeError(f"invalid frames payload for {sample.video_key}: {frames_path}")
+        active_summary = apply_segment_filter_to_summary(args, sample, summary, frames_payload, segment_filter_runtime)
+        segment_filter_summary_path = str(args.out_dir / f"{sample.video_key}.segment_filter_summary.json")
+        segment_filter_metrics = active_summary.get("metrics") or {}
+        segment_filter_outliers = active_summary.get("severeOutliers") or []
 
     return {
         "video": sample.video_key,
@@ -305,13 +465,20 @@ def evaluate_sample(args: argparse.Namespace, sample: Sample, repo_root: Path) -
         "statsCachePath": str(sample.stats_cache_path),
         "framesPath": str(frames_path),
         "summaryPath": str(smoothing_path),
-        "metrics": metrics,
+        "segmentFilterSummaryPath": segment_filter_summary_path,
+        "metrics": active_summary.get("metrics") or {},
+        "baselineMetrics": baseline_metrics,
+        "segmentFilterMetrics": segment_filter_metrics,
         "rawModelMetrics": summary.get("rawModelMetrics") or {},
-        "method": summary.get("method"),
+        "method": active_summary.get("method"),
+        "baselineMethod": summary.get("method"),
         "smoothingVersion": summary.get("smoothingVersion"),
-        "segmentCount": len(summary.get("segments") or []),
+        "segmentCount": len(active_summary.get("segments") or []),
+        "baselineSegmentCount": len(summary.get("segments") or []),
         "manualCount": len(summary.get("matches") or []),
-        "severeOutliers": severe_outliers,
+        "severeOutliers": active_summary.get("severeOutliers") if segment_filter_runtime is not None else baseline_severe_outliers,
+        "baselineSevereOutliers": baseline_severe_outliers,
+        "segmentFilterSevereOutliers": segment_filter_outliers,
     }
 
 
@@ -321,6 +488,11 @@ def main() -> None:
     args = parse_args()
     repo_root = Path.cwd()
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    segment_filter_runtime = SegmentFilterRuntime(
+        args.segment_filter_model_dir,
+        keep_threshold=args.segment_filter_threshold,
+        trim_threshold=args.segment_filter_trim_threshold,
+    ) if args.segment_filter else None
 
     samples = build_samples(args)
     skipped = [
@@ -343,7 +515,7 @@ def main() -> None:
     for index, sample in enumerate(runnable, 1):
         print(f"[batch] {index}/{len(runnable)} {sample.video_key} songs={sample.song_count}")
         try:
-            result = evaluate_sample(args, sample, repo_root)
+            result = evaluate_sample(args, sample, repo_root, segment_filter_runtime)
             evaluated.append(result)
             metrics = result["metrics"]
             print(
@@ -361,10 +533,13 @@ def main() -> None:
 
     payload = {
         "outDir": str(args.out_dir),
+        "segmentFilterEnabled": bool(segment_filter_runtime),
         "evaluatedCount": len(evaluated),
         "skippedCount": len(skipped),
         "failureCount": len(failures),
         "aggregateMetrics": aggregate_metrics(evaluated),
+        "baselineAggregateMetrics": aggregate_metrics([{**item, "metrics": item.get("baselineMetrics") or {}} for item in evaluated]) if segment_filter_runtime else None,
+        "segmentFilterAggregateMetrics": aggregate_metrics([{**item, "metrics": item.get("segmentFilterMetrics") or {}} for item in evaluated]) if segment_filter_runtime else None,
         "videos": evaluated,
         "skipped": skipped,
         "failures": failures,
