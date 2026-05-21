@@ -138,6 +138,9 @@ const summary = {
   fallbackSegments: smoothing.fallbackSegments,
   selectedModelFallbackSegments: smoothing.selectedModelFallbackSegments || [],
   droppedTrackerSegments: smoothing.droppedTrackerSegments || [],
+  excludedMusicOnlySpans: smoothing.excludedMusicOnlySpans || [],
+  droppedMusicOnlySegments: smoothing.droppedMusicOnlySegments || [],
+  spectralEdgeRefinements: smoothing.spectralEdgeRefinements || [],
   boundarySplit,
   matches: segmentMatches(finalSegments, manual),
 };

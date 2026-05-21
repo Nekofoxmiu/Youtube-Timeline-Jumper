@@ -107,6 +107,12 @@ function normalizeLiveAnalysisCacheFrame(currentTimeSec, analysis) {
     musicRatio: roundNumber(Number(analysis.musicRatio) || 0, 4),
     audioRms: roundNumber(Number(analysis.audioRms) || 0, 6),
     audioPeak: roundNumber(Number(analysis.audioPeak) || 0, 6),
+    spectralCentroid: roundNumber(Number(analysis.spectralCentroid) || 0, 4),
+    spectralFlatness: roundNumber(Number(analysis.spectralFlatness) || 0, 4),
+    spectralFlux: roundNumber(Number(analysis.spectralFlux) || 0, 4),
+    lowEnergyRatio: roundNumber(Number(analysis.lowEnergyRatio) || 0, 4),
+    midEnergyRatio: roundNumber(Number(analysis.midEnergyRatio) || 0, 4),
+    highEnergyRatio: roundNumber(Number(analysis.highEnergyRatio) || 0, 4),
     analyzedAudioSec: roundNumber(Number(analysis.analyzedAudioSec) || 0, 3),
     detectorVersion: analysis.detectorVersion || null,
   };

@@ -13,6 +13,8 @@ import json
 import re
 import shutil
 import subprocess
+import sys
+import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +50,7 @@ class Segment:
 class AnnotationGroup:
     song_segments: Tuple[Segment, ...]
     non_song_segments: Tuple[Segment, ...]
+    ignore_segments: Tuple[Segment, ...]
 
 
 @dataclass(frozen=True)
@@ -57,6 +60,7 @@ class AudioRecord:
     duration_sec: float
     song_segments: Tuple[Segment, ...]
     non_song_segments: Tuple[Segment, ...]
+    ignore_segments: Tuple[Segment, ...]
 
 
 class TemporalHead(nn.Module):
@@ -130,6 +134,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--onnx-chunk-frames", type=int, default=30000)
     parser.add_argument("--rebuild-cache", action="store_true")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument(
+        "--cache-workers",
+        type=int,
+        default=1,
+        help="Parallel workers for FireRed AED stats cache generation. Use 2-4 for long audio if memory allows.",
+    )
+    parser.add_argument(
+        "--ort-intra-op-threads",
+        type=int,
+        default=0,
+        help="ONNX Runtime intra-op threads per AED session. 0 keeps ORT default; use 1 with multiple cache workers.",
+    )
+    parser.add_argument(
+        "--auto-ignore-unlabeled-songlike-sec",
+        type=float,
+        default=0.0,
+        help="If >0, current deployed song head predictions longer than this and outside manual songs are ignored.",
+    )
+    parser.add_argument(
+        "--cache-record-logical-path",
+        default="",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--trace-chunks",
+        action="store_true",
+        help="Print per-chunk decode/feature/ONNX/cache progress for debugging slow cache generation.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Parse annotations and resolve audio files without training.")
     return parser.parse_args()
 
@@ -143,6 +175,17 @@ def require_tool(name: str) -> str:
     if not resolved:
         raise FileNotFoundError(f"Required tool not found on PATH: {name}")
     return resolved
+
+
+def create_aed_session(model_dir: Path, intra_op_threads: int = 0) -> ort.InferenceSession:
+    session_options = ort.SessionOptions()
+    if int(intra_op_threads or 0) > 0:
+        session_options.intra_op_num_threads = int(intra_op_threads)
+    return ort.InferenceSession(
+        str(model_dir / "model.onnx"),
+        sess_options=session_options,
+        providers=["CPUExecutionProvider"],
+    )
 
 
 def probe_wav_duration(path: Path) -> float | None:
@@ -192,6 +235,7 @@ def normalize_label(raw: object) -> str:
 def load_annotation_csv(path: Path) -> Dict[str, AnnotationGroup]:
     song_rows: Dict[str, List[Segment]] = {}
     non_song_rows: Dict[str, List[Segment]] = {}
+    ignore_rows: Dict[str, List[Segment]] = {}
     with path.open("r", newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
         required = {"audio_path", "start_sec", "end_sec"}
@@ -204,20 +248,22 @@ def load_annotation_csv(path: Path) -> Dict[str, AnnotationGroup]:
             if not logical_path:
                 continue
             label = normalize_label(row.get("label", "song"))
-            if label == "ignore":
-                continue
             start = max(0.0, float(row["start_sec"]))
             end = max(0.0, float(row["end_sec"]))
             if end <= start:
                 continue
-            target = song_rows if label == "song" else non_song_rows
+            if label == "ignore":
+                target = ignore_rows
+            else:
+                target = song_rows if label == "song" else non_song_rows
             target.setdefault(logical_path, []).append(Segment(start, end))
 
-    keys = sorted(set(song_rows) | set(non_song_rows))
+    keys = sorted(set(song_rows) | set(non_song_rows) | set(ignore_rows))
     return {
         key: AnnotationGroup(
             song_segments=tuple(sorted(song_rows.get(key, []), key=lambda segment: segment.start)),
             non_song_segments=tuple(sorted(non_song_rows.get(key, []), key=lambda segment: segment.start)),
+            ignore_segments=tuple(sorted(ignore_rows.get(key, []), key=lambda segment: segment.start)),
         )
         for key in keys
     }
@@ -243,7 +289,7 @@ def resolve_audio_records(
     records: List[AudioRecord] = []
 
     for logical_path, group in annotations.items():
-        all_segments = [*group.song_segments, *group.non_song_segments]
+        all_segments = [*group.song_segments, *group.non_song_segments, *group.ignore_segments]
         if not all_segments:
             continue
         max_end = max(segment.end for segment in all_segments)
@@ -282,10 +328,48 @@ def resolve_audio_records(
                 duration_sec=duration_cache[selected],
                 song_segments=group.song_segments,
                 non_song_segments=group.non_song_segments,
+                ignore_segments=group.ignore_segments,
             )
         )
 
     return records
+
+
+def resolve_single_cache_record(
+    annotations: Dict[str, AnnotationGroup],
+    annotations_path: Path,
+    audio_dir: Path,
+    logical_path: str,
+    ffprobe: str,
+) -> AudioRecord:
+    if logical_path not in annotations:
+        raise KeyError(f"Cache worker target is not present in annotations: {logical_path}")
+
+    group = annotations[logical_path]
+    all_segments = [*group.song_segments, *group.non_song_segments, *group.ignore_segments]
+    max_end = max((segment.end for segment in all_segments), default=0.0)
+    expected_paths = [
+        (annotations_path.parent / logical_path).resolve(),
+        (audio_dir / Path(logical_path).name).resolve(),
+    ]
+    for expected in expected_paths:
+        if expected.exists():
+            duration = probe_duration(expected, ffprobe)
+            if duration + 0.25 < max_end:
+                raise ValueError(
+                    f"{expected} is shorter than annotations for {logical_path}: "
+                    f"duration={duration:.3f}s max_end={max_end:.3f}s"
+                )
+            return AudioRecord(
+                logical_path=logical_path,
+                audio_path=expected,
+                duration_sec=duration,
+                song_segments=group.song_segments,
+                non_song_segments=group.non_song_segments,
+                ignore_segments=group.ignore_segments,
+            )
+
+    raise FileNotFoundError(f"No audio file found for cache worker target: {logical_path}")
 
 
 def iter_ffmpeg_pcm16(path: Path, ffmpeg: str, chunk_sec: float) -> Iterable[np.ndarray]:
@@ -295,6 +379,7 @@ def iter_ffmpeg_pcm16(path: Path, ffmpeg: str, chunk_sec: float) -> Iterable[np.
         [
             ffmpeg,
             "-nostdin",
+            "-nostats",
             "-hide_banner",
             "-loglevel",
             "error",
@@ -311,10 +396,9 @@ def iter_ffmpeg_pcm16(path: Path, ffmpeg: str, chunk_sec: float) -> Iterable[np.
             "-",
         ],
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
     )
     assert proc.stdout is not None
-    assert proc.stderr is not None
 
     try:
         while True:
@@ -326,10 +410,10 @@ def iter_ffmpeg_pcm16(path: Path, ffmpeg: str, chunk_sec: float) -> Iterable[np.
             if raw:
                 yield np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
 
-        stderr = proc.stderr.read().decode("utf-8", errors="replace").strip()
         return_code = proc.wait()
         if return_code:
-            raise RuntimeError(f"ffmpeg failed for {path} with code {return_code}: {stderr}")
+            raise RuntimeError(f"ffmpeg failed for {path} with code {return_code}.")
+        print(f"[infer] ffmpeg stream finished for {path.name}", flush=True)
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -347,6 +431,104 @@ def run_onnx_session(
         chunk = features[start:start + chunk_frames][None, :, :].astype(np.float32, copy=False)
         chunks.append(session.run([output_name], {input_name: chunk})[0][0])
     return np.concatenate(chunks, axis=0).astype(np.float32)
+
+
+def run_current_temporal_head_for_ignore(
+    model_dir: Path,
+    stats: Dict[str, np.ndarray],
+    batch_size: int = 4096,
+) -> Tuple[np.ndarray, float] | None:
+    meta_path = model_dir / "firered_song_head.meta.json"
+    model_path = model_dir / "firered_song_head.onnx"
+    if not meta_path.exists() or not model_path.exists():
+        return None
+
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    features, _ = build_temporal_features(stats)
+    input_dim = int(meta.get("inputDim") or features.shape[1])
+    if input_dim != features.shape[1]:
+        return None
+
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    input_name = str(meta.get("inputName") or session.get_inputs()[0].name)
+    output_name = str(meta.get("outputName") or session.get_outputs()[0].name)
+    chunks = []
+    for start in range(0, len(features), batch_size):
+        batch = features[start:start + batch_size].astype(np.float32, copy=False)
+        output = session.run([output_name], {input_name: batch})[0]
+        chunks.append(np.asarray(output, dtype=np.float32).reshape(-1))
+    probabilities = np.concatenate(chunks, axis=0).astype(np.float32) if chunks else np.zeros(0, dtype=np.float32)
+    threshold = float(meta.get("threshold", 0.75))
+    return probabilities, threshold
+
+
+def overlap_seconds(left: Segment, right: Segment) -> float:
+    return max(0.0, min(left.end, right.end) - max(left.start, right.start))
+
+
+def has_meaningful_song_overlap(candidate: Segment, song_segments: Sequence[Segment]) -> bool:
+    duration = max(1.0, candidate.end - candidate.start)
+    overlap = sum(overlap_seconds(candidate, song) for song in song_segments)
+    return overlap >= 8.0 or overlap / duration >= 0.15
+
+
+def find_unlabeled_songlike_ignore_segments(
+    stats: Dict[str, np.ndarray],
+    record: AudioRecord,
+    model_dir: Path,
+    min_duration_sec: float,
+) -> Tuple[Segment, ...]:
+    min_duration_sec = max(0.0, float(min_duration_sec))
+    if min_duration_sec <= 0:
+        return tuple()
+
+    current = run_current_temporal_head_for_ignore(model_dir, stats)
+    if current is None:
+        return tuple()
+    probabilities, threshold = current
+    times = np.asarray(stats["time"], dtype=np.float32)
+    count = min(len(times), len(probabilities))
+    if count == 0:
+        return tuple()
+
+    runs: List[Segment] = []
+    active_start: float | None = None
+    last_positive: float | None = None
+    gap_sec = 0.0
+    max_gap_sec = 4.0
+    hop = HOP_SEC
+
+    for index in range(count):
+        time = float(times[index])
+        is_positive = float(probabilities[index]) >= threshold
+        if is_positive:
+            if active_start is None:
+                active_start = time
+            last_positive = time + hop
+            gap_sec = 0.0
+            continue
+
+        if active_start is None:
+            continue
+        gap_sec += hop
+        if gap_sec > max_gap_sec:
+            end = max(active_start, float(last_positive or time))
+            runs.append(Segment(active_start, end))
+            active_start = None
+            last_positive = None
+            gap_sec = 0.0
+
+    if active_start is not None:
+        runs.append(Segment(active_start, max(active_start, float(last_positive or times[count - 1]))))
+
+    ignore_segments = []
+    for run in runs:
+        if run.end - run.start < min_duration_sec:
+            continue
+        if has_meaningful_song_overlap(run, record.song_segments):
+            continue
+        ignore_segments.append(run)
+    return tuple(ignore_segments)
 
 
 def waveform_to_features_vectorized(wav: np.ndarray, means: np.ndarray, inv_std: np.ndarray) -> np.ndarray:
@@ -380,21 +562,49 @@ def infer_probabilities_for_audio(
     output_name: str,
     chunk_sec: float,
     onnx_chunk_frames: int,
+    trace_chunks: bool = False,
 ) -> np.ndarray:
     means, inv_std = cmvn
     pending = np.zeros(0, dtype=np.float32)
     prob_chunks: List[np.ndarray] = []
     processed_samples = 0
     next_progress_sec = 0.0
+    chunk_index = 0
 
     for chunk in iter_ffmpeg_pcm16(record.audio_path, ffmpeg, chunk_sec):
+        chunk_index += 1
         processed_samples += len(chunk)
         wav = np.concatenate([pending, chunk]) if pending.size else chunk
         frame_count = (len(wav) - FRAME_LENGTH) // FRAME_SHIFT + 1
+        if trace_chunks:
+            print(
+                f"[trace] {record.audio_path.name} chunk={chunk_index} "
+                f"read_samples={len(chunk)} pending_samples={len(pending)} "
+                f"processed_sec={processed_samples / SAMPLE_RATE:.1f} frames={max(0, frame_count)}",
+                flush=True,
+            )
         if frame_count > 0:
             usable_samples = (frame_count - 1) * FRAME_SHIFT + FRAME_LENGTH
+            if trace_chunks:
+                print(
+                    f"[trace] {record.audio_path.name} chunk={chunk_index} feature-start "
+                    f"usable_samples={usable_samples}",
+                    flush=True,
+                )
             features = waveform_to_features_vectorized(wav[:usable_samples], means, inv_std)
+            if trace_chunks:
+                print(
+                    f"[trace] {record.audio_path.name} chunk={chunk_index} onnx-start "
+                    f"features={features.shape[0]}x{features.shape[1]}",
+                    flush=True,
+                )
             probs = run_onnx_session(session, input_name, output_name, features, onnx_chunk_frames)
+            if trace_chunks:
+                print(
+                    f"[trace] {record.audio_path.name} chunk={chunk_index} onnx-done "
+                    f"probs={probs.shape[0]}x{probs.shape[1]}",
+                    flush=True,
+                )
             prob_chunks.append(probs)
             pending = wav[frame_count * FRAME_SHIFT:].copy()
         else:
@@ -406,7 +616,11 @@ def infer_probabilities_for_audio(
             next_progress_sec = current_sec + max(60.0, chunk_sec)
 
     if prob_chunks:
-        return np.concatenate(prob_chunks, axis=0).astype(np.float32)
+        total_frames = sum(len(chunk) for chunk in prob_chunks)
+        print(f"[infer] concat-start {record.audio_path.name} chunks={len(prob_chunks)} frames={total_frames}", flush=True)
+        result = np.concatenate(prob_chunks, axis=0).astype(np.float32)
+        print(f"[infer] concat-done {record.audio_path.name} shape={result.shape[0]}x{result.shape[1]}", flush=True)
+        return result
     return np.zeros((0, 3), dtype=np.float32)
 
 
@@ -447,14 +661,216 @@ def build_or_load_stats(
         output_name,
         args.chunk_sec,
         args.onnx_chunk_frames,
+        bool(getattr(args, "trace_chunks", False)),
     )
     if probs.size == 0:
         raise RuntimeError(f"No FireRed probabilities generated for {record.audio_path}")
 
+    print(f"[cache] stats-start {record.logical_path}", flush=True)
     stats = build_half_second_stats(probs)
+    print(f"[cache] save-start {cache_path}", flush=True)
     np.savez_compressed(cache_path, **stats)
-    print(f"[cache] saved {cache_path} windows={len(stats['time'])}")
+    print(f"[cache] saved {cache_path} windows={len(stats['time'])}", flush=True)
     return stats
+
+
+def build_or_load_stats_parallel_worker(payload: Tuple[AudioRecord, Dict[str, object]]) -> Tuple[str, Dict[str, np.ndarray]]:
+    record, config = payload
+    out_dir = Path(str(config["out_dir"]))
+    model_dir = Path(str(config["model_dir"]))
+    ffmpeg = str(config["ffmpeg"])
+    rebuild_cache = bool(config["rebuild_cache"])
+    chunk_sec = float(config["chunk_sec"])
+    onnx_chunk_frames = int(config["onnx_chunk_frames"])
+    ort_intra_op_threads = int(config.get("ort_intra_op_threads") or 0)
+
+    cache_dir = out_dir / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = stats_cache_path(cache_dir, record)
+    if cache_path.exists() and not rebuild_cache:
+        print(f"[cache] loaded {cache_path}")
+        return record.logical_path, load_cached_stats(cache_path)
+
+    cmvn = load_cmvn(model_dir / "cmvn.json")
+    session = create_aed_session(model_dir, ort_intra_op_threads)
+    input_name = session.get_inputs()[0].name
+    output_name = session.get_outputs()[0].name
+    worker_args = argparse.Namespace(
+        out_dir=out_dir,
+        rebuild_cache=rebuild_cache,
+        chunk_sec=chunk_sec,
+        onnx_chunk_frames=onnx_chunk_frames,
+        trace_chunks=bool(config.get("trace_chunks")),
+    )
+    stats = build_or_load_stats(record, worker_args, ffmpeg, cmvn, session, input_name, output_name)
+    return record.logical_path, stats
+
+
+def text_tail(path: Path, max_chars: int = 4000) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return ""
+    return text[-max_chars:]
+
+
+def cache_worker_command(record: AudioRecord, args: argparse.Namespace) -> List[str]:
+    command = [
+        sys.executable,
+        "-u",
+        str(Path(__file__).resolve()),
+        "--annotations",
+        str(args.annotations),
+        "--audio-dir",
+        str(args.audio_dir),
+        "--model-dir",
+        str(args.model_dir),
+        "--out-dir",
+        str(args.out_dir),
+        "--chunk-sec",
+        str(args.chunk_sec),
+        "--onnx-chunk-frames",
+        str(args.onnx_chunk_frames),
+        "--ort-intra-op-threads",
+        str(args.ort_intra_op_threads or 0),
+        "--cache-record-logical-path",
+        record.logical_path,
+    ]
+    if args.rebuild_cache:
+        command.append("--rebuild-cache")
+    if args.trace_chunks:
+        command.append("--trace-chunks")
+    return command
+
+
+def build_all_stats_with_subprocesses(
+    records: Sequence[AudioRecord],
+    args: argparse.Namespace,
+    worker_count: int,
+) -> Dict[str, Dict[str, np.ndarray]]:
+    cache_dir = args.out_dir / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = args.out_dir / "cache_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    stats_by_logical: Dict[str, Dict[str, np.ndarray]] = {}
+    pending: List[AudioRecord] = []
+    for record in records:
+        cache_path = stats_cache_path(cache_dir, record)
+        if cache_path.exists() and not args.rebuild_cache:
+            stats_by_logical[record.logical_path] = load_cached_stats(cache_path)
+        else:
+            pending.append(record)
+
+    print(
+        f"[parallel-cache] workers={worker_count} pending={len(pending)} "
+        f"cached={len(stats_by_logical)} ort_intra_op_threads={args.ort_intra_op_threads or 'default'}"
+    )
+    if not pending:
+        return stats_by_logical
+
+    active: List[Dict[str, object]] = []
+    failures: List[str] = []
+    next_index = 0
+    repo_dir = Path.cwd()
+
+    while next_index < len(pending) or active:
+        while next_index < len(pending) and len(active) < worker_count:
+            record = pending[next_index]
+            next_index += 1
+            log_name = safe_cache_name(record.logical_path)
+            stdout_path = log_dir / f"{log_name}.stdout.log"
+            stderr_path = log_dir / f"{log_name}.stderr.log"
+            stdout_handle = stdout_path.open("w", encoding="utf-8", errors="replace")
+            stderr_handle = stderr_path.open("w", encoding="utf-8", errors="replace")
+            process = subprocess.Popen(
+                cache_worker_command(record, args),
+                cwd=repo_dir,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+                text=True,
+            )
+            active.append(
+                {
+                    "process": process,
+                    "record": record,
+                    "stdout_path": stdout_path,
+                    "stderr_path": stderr_path,
+                    "stdout_handle": stdout_handle,
+                    "stderr_handle": stderr_handle,
+                }
+            )
+            print(f"[parallel-cache] started {record.logical_path} pid={process.pid}")
+
+        time.sleep(1.0)
+        still_active: List[Dict[str, object]] = []
+        for item in active:
+            process = item["process"]
+            if not isinstance(process, subprocess.Popen):
+                continue
+            code = process.poll()
+            if code is None:
+                still_active.append(item)
+                continue
+
+            stdout_handle = item["stdout_handle"]
+            stderr_handle = item["stderr_handle"]
+            if hasattr(stdout_handle, "close"):
+                stdout_handle.close()
+            if hasattr(stderr_handle, "close"):
+                stderr_handle.close()
+
+            record = item["record"]
+            if not isinstance(record, AudioRecord):
+                continue
+            stdout_path = item["stdout_path"]
+            stderr_path = item["stderr_path"]
+            cache_path = stats_cache_path(cache_dir, record)
+            if code != 0 or not cache_path.exists():
+                detail = (
+                    f"{record.logical_path} failed exit={code} cache_exists={cache_path.exists()}\n"
+                    f"stdout tail:\n{text_tail(stdout_path if isinstance(stdout_path, Path) else Path(str(stdout_path)))}\n"
+                    f"stderr tail:\n{text_tail(stderr_path if isinstance(stderr_path, Path) else Path(str(stderr_path)))}"
+                )
+                failures.append(detail)
+                print(f"[parallel-cache] failed {record.logical_path} exit={code}")
+                continue
+
+            stats = load_cached_stats(cache_path)
+            stats_by_logical[record.logical_path] = stats
+            print(f"[parallel-cache] done {record.logical_path} windows={len(stats.get('time', []))}")
+
+        active = still_active
+
+    if failures:
+        raise RuntimeError("One or more cache workers failed:\n\n" + "\n\n".join(failures))
+
+    missing = [record.logical_path for record in records if record.logical_path not in stats_by_logical]
+    if missing:
+        raise RuntimeError(f"Cache generation finished but records are missing: {', '.join(missing)}")
+
+    return stats_by_logical
+
+
+def build_all_stats(
+    records: Sequence[AudioRecord],
+    args: argparse.Namespace,
+    ffmpeg: str,
+    cmvn: Tuple[np.ndarray, np.ndarray] | None,
+    session: ort.InferenceSession | None,
+    input_name: str | None,
+    output_name: str | None,
+) -> Dict[str, Dict[str, np.ndarray]]:
+    worker_count = max(1, int(args.cache_workers or 1))
+    if worker_count <= 1:
+        if cmvn is None or session is None or input_name is None or output_name is None:
+            raise RuntimeError("Sequential cache generation requires an initialized AED session.")
+        return {
+            record.logical_path: build_or_load_stats(record, args, ffmpeg, cmvn, session, input_name, output_name)
+            for record in records
+        }
+
+    return build_all_stats_with_subprocesses(records, args, worker_count)
 
 
 def labels_for_record(times: np.ndarray, record: AudioRecord) -> np.ndarray:
@@ -474,6 +890,9 @@ def labels_for_record(times: np.ndarray, record: AudioRecord) -> np.ndarray:
         raise ValueError(
             f"{record.logical_path} has {conflicts} half-second windows labeled as both song and non-song."
         )
+
+    for segment in record.ignore_segments:
+        labels[(times >= segment.start) & (times < segment.end)] = -1
 
     return labels
 
@@ -772,6 +1191,7 @@ def train_head(
         "labelPolicy": {
             "positive": "label=song means the full song segment, including intro, interlude, instrumental, and tail.",
             "negative": "label=non-song and unannotated windows are treated as non-song.",
+            "ignore": "label=ignore windows are removed from both training and validation.",
             "target": "song-segment classification, not vocal-only/singing-only classification.",
         },
         "notes": "Labeled CSV training. The target is full song segments, not only frames where FireRed AED emits singing.",
@@ -802,6 +1222,23 @@ def main() -> None:
     ffmpeg = require_tool("ffmpeg")
     ffprobe = require_tool("ffprobe")
     annotations = load_annotation_csv(args.annotations)
+
+    if args.cache_record_logical_path:
+        record = resolve_single_cache_record(
+            annotations,
+            args.annotations,
+            args.audio_dir,
+            args.cache_record_logical_path,
+            ffprobe,
+        )
+        print(f"[cache-worker] target={record.logical_path} audio={record.audio_path}")
+        cmvn = load_cmvn(args.model_dir / "cmvn.json")
+        session = create_aed_session(args.model_dir, args.ort_intra_op_threads)
+        input_name = session.get_inputs()[0].name
+        output_name = session.get_outputs()[0].name
+        build_or_load_stats(record, args, ffmpeg, cmvn, session, input_name, output_name)
+        return
+
     records = resolve_audio_records(annotations, args.annotations, args.audio_dir, ffprobe)
 
     print(f"[annotations] logical_files={len(records)}")
@@ -811,17 +1248,24 @@ def main() -> None:
         print(
             f"  {record.logical_path} -> {record.audio_path.name} "
             f"duration={record.duration_sec:.1f}s song_sec={positive_sec:.1f} "
-            f"explicit_non_song_sec={explicit_negative_sec:.1f}"
+            f"explicit_non_song_sec={explicit_negative_sec:.1f} "
+            f"ignore_sec={sum(segment.end - segment.start for segment in record.ignore_segments):.1f}"
         )
 
     if args.dry_run:
         print("[dry-run] annotation parsing and audio resolution completed; training skipped.")
         return
 
-    cmvn = load_cmvn(args.model_dir / "cmvn.json")
-    session = ort.InferenceSession(str(args.model_dir / "model.onnx"), providers=["CPUExecutionProvider"])
-    input_name = session.get_inputs()[0].name
-    output_name = session.get_outputs()[0].name
+    worker_count = max(1, int(args.cache_workers or 1))
+    cmvn = None
+    session = None
+    input_name = None
+    output_name = None
+    if worker_count <= 1:
+        cmvn = load_cmvn(args.model_dir / "cmvn.json")
+        session = create_aed_session(args.model_dir, args.ort_intra_op_threads)
+        input_name = session.get_inputs()[0].name
+        output_name = session.get_outputs()[0].name
 
     feature_parts = []
     label_parts = []
@@ -829,14 +1273,36 @@ def main() -> None:
     time_parts = []
     record_summaries = []
 
+    stats_by_logical = build_all_stats(records, args, ffmpeg, cmvn, session, input_name, output_name)
+
     for record in records:
-        stats = build_or_load_stats(record, args, ffmpeg, cmvn, session, input_name, output_name)
-        labels = labels_for_record(stats["time"], record)
+        stats = stats_by_logical[record.logical_path]
+        auto_ignore_segments = find_unlabeled_songlike_ignore_segments(
+            stats,
+            record,
+            args.model_dir,
+            args.auto_ignore_unlabeled_songlike_sec,
+        )
+        effective_record = AudioRecord(
+            logical_path=record.logical_path,
+            audio_path=record.audio_path,
+            duration_sec=record.duration_sec,
+            song_segments=record.song_segments,
+            non_song_segments=record.non_song_segments,
+            ignore_segments=tuple([*record.ignore_segments, *auto_ignore_segments]),
+        )
+        if auto_ignore_segments:
+            print(
+                f"[ignore] {record.logical_path} generated={len(auto_ignore_segments)} "
+                f"sec={sum(segment.end - segment.start for segment in auto_ignore_segments):.1f}"
+            )
+        labels = labels_for_record(stats["time"], effective_record)
         features, feature_names = build_temporal_features(stats)
-        feature_parts.append(features)
-        label_parts.append(labels)
-        group_parts.append(np.full(len(labels), record.logical_path, dtype=object))
-        time_parts.append(np.asarray(stats["time"], dtype=np.float32))
+        valid_mask = labels >= 0
+        feature_parts.append(features[valid_mask])
+        label_parts.append(labels[valid_mask])
+        group_parts.append(np.full(int(valid_mask.sum()), record.logical_path, dtype=object))
+        time_parts.append(np.asarray(stats["time"], dtype=np.float32)[valid_mask])
         record_summaries.append(
             {
                 "logicalPath": record.logical_path,
@@ -844,10 +1310,21 @@ def main() -> None:
                 "durationSec": record.duration_sec,
                 "songSegments": len(record.song_segments),
                 "explicitNonSongSegments": len(record.non_song_segments),
+                "ignoreSegments": len(record.ignore_segments),
+                "autoIgnoreSegments": len(auto_ignore_segments),
                 "songSegmentSec": sum(segment.end - segment.start for segment in record.song_segments),
                 "explicitNonSongSec": sum(segment.end - segment.start for segment in record.non_song_segments),
-                "positiveWindows": int(labels.sum()),
+                "ignoreSec": sum(segment.end - segment.start for segment in record.ignore_segments),
+                "autoIgnoreSec": sum(segment.end - segment.start for segment in auto_ignore_segments),
+                "autoIgnoreSpans": [
+                    {"startSec": segment.start, "endSec": segment.end}
+                    for segment in auto_ignore_segments
+                ],
+                "ignoredWindows": int((labels < 0).sum()),
+                "positiveWindows": int(labels[valid_mask].sum()),
+                "negativeWindows": int((labels[valid_mask] == 0).sum()),
                 "totalWindows": int(len(labels)),
+                "trainingWindows": int(valid_mask.sum()),
             }
         )
 
@@ -874,9 +1351,13 @@ def main() -> None:
         "split": args.split,
         "valWindowSec": args.val_window_sec,
         "valGuardSec": args.val_guard_sec,
+        "autoIgnoreUnlabeledSonglikeSec": args.auto_ignore_unlabeled_songlike_sec,
+        "cacheWorkers": worker_count,
+        "ortIntraOpThreads": args.ort_intra_op_threads,
         "labelPolicy": {
             "positive": "label=song marks the complete song segment, including intro, interlude, instrumental, and tail.",
             "negative": "label=non-song and unannotated windows are treated as non-song.",
+            "ignore": "label=ignore windows are removed from both training and validation.",
             "target": "song-segment classification, not vocal-only/singing-only classification.",
         },
         "training": training,

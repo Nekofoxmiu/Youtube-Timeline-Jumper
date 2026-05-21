@@ -43,36 +43,40 @@
     "music_minus_speech_10s",
     "singing_minus_speech_10s"
   ],
-  "threshold": 0.8999999999999999,
+  "threshold": 0.7999999999999999,
   "bestValMetrics": {
-    "precision": 0.9710603397773873,
-    "recall": 0.8034900630150267,
-    "f1": 0.8793633952254641,
-    "f0_5": 0.9321786075806996,
-    "tp": 8288,
-    "fp": 247,
-    "fn": 2027,
-    "tn": 11336
+    "precision": 0.975003135807336,
+    "recall": 0.8740602711559468,
+    "f1": 0.9217763999356253,
+    "f0_5": 0.952991452991453,
+    "tp": 54412,
+    "fp": 1395,
+    "fn": 7840,
+    "tn": 85873
   },
   "hopSec": 0.5,
   "split": "by-audio",
   "valWindowSec": 1800.0,
   "valGuardSec": 60.0,
   "valGroups": [
-    "data/audio/video_002.m4a",
-    "data/audio/video_003.m4a",
+    "data/audio/video_009.m4a",
+    "data/audio/video_014.wav",
     "data/audio/video_015.wav",
-    "data/audio/video_023.m4a",
-    "data/audio/video_025.m4a",
-    "data/audio/video_028.m4a",
-    "data/audio/video_033.m4a",
-    "data/audio/video_038.m4a",
-    "data/audio/video_049.m4a",
-    "data/audio/video_051.m4a"
+    "data/audio/video_032.m4a",
+    "data/audio/video_039.m4a",
+    "data/audio/video_045.m4a",
+    "data/audio/video_051.m4a",
+    "data/audio/video_058.m4a",
+    "data/audio/video_061.m4a",
+    "data/audio/video_062.m4a",
+    "data/audio/video_065.m4a",
+    "data/audio/video_068.m4a",
+    "data/audio/video_069.m4a"
   ],
   "labelPolicy": {
     "positive": "label=song means the full song segment, including intro, interlude, instrumental, and tail.",
     "negative": "label=non-song and unannotated windows are treated as non-song.",
+    "ignore": "label=ignore windows are removed from both training and validation.",
     "target": "song-segment classification, not vocal-only/singing-only classification."
   },
   "notes": "Labeled CSV training. The target is full song segments, not only frames where FireRed AED emits singing."

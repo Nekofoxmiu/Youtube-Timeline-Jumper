@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence
@@ -27,6 +28,10 @@ from train_firered_song_head_from_csv import (
     run_onnx_session,
 )
 from train_firered_temporal_head import build_temporal_features
+
+SPECTRAL_LOW_MAX_HZ = 250.0
+SPECTRAL_MID_MAX_HZ = 4000.0
+FFT_LENGTH = FRAME_LENGTH
 
 
 @dataclass
@@ -128,6 +133,101 @@ def build_energy_stats(audio_path: Path, ffmpeg: str, chunk_sec: float) -> Dict[
     }
 
 
+def summarize_spectrum(samples: np.ndarray, previous: np.ndarray | None) -> Dict[str, object]:
+    if samples.size == 0:
+        return {
+            "spectral_centroid": 0.0,
+            "spectral_flatness": 0.0,
+            "spectral_flux": 0.0,
+            "low_energy_ratio": 0.0,
+            "mid_energy_ratio": 0.0,
+            "high_energy_ratio": 0.0,
+            "normalized": None,
+        }
+
+    frame_count = max(1, min(8, (len(samples) - FFT_LENGTH) // max(1, FFT_LENGTH) + 1))
+    frame_step = 0 if frame_count <= 1 else max(1, (len(samples) - FFT_LENGTH) // (frame_count - 1))
+    window = np.hanning(FFT_LENGTH).astype(np.float32)
+    power = np.zeros((FFT_LENGTH // 2) + 1, dtype=np.float64)
+    for index in range(frame_count):
+        offset = min(max(0, len(samples) - FFT_LENGTH), index * frame_step)
+        frame = np.zeros(FFT_LENGTH, dtype=np.float32)
+        available = min(FFT_LENGTH, len(samples) - offset)
+        if available > 0:
+            frame[:available] = samples[offset:offset + available]
+        frame -= float(frame.mean())
+        spec = np.fft.rfft(frame * window, n=FFT_LENGTH)
+        power += ((spec.real * spec.real) + (spec.imag * spec.imag)) / frame_count
+
+    freqs = np.fft.rfftfreq(FFT_LENGTH, 1.0 / SAMPLE_RATE)
+    usable_power = np.maximum(power[1:], 1e-10)
+    usable_freqs = freqs[1:]
+    total = float(usable_power.sum())
+    normalized = (power / max(1e-10, float(power.sum()))).astype(np.float32)
+    flux = 0.0
+    if previous is not None and len(previous) == len(normalized):
+        flux = float(np.clip(np.maximum(0.0, normalized - previous).sum() * 2.0, 0.0, 1.0))
+
+    low = float(usable_power[usable_freqs < SPECTRAL_LOW_MAX_HZ].sum())
+    mid = float(usable_power[(usable_freqs >= SPECTRAL_LOW_MAX_HZ) & (usable_freqs < SPECTRAL_MID_MAX_HZ)].sum())
+    high = float(usable_power[usable_freqs >= SPECTRAL_MID_MAX_HZ].sum())
+    return {
+        "spectral_centroid": float(np.clip((usable_power * usable_freqs).sum() / max(1e-10, total) / (SAMPLE_RATE / 2), 0, 1)),
+        "spectral_flatness": float(np.clip(np.exp(np.log(usable_power).mean()) / max(1e-10, usable_power.mean()), 0, 1)),
+        "spectral_flux": flux,
+        "low_energy_ratio": float(np.clip(low / max(1e-10, total), 0, 1)),
+        "mid_energy_ratio": float(np.clip(mid / max(1e-10, total), 0, 1)),
+        "high_energy_ratio": float(np.clip(high / max(1e-10, total), 0, 1)),
+        "normalized": normalized,
+    }
+
+
+def append_spectral_windows(state: Dict[str, object], samples: np.ndarray) -> None:
+    pending = state.get("pending")
+    if not isinstance(pending, np.ndarray):
+        pending = np.zeros(0, dtype=np.float32)
+    merged = np.concatenate([pending, samples]) if pending.size else samples
+    window_samples = int(round(SAMPLE_RATE * HOP_SEC))
+    offset = 0
+    while offset + window_samples <= len(merged):
+        chunk = merged[offset:offset + window_samples]
+        summary = summarize_spectrum(chunk, state.get("previous"))
+        state["centroid"].append(float(summary["spectral_centroid"]))
+        state["flatness"].append(float(summary["spectral_flatness"]))
+        state["flux"].append(float(summary["spectral_flux"]))
+        state["low"].append(float(summary["low_energy_ratio"]))
+        state["mid"].append(float(summary["mid_energy_ratio"]))
+        state["high"].append(float(summary["high_energy_ratio"]))
+        state["previous"] = summary["normalized"]
+        offset += window_samples
+    state["pending"] = merged[offset:].copy()
+
+
+def build_spectral_stats(audio_path: Path, ffmpeg: str, chunk_sec: float) -> Dict[str, np.ndarray]:
+    from train_firered_song_head_from_csv import iter_ffmpeg_pcm16
+
+    state: Dict[str, object] = {
+        "pending": np.zeros(0, dtype=np.float32),
+        "previous": None,
+        "centroid": [],
+        "flatness": [],
+        "flux": [],
+        "low": [],
+        "mid": [],
+        "high": [],
+    }
+    for chunk in iter_ffmpeg_pcm16(audio_path, ffmpeg, chunk_sec):
+        append_spectral_windows(state, chunk)
+    return {
+        "spectral_centroid": np.asarray(state["centroid"], dtype=np.float32),
+        "spectral_flatness": np.asarray(state["flatness"], dtype=np.float32),
+        "spectral_flux": np.asarray(state["flux"], dtype=np.float32),
+        "low_energy_ratio": np.asarray(state["low"], dtype=np.float32),
+        "mid_energy_ratio": np.asarray(state["mid"], dtype=np.float32),
+        "high_energy_ratio": np.asarray(state["high"], dtype=np.float32),
+    }
+
+
 def attach_energy(stats: Dict[str, np.ndarray], energy: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
     count = len(stats["time"])
     rms = np.zeros(count, dtype=np.float32)
@@ -138,6 +238,57 @@ def attach_energy(stats: Dict[str, np.ndarray], energy: Dict[str, np.ndarray]) -
         peak[:available] = energy["audio_peak"][:available]
     stats["audio_rms"] = rms
     stats["audio_peak"] = peak
+    return stats
+
+
+def attach_spectral(stats: Dict[str, np.ndarray], spectral: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    count = len(stats["time"])
+    for key in [
+        "spectral_centroid",
+        "spectral_flatness",
+        "spectral_flux",
+        "low_energy_ratio",
+        "mid_energy_ratio",
+        "high_energy_ratio",
+    ]:
+        values = np.zeros(count, dtype=np.float32)
+        source = spectral.get(key, np.zeros(0, dtype=np.float32))
+        available = min(count, len(source))
+        if available:
+            values[:available] = source[:available]
+        stats[key] = values
+    return stats
+
+
+def load_npz_stats(path: Path) -> Dict[str, np.ndarray]:
+    raw = np.load(path)
+    return {key: raw[key] for key in raw.files}
+
+
+def has_stats_keys(stats: Dict[str, np.ndarray], keys: Sequence[str]) -> bool:
+    count = len(stats.get("time", []))
+    return all(key in stats and len(stats[key]) >= count for key in keys)
+
+
+def ensure_diagnostic_stats(
+    stats: Dict[str, np.ndarray],
+    audio_path: Path,
+    ffmpeg: str,
+    chunk_sec: float,
+) -> Dict[str, np.ndarray]:
+    if not has_stats_keys(stats, ["audio_rms", "audio_peak"]):
+        print("[cache] adding energy stats")
+        stats = attach_energy(stats, build_energy_stats(audio_path, ffmpeg, chunk_sec))
+    if not has_stats_keys(stats, [
+        "spectral_centroid",
+        "spectral_flatness",
+        "spectral_flux",
+        "low_energy_ratio",
+        "mid_energy_ratio",
+        "high_energy_ratio",
+    ]):
+        print("[cache] adding spectral stats")
+        stats = attach_spectral(stats, build_spectral_stats(audio_path, ffmpeg, chunk_sec))
     return stats
 
 
@@ -215,6 +366,12 @@ def build_frames(stats: Dict[str, np.ndarray], temporal: Dict[str, object]) -> L
             "musicRatio": float(stats["music_ratio"][index]),
             "audioRms": float(stats["audio_rms"][index]),
             "audioPeak": float(stats["audio_peak"][index]),
+            "spectralCentroid": float(stats.get("spectral_centroid", np.zeros(count))[index]),
+            "spectralFlatness": float(stats.get("spectral_flatness", np.zeros(count))[index]),
+            "spectralFlux": float(stats.get("spectral_flux", np.zeros(count))[index]),
+            "lowEnergyRatio": float(stats.get("low_energy_ratio", np.zeros(count))[index]),
+            "midEnergyRatio": float(stats.get("mid_energy_ratio", np.zeros(count))[index]),
+            "highEnergyRatio": float(stats.get("high_energy_ratio", np.zeros(count))[index]),
             "analyzedAudioSec": round((index + 1) * HOP_SEC, 3),
             "detectorVersion": detector_version,
         })
@@ -279,12 +436,15 @@ def segment_model_summaries(frames: Sequence[Dict[str, object]], segments: Seque
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser()
     parser.add_argument("--audio", type=Path, required=True)
     parser.add_argument("--manual", type=Path, required=True)
     parser.add_argument("--model-dir", type=Path, default=Path("models/fireredvad/aed"))
     parser.add_argument("--out-dir", type=Path, default=Path("tmp_eval/offline_diagnostics"))
     parser.add_argument("--chunk-sec", type=float, default=120.0)
+    parser.add_argument("--stats-cache", type=Path, default=None, help="Reuse AED stats npz, then add energy/spectral diagnostics if missing.")
     parser.add_argument("--rebuild", action="store_true")
     args = parser.parse_args()
 
@@ -302,9 +462,27 @@ def main() -> None:
 
     duration = probe_duration(args.audio, ffprobe)
     if stats_path.exists() and not args.rebuild:
-        raw = np.load(stats_path)
-        stats = {key: raw[key] for key in raw.files}
+        stats = load_npz_stats(stats_path)
         print(f"[cache] loaded {stats_path}")
+        needs_diagnostic_update = not has_stats_keys(stats, ["audio_rms", "audio_peak"]) or not has_stats_keys(stats, [
+            "spectral_centroid",
+            "spectral_flatness",
+            "spectral_flux",
+            "low_energy_ratio",
+            "mid_energy_ratio",
+            "high_energy_ratio",
+        ])
+        updated_stats = ensure_diagnostic_stats(stats, args.audio, ffmpeg, args.chunk_sec)
+        if needs_diagnostic_update:
+            np.savez_compressed(stats_path, **updated_stats)
+            print(f"[cache] updated {stats_path} windows={len(updated_stats['time'])}")
+        stats = updated_stats
+    elif args.stats_cache:
+        stats = load_npz_stats(args.stats_cache)
+        print(f"[cache] loaded AED stats {args.stats_cache}")
+        stats = ensure_diagnostic_stats(stats, args.audio, ffmpeg, args.chunk_sec)
+        np.savez_compressed(stats_path, **stats)
+        print(f"[cache] saved {stats_path} windows={len(stats['time'])}")
     else:
         record = AudioRecord(logical_path=args.audio.name, audio_path=args.audio, duration_sec=duration)
         cmvn = load_cmvn(args.model_dir / "cmvn.json")
@@ -322,7 +500,7 @@ def main() -> None:
             30000,
         )
         stats = build_half_second_stats(probs)
-        stats = attach_energy(stats, build_energy_stats(args.audio, ffmpeg, args.chunk_sec))
+        stats = ensure_diagnostic_stats(stats, args.audio, ffmpeg, args.chunk_sec)
         np.savez_compressed(stats_path, **stats)
         print(f"[cache] saved {stats_path} windows={len(stats['time'])}")
 
