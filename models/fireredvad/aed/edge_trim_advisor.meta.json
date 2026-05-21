@@ -119,37 +119,26 @@
     ],
     "manualPostEndMinDurationSec": 2.0
   },
-  "modelType": "firered-segment-filter",
-  "outputName": "keep_probability",
-  "keepThreshold": 0.75,
+  "modelType": "firered-edge-trim-advisor",
+  "outputName": "edge_trim_delta_sec",
+  "trimConfidenceThreshold": 0.75,
+  "trimClampSec": 60.0,
+  "trimScale": 0.75,
   "minSegmentDurationSec": 90.0,
-  "bestEpoch": 225,
+  "bestEpoch": 25,
   "trainMetrics": {
-    "bestThreshold": 0.5,
-    "metrics": {
-      "precision": 1.0,
-      "recall": 1.0,
-      "f1": 1.0,
-      "tp": 458,
-      "fp": 0,
-      "fn": 0,
-      "tn": 268
+    "deltaMae": {
+      "start": 7.988567616156095,
+      "end": 4.971387404558049
     }
   },
   "validationMetrics": {
-    "bestThreshold": 0.75,
-    "metrics": {
-      "precision": 0.9090909090909091,
-      "recall": 1.0,
-      "f1": 0.9523809523809523,
-      "tp": 40,
-      "fp": 4,
-      "fn": 0,
-      "tn": 31
+    "deltaMae": {
+      "start": 7.521667212992907,
+      "end": 8.152196443267167
     }
   },
   "labelPolicy": {
-    "keep": "Predicted segment overlaps manual song segment enough to preserve and optionally trim.",
-    "drop": "False positive, low overlap, long extra non-song/BGM-only candidate, or manual post-end negative."
+    "trimTargets": "manual_best_start/end minus predicted start/end, clamped to trimClampSec. Trained on keep=1 examples only."
   }
 }

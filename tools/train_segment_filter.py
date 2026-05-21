@@ -24,7 +24,6 @@ from segment_filter_features import (
     DEFAULT_FILTER_POLICY,
     SEGMENT_FILTER_FEATURE_NAMES,
     SEGMENT_FILTER_VERSION,
-    apply_segment_filter_predictions,
     build_segment_filter_feature_vector,
     overlap_seconds,
 )
@@ -34,6 +33,7 @@ from segment_filter_features import (
 class Example:
     video: str
     segment_index: int
+    source: str
     features: List[float]
     keep: float
     start_delta: float
@@ -44,12 +44,11 @@ class Example:
     extra_sec: float
 
 
-class SegmentFilterNet(nn.Module):
-    def __init__(self, input_dim: int, feature_mean: np.ndarray, feature_std: np.ndarray, trim_clamp_sec: float) -> None:
+class NormalizedMlp(nn.Module):
+    def __init__(self, input_dim: int, feature_mean: np.ndarray, feature_std: np.ndarray) -> None:
         super().__init__()
-        self.register_buffer("feature_mean", torch.as_tensor(feature_mean, dtype=torch.float32))
-        self.register_buffer("feature_std", torch.as_tensor(feature_std, dtype=torch.float32))
-        self.trim_clamp_sec = float(trim_clamp_sec)
+        self.register_buffer("feature_mean", torch.tensor(feature_mean.tolist(), dtype=torch.float32))
+        self.register_buffer("feature_std", torch.tensor(feature_std.tolist(), dtype=torch.float32))
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, 48),
             nn.ReLU(),
@@ -57,23 +56,36 @@ class SegmentFilterNet(nn.Module):
             nn.Linear(48, 24),
             nn.ReLU(),
         )
-        self.keep_head = nn.Linear(24, 1)
-        self.delta_head = nn.Linear(24, 2)
 
     def _encoded(self, x: torch.Tensor) -> torch.Tensor:
         z = (x - self.feature_mean) / self.feature_std.clamp_min(1e-6)
         return self.encoder(z)
 
-    def raw_outputs(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+
+class SegmentKeepNet(NormalizedMlp):
+    def __init__(self, input_dim: int, feature_mean: np.ndarray, feature_std: np.ndarray) -> None:
+        super().__init__(input_dim, feature_mean, feature_std)
+        self.keep_head = nn.Linear(24, 1)
+
+    def raw_outputs(self, x: torch.Tensor) -> torch.Tensor:
         h = self._encoded(x)
-        keep_logit = self.keep_head(h).squeeze(-1)
-        deltas = torch.tanh(self.delta_head(h)) * self.trim_clamp_sec
-        return keep_logit, deltas
+        return self.keep_head(h).squeeze(-1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        keep_logit, deltas = self.raw_outputs(x)
-        keep_prob = torch.sigmoid(keep_logit).unsqueeze(-1)
-        return torch.cat([keep_prob, deltas], dim=1)
+        return torch.sigmoid(self.raw_outputs(x)).unsqueeze(-1)
+
+
+class EdgeTrimAdvisorNet(NormalizedMlp):
+    def __init__(self, input_dim: int, feature_mean: np.ndarray, feature_std: np.ndarray, trim_clamp_sec: float) -> None:
+        super().__init__(input_dim, feature_mean, feature_std)
+        self.trim_clamp_sec = float(trim_clamp_sec)
+        self.delta_head = nn.Linear(24, 2)
+
+    def raw_outputs(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(self.delta_head(self._encoded(x))) * self.trim_clamp_sec
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.raw_outputs(x)
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,6 +103,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-precision", type=float, default=0.18)
     parser.add_argument("--max-extra-sec", type=float, default=240.0)
     parser.add_argument("--max-extra-ratio", type=float, default=0.78)
+    parser.add_argument("--post-end-negative-start-sec", type=float, default=0.5)
+    parser.add_argument("--post-end-negative-end-sec", type=float, default=14.0)
+    parser.add_argument("--post-end-negative-min-duration-sec", type=float, default=2.0)
     return parser.parse_args()
 
 
@@ -167,10 +182,34 @@ def collect_examples(args: argparse.Namespace) -> List[Example]:
                 seen.add(key)
                 candidate_segments.append({**segment, "_segmentFilterSource": source})
 
+        def add_manual_post_end_negatives() -> None:
+            ordered_manual = sorted(manual_segments, key=lambda item: float(item.get("startSec", 0.0)))
+            media_end_sec = float(context["endSec"])
+            for manual_index, manual in enumerate(ordered_manual):
+                start = float(manual.get("endSec", 0.0)) + args.post_end_negative_start_sec
+                end = float(manual.get("endSec", 0.0)) + args.post_end_negative_end_sec
+                if manual_index + 1 < len(ordered_manual):
+                    end = min(end, float(ordered_manual[manual_index + 1].get("startSec", end)))
+                end = min(end, media_end_sec)
+                if end - start < args.post_end_negative_min_duration_sec:
+                    continue
+                key = (round(start, 1), round(end, 1))
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidate_segments.append({
+                    "startSec": start,
+                    "endSec": end,
+                    "confidence": 0.0,
+                    "provisional": False,
+                    "_segmentFilterSource": "manual-post-end-negative",
+                })
+
         add_candidates("final", summary.get("segments") or [])
         add_candidates("dropped-tracker", summary.get("droppedTrackerSegments") or [])
         add_candidates("dropped-music-only", summary.get("droppedMusicOnlySegments") or [])
         add_candidates("model-run", summary.get("modelRunSegments") or [])
+        add_manual_post_end_negatives()
 
         for index, segment in enumerate(candidate_segments):
             if not isinstance(segment, dict):
@@ -197,6 +236,7 @@ def collect_examples(args: argparse.Namespace) -> List[Example]:
             examples.append(Example(
                 video=video,
                 segment_index=index,
+                source=str(segment.get("_segmentFilterSource") or "unknown"),
                 features=build_segment_filter_feature_vector(segment, frames, context),
                 keep=keep,
                 start_delta=start_delta,
@@ -241,75 +281,78 @@ def segment_metrics(probs: Sequence[float], labels: Sequence[float], threshold: 
     return {"precision": precision, "recall": recall, "f1": f1, "tp": tp, "fp": fp, "fn": fn, "tn": tn}
 
 
-def evaluate_model(model: SegmentFilterNet, x: torch.Tensor, y_keep: torch.Tensor, y_delta: torch.Tensor, indices: Sequence[int]) -> Dict[str, object]:
+def evaluate_keep_model(model: SegmentKeepNet, x: torch.Tensor, y_keep: torch.Tensor, indices: Sequence[int]) -> Dict[str, object]:
     model.eval()
     with torch.no_grad():
         output = model(x[list(indices)]).detach().cpu().tolist()
     probs = [float(row[0]) for row in output]
-    deltas = [[float(row[1]), float(row[2])] for row in output]
     labels = [float(value) for value in y_keep[list(indices)].detach().cpu().tolist()]
-    targets = [[float(row[0]), float(row[1])] for row in y_delta[list(indices)].detach().cpu().tolist()]
-    best_threshold = 0.35
     best = None
     for threshold in np.linspace(0.2, 0.75, 23):
         metrics = segment_metrics(probs, labels, float(threshold))
         if best is None or metrics["f1"] > best["metrics"]["f1"] or (math.isclose(metrics["f1"], best["metrics"]["f1"]) and metrics["precision"] > best["metrics"]["precision"]):
             best = {"threshold": float(threshold), "metrics": metrics}
-    keep_indexes = [index for index, label in enumerate(labels) if label >= 0.5]
-    if keep_indexes:
-        start_mae = sum(abs(deltas[index][0] - targets[index][0]) for index in keep_indexes) / len(keep_indexes)
-        end_mae = sum(abs(deltas[index][1] - targets[index][1]) for index in keep_indexes) / len(keep_indexes)
-        delta_mae = [start_mae, end_mae]
-    else:
-        delta_mae = [0.0, 0.0]
     assert best is not None
-    return {"bestThreshold": best["threshold"], "metrics": best["metrics"], "deltaMae": {"start": delta_mae[0], "end": delta_mae[1]}}
+    return {"bestThreshold": best["threshold"], "metrics": best["metrics"]}
 
 
-def train_model(args: argparse.Namespace, examples: Sequence[Example]) -> Tuple[SegmentFilterNet, Dict[str, object]]:
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    train_indices, val_indices, val_groups = split_examples(examples, args.val_videos)
+def evaluate_edge_model(model: EdgeTrimAdvisorNet, x: torch.Tensor, y_delta: torch.Tensor, indices: Sequence[int]) -> Dict[str, object]:
+    if not indices:
+        return {"deltaMae": {"start": 0.0, "end": 0.0}}
+    model.eval()
+    with torch.no_grad():
+        deltas = model(x[list(indices)]).detach().cpu().tolist()
+    targets = [[float(row[0]), float(row[1])] for row in y_delta[list(indices)].detach().cpu().tolist()]
+    start_mae = sum(abs(float(deltas[index][0]) - targets[index][0]) for index in range(len(indices))) / len(indices)
+    end_mae = sum(abs(float(deltas[index][1]) - targets[index][1]) for index in range(len(indices))) / len(indices)
+    return {"deltaMae": {"start": start_mae, "end": end_mae}}
+
+
+def prepare_tensors(examples: Sequence[Example], train_indices: Sequence[int]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray, np.ndarray]:
     x_np = np.asarray([example.features for example in examples], dtype=np.float32)
     keep_np = np.asarray([example.keep for example in examples], dtype=np.float32)
     delta_np = np.asarray([[example.start_delta, example.end_delta] for example in examples], dtype=np.float32)
-    feature_mean = x_np[train_indices].mean(axis=0)
-    feature_std = x_np[train_indices].std(axis=0)
+    feature_mean = x_np[list(train_indices)].mean(axis=0)
+    feature_std = x_np[list(train_indices)].std(axis=0)
     feature_std = np.where(feature_std < 1e-6, 1.0, feature_std)
+    return (
+        torch.tensor(x_np.tolist(), dtype=torch.float32),
+        torch.tensor(keep_np.tolist(), dtype=torch.float32),
+        torch.tensor(delta_np.tolist(), dtype=torch.float32),
+        feature_mean,
+        feature_std,
+    )
 
-    x = torch.tensor(x_np.tolist(), dtype=torch.float32)
-    y_keep = torch.tensor(keep_np.tolist(), dtype=torch.float32)
-    y_delta = torch.tensor(delta_np.tolist(), dtype=torch.float32)
+
+def train_keep_model(
+    args: argparse.Namespace,
+    examples: Sequence[Example],
+    x: torch.Tensor,
+    y_keep: torch.Tensor,
+    train_indices: Sequence[int],
+    val_indices: Sequence[int],
+    feature_mean: np.ndarray,
+    feature_std: np.ndarray,
+) -> Tuple[SegmentKeepNet, Dict[str, object]]:
     train_tensor = torch.as_tensor(train_indices, dtype=torch.long)
-    model = SegmentFilterNet(x.shape[1], feature_mean, feature_std, args.trim_clamp_sec)
+    model = SegmentKeepNet(x.shape[1], feature_mean, feature_std)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
-    positive = float(keep_np[train_indices].sum())
-    negative = float(len(train_indices) - positive)
-    pos_weight = torch.tensor([max(1.0, min(8.0, negative / max(1.0, positive)))], dtype=torch.float32)
-    bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    huber = nn.SmoothL1Loss(reduction="none", beta=6.0)
-
+    labels = [examples[index].keep for index in train_indices]
+    positive = float(sum(labels))
+    negative = float(len(labels) - positive)
+    pos_weight = torch.tensor([max(1.0, min(12.0, negative / max(1.0, positive)))], dtype=torch.float32)
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     best_state = None
     best_score = -1.0
     best_epoch = 0
     for epoch in range(1, args.epochs + 1):
         model.train()
         optimizer.zero_grad(set_to_none=True)
-        keep_logit, deltas = model.raw_outputs(x[train_tensor])
-        keep_target = y_keep[train_tensor]
-        delta_target = y_delta[train_tensor]
-        keep_loss = bce(keep_logit, keep_target)
-        keep_mask = keep_target >= 0.5
-        if keep_mask.any():
-            delta_loss = (huber(deltas[keep_mask], delta_target[keep_mask]) / max(1.0, args.trim_clamp_sec)).mean()
-        else:
-            delta_loss = torch.zeros((), dtype=torch.float32)
-        loss = keep_loss + (0.65 * delta_loss)
+        loss = loss_fn(model.raw_outputs(x[train_tensor]), y_keep[train_tensor])
         loss.backward()
         optimizer.step()
-
         if epoch % 25 == 0 or epoch == args.epochs:
-            val = evaluate_model(model, x, y_keep, y_delta, val_indices)
+            val = evaluate_keep_model(model, x, y_keep, val_indices)
             score = float(val["metrics"]["f1"])
             if score > best_score:
                 best_score = score
@@ -317,43 +360,122 @@ def train_model(args: argparse.Namespace, examples: Sequence[Example]) -> Tuple[
                 best_state = {name: tensor.detach().cpu().clone() for name, tensor in model.state_dict().items()}
     if best_state is not None:
         model.load_state_dict(best_state)
+    return model, {
+        "bestEpoch": best_epoch,
+        "trainMetrics": evaluate_keep_model(model, x, y_keep, train_indices),
+        "validationMetrics": evaluate_keep_model(model, x, y_keep, val_indices),
+    }
 
-    train_eval = evaluate_model(model, x, y_keep, y_delta, train_indices)
-    val_eval = evaluate_model(model, x, y_keep, y_delta, val_indices)
-    threshold = float(val_eval["bestThreshold"])
-    metadata = {
-        "modelType": "firered-segment-filter",
+
+def train_edge_model(
+    args: argparse.Namespace,
+    x: torch.Tensor,
+    y_keep: torch.Tensor,
+    y_delta: torch.Tensor,
+    train_indices: Sequence[int],
+    val_indices: Sequence[int],
+    feature_mean: np.ndarray,
+    feature_std: np.ndarray,
+) -> Tuple[EdgeTrimAdvisorNet, Dict[str, object]]:
+    train_keep_indices = [index for index in train_indices if float(y_keep[index]) >= 0.5]
+    val_keep_indices = [index for index in val_indices if float(y_keep[index]) >= 0.5]
+    if not train_keep_indices:
+        raise RuntimeError("No positive segments available for edge trim advisor training.")
+    train_tensor = torch.as_tensor(train_keep_indices, dtype=torch.long)
+    model = EdgeTrimAdvisorNet(x.shape[1], feature_mean, feature_std, args.trim_clamp_sec)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
+    loss_fn = nn.SmoothL1Loss(beta=6.0)
+    best_state = None
+    best_score = float("inf")
+    best_epoch = 0
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        optimizer.zero_grad(set_to_none=True)
+        loss = loss_fn(model.raw_outputs(x[train_tensor]), y_delta[train_tensor])
+        loss.backward()
+        optimizer.step()
+        if epoch % 25 == 0 or epoch == args.epochs:
+            val = evaluate_edge_model(model, x, y_delta, val_keep_indices)
+            score = float(val["deltaMae"]["start"]) + float(val["deltaMae"]["end"])
+            if score < best_score:
+                best_score = score
+                best_epoch = epoch
+                best_state = {name: tensor.detach().cpu().clone() for name, tensor in model.state_dict().items()}
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    return model, {
+        "bestEpoch": best_epoch,
+        "trainMetrics": evaluate_edge_model(model, x, y_delta, train_keep_indices),
+        "validationMetrics": evaluate_edge_model(model, x, y_delta, val_keep_indices),
+    }
+
+
+def train_models(args: argparse.Namespace, examples: Sequence[Example]) -> Tuple[SegmentKeepNet, EdgeTrimAdvisorNet, Dict[str, object], Dict[str, object]]:
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    train_indices, val_indices, val_groups = split_examples(examples, args.val_videos)
+    x, y_keep, y_delta, feature_mean, feature_std = prepare_tensors(examples, train_indices)
+    keep_model, keep_stats = train_keep_model(args, examples, x, y_keep, train_indices, val_indices, feature_mean, feature_std)
+    edge_model, edge_stats = train_edge_model(args, x, y_keep, y_delta, train_indices, val_indices, feature_mean, feature_std)
+    source_counts: Dict[str, Dict[str, int]] = {}
+    for example in examples:
+        entry = source_counts.setdefault(example.source, {"total": 0, "positive": 0, "negative": 0})
+        entry["total"] += 1
+        entry["positive" if example.keep >= 0.5 else "negative"] += 1
+    keep_threshold = float(keep_stats["validationMetrics"]["bestThreshold"])
+    common = {
         "segmentFilterVersion": SEGMENT_FILTER_VERSION,
         "inputName": "segment_features",
-        "outputName": "segment_filter_output",
         "inputDim": len(SEGMENT_FILTER_FEATURE_NAMES),
         "featureNames": SEGMENT_FILTER_FEATURE_NAMES,
-        "keepThreshold": threshold,
-        "trimConfidenceThreshold": max(threshold, DEFAULT_FILTER_POLICY["trim_confidence_threshold"]),
-        "trimClampSec": args.trim_clamp_sec,
-        "minSegmentDurationSec": DEFAULT_FILTER_POLICY["min_segment_duration_sec"],
         "split": "by-video",
         "valGroups": val_groups,
-        "bestEpoch": best_epoch,
         "exampleCount": len(examples),
-        "positiveCount": int(keep_np.sum()),
-        "negativeCount": int(len(keep_np) - keep_np.sum()),
-        "trainMetrics": train_eval,
-        "validationMetrics": val_eval,
-        "labelPolicy": {
-            "keep": "Predicted segment overlaps manual song segment enough to preserve and optionally trim.",
-            "drop": "False positive, low overlap, or long extra non-song/BGM-only candidate.",
-            "trimTargets": "manual_best_start/end minus predicted start/end, clamped to trimClampSec.",
+        "positiveCount": int(sum(example.keep for example in examples)),
+        "negativeCount": int(len(examples) - sum(example.keep for example in examples)),
+        "sourceCounts": source_counts,
+        "negativeMining": {
+            "manualPostEndWindowSec": [args.post_end_negative_start_sec, args.post_end_negative_end_sec],
+            "manualPostEndMinDurationSec": args.post_end_negative_min_duration_sec,
         },
     }
-    return model, metadata
+    keep_metadata = {
+        **common,
+        "modelType": "firered-segment-filter",
+        "outputName": "keep_probability",
+        "keepThreshold": keep_threshold,
+        "minSegmentDurationSec": DEFAULT_FILTER_POLICY["min_segment_duration_sec"],
+        "bestEpoch": keep_stats["bestEpoch"],
+        "trainMetrics": keep_stats["trainMetrics"],
+        "validationMetrics": keep_stats["validationMetrics"],
+        "labelPolicy": {
+            "keep": "Predicted segment overlaps manual song segment enough to preserve and optionally trim.",
+            "drop": "False positive, low overlap, long extra non-song/BGM-only candidate, or manual post-end negative.",
+        },
+    }
+    edge_metadata = {
+        **common,
+        "modelType": "firered-edge-trim-advisor",
+        "outputName": "edge_trim_delta_sec",
+        "trimConfidenceThreshold": max(keep_threshold, DEFAULT_FILTER_POLICY["trim_confidence_threshold"]),
+        "trimClampSec": args.trim_clamp_sec,
+        "trimScale": DEFAULT_FILTER_POLICY["trim_scale"],
+        "minSegmentDurationSec": DEFAULT_FILTER_POLICY["min_segment_duration_sec"],
+        "bestEpoch": edge_stats["bestEpoch"],
+        "trainMetrics": edge_stats["trainMetrics"],
+        "validationMetrics": edge_stats["validationMetrics"],
+        "labelPolicy": {
+            "trimTargets": "manual_best_start/end minus predicted start/end, clamped to trimClampSec. Trained on keep=1 examples only.",
+        },
+    }
+    return keep_model, edge_model, keep_metadata, edge_metadata
 
 
-def export_model(model: SegmentFilterNet, out_dir: Path, metadata: Dict[str, object]) -> None:
+def export_model(model: nn.Module, out_dir: Path, metadata: Dict[str, object], stem: str) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    pt_path = out_dir / "segment_filter.pt"
-    onnx_path = out_dir / "segment_filter.onnx"
-    meta_path = out_dir / "segment_filter.meta.json"
+    pt_path = out_dir / f"{stem}.pt"
+    onnx_path = out_dir / f"{stem}.onnx"
+    meta_path = out_dir / f"{stem}.meta.json"
     torch.save({"state_dict": model.state_dict(), "metadata": metadata}, pt_path)
     dummy = torch.zeros(1, int(metadata["inputDim"]), dtype=torch.float32)
     torch.onnx.export(
@@ -377,7 +499,12 @@ def write_examples(out_dir: Path, examples: Sequence[Example]) -> None:
 
 def install_assets(out_dir: Path, install_dir: Path) -> None:
     install_dir.mkdir(parents=True, exist_ok=True)
-    for name in ["segment_filter.onnx", "segment_filter.meta.json"]:
+    for name in [
+        "segment_filter.onnx",
+        "segment_filter.meta.json",
+        "edge_trim_advisor.onnx",
+        "edge_trim_advisor.meta.json",
+    ]:
         shutil.copy2(out_dir / name, install_dir / name)
 
 
@@ -388,14 +515,18 @@ def main() -> None:
     examples = collect_examples(args)
     if len(examples) < 4:
         raise RuntimeError(f"Not enough segment examples for training: {len(examples)}")
-    model, metadata = train_model(args, examples)
-    export_model(model, args.out_dir, metadata)
+    keep_model, edge_model, keep_metadata, edge_metadata = train_models(args, examples)
+    export_model(keep_model, args.out_dir, keep_metadata, "segment_filter")
+    export_model(edge_model, args.out_dir, edge_metadata, "edge_trim_advisor")
     write_examples(args.out_dir, examples)
     if args.install_dir:
         install_assets(args.out_dir, args.install_dir)
-    print(f"[segment-filter] examples={len(examples)} positives={metadata['positiveCount']} negatives={metadata['negativeCount']}")
-    print(f"[segment-filter] val={json.dumps(metadata['validationMetrics'], ensure_ascii=False)}")
+    print(f"[segment-filter] examples={len(examples)} positives={keep_metadata['positiveCount']} negatives={keep_metadata['negativeCount']}")
+    print(f"[segment-filter] sources={json.dumps(keep_metadata['sourceCounts'], ensure_ascii=False)}")
+    print(f"[segment-filter] keep_val={json.dumps(keep_metadata['validationMetrics'], ensure_ascii=False)}")
+    print(f"[segment-filter] edge_val={json.dumps(edge_metadata['validationMetrics'], ensure_ascii=False)}")
     print(f"[segment-filter] wrote {args.out_dir / 'segment_filter.onnx'}")
+    print(f"[segment-filter] wrote {args.out_dir / 'edge_trim_advisor.onnx'}")
     if args.install_dir:
         print(f"[segment-filter] installed to {args.install_dir}")
 

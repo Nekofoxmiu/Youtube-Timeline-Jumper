@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-SEGMENT_FILTER_VERSION = "segment-filter-v1"
+SEGMENT_FILTER_VERSION = "segment-filter-v2"
 
 SEGMENT_FILTER_FEATURE_NAMES: List[str] = [
     "duration_sec",
@@ -67,6 +67,24 @@ SEGMENT_FILTER_FEATURE_NAMES: List[str] = [
     "frame_count",
     "relative_start",
     "relative_end",
+    "baseline_frame_count",
+    "baseline_temporal_mean",
+    "baseline_temporal_p90",
+    "baseline_singing_mean",
+    "baseline_singing_p90",
+    "baseline_music_mean",
+    "baseline_music_p90",
+    "baseline_speech_mean",
+    "baseline_speech_p90",
+    "baseline_audio_rms_mean",
+    "baseline_audio_rms_p90",
+    "baseline_spectral_flatness_mean",
+    "baseline_spectral_flux_mean",
+    "segment_temporal_vs_baseline",
+    "segment_singing_vs_baseline",
+    "segment_music_vs_baseline",
+    "segment_speech_vs_baseline",
+    "segment_rms_vs_baseline",
 ]
 
 DEFAULT_FEATURE_OPTIONS = {
@@ -77,13 +95,34 @@ DEFAULT_FEATURE_OPTIONS = {
     "speech_reset_threshold": 0.58,
     "speech_reset_singing_ceiling": 0.38,
     "speech_reset_music_ceiling": 0.72,
+    "baseline_min_duration_sec": 600.0,
+    "baseline_short_window_sec": 300.0,
+    "baseline_long_window_sec": 600.0,
+    "baseline_min_frames": 120.0,
 }
 
 DEFAULT_FILTER_POLICY = {
     "keep_threshold": 0.35,
     "trim_confidence_threshold": 0.55,
     "trim_clamp_sec": 60.0,
+    "trim_scale": 0.75,
     "min_segment_duration_sec": 90.0,
+}
+
+DEFAULT_BASELINE_STATS = {
+    "frameCount": 0.0,
+    "temporalMean": 0.5,
+    "temporalP90": 0.5,
+    "singingMean": 0.2,
+    "singingP90": 0.2,
+    "musicMean": 0.5,
+    "musicP90": 0.5,
+    "speechMean": 0.2,
+    "speechP90": 0.2,
+    "audioRmsMean": 0.02,
+    "audioRmsP90": 0.04,
+    "spectralFlatnessMean": 0.08,
+    "spectralFluxMean": 0.35,
 }
 
 
@@ -198,6 +237,40 @@ def edge_stats(frames: Sequence[Dict[str, float]], edge_sec: float, options: Dic
     }
 
 
+def middle_baseline_stats(frames: Sequence[Dict[str, float]], end_sec: float, options: Dict[str, float]) -> Dict[str, float]:
+    if end_sec < options["baseline_min_duration_sec"]:
+        return dict(DEFAULT_BASELINE_STATS)
+    window_sec = options["baseline_long_window_sec"] if end_sec >= options["baseline_long_window_sec"] * 2.0 else options["baseline_short_window_sec"]
+    midpoint = end_sec / 2.0
+    start_sec = max(0.0, midpoint - (window_sec / 2.0))
+    stop_sec = min(end_sec, start_sec + window_sec)
+    baseline_frames = frames_in_range(frames, start_sec, stop_sec)
+    if len(baseline_frames) < int(options["baseline_min_frames"]):
+        return dict(DEFAULT_BASELINE_STATS)
+    temporal = values(baseline_frames, "songProbability")
+    singing = values(baseline_frames, "singingProbability")
+    music = values(baseline_frames, "musicProbability")
+    speech = values(baseline_frames, "speechProbability")
+    rms = values(baseline_frames, "audioRms")
+    flatness = values(baseline_frames, "spectralFlatness")
+    flux = values(baseline_frames, "spectralFlux")
+    return {
+        "frameCount": float(len(baseline_frames)),
+        "temporalMean": mean(temporal),
+        "temporalP90": quantile(temporal, 0.9),
+        "singingMean": mean(singing),
+        "singingP90": quantile(singing, 0.9),
+        "musicMean": mean(music),
+        "musicP90": quantile(music, 0.9),
+        "speechMean": mean(speech),
+        "speechP90": quantile(speech, 0.9),
+        "audioRmsMean": mean(rms),
+        "audioRmsP90": quantile(rms, 0.9),
+        "spectralFlatnessMean": mean(flatness),
+        "spectralFluxMean": mean(flux),
+    }
+
+
 def overlap_seconds(left: Dict[str, object], right: Dict[str, object]) -> float:
     return max(0.0, min(finite(left.get("endSec")), finite(right.get("endSec"))) - max(finite(left.get("startSec")), finite(right.get("startSec"))))
 
@@ -257,15 +330,18 @@ def build_segment_filter_feature_vector(
     flags = context_flags(segment, ctx)
     last_frame_time = normalized_frames[-1]["timeSec"] if normalized_frames else end_sec
     end_boundary = max(end_sec, finite(ctx.get("endSec"), last_frame_time))
+    baseline = middle_baseline_stats(normalized_frames, end_boundary, opts)
     music_mean = mean(music)
     singing_mean = mean(singing)
     speech_mean = mean(speech)
+    temporal_mean = mean(temporal)
+    rms_mean = mean(audio_rms)
     music_only_extra_score = clamp((music_mean - (singing_mean * 1.7) - (speech_mean * 1.15) + (0.12 if duration_sec >= 180.0 else 0.0)) / 0.75, 0.0, 1.0)
 
     return [
         duration_sec,
         clamp(segment.get("confidence", 0.0), 0.0, 1.0),
-        mean(temporal),
+        temporal_mean,
         quantile(temporal, 0.1),
         quantile(temporal, 0.5),
         quantile(temporal, 0.9),
@@ -286,7 +362,7 @@ def build_segment_filter_feature_vector(
         quantile(speech, 0.9),
         mean(speech_ratio),
         quantile(speech_ratio, 0.9),
-        mean(audio_rms),
+        rms_mean,
         quantile(audio_rms, 0.5),
         quantile(audio_rms, 0.9),
         mean(audio_peak),
@@ -322,6 +398,24 @@ def build_segment_filter_feature_vector(
         float(len(safe_frames)),
         start_sec / end_boundary if end_boundary > 0 else 0.0,
         end_sec / end_boundary if end_boundary > 0 else 0.0,
+        baseline["frameCount"],
+        baseline["temporalMean"],
+        baseline["temporalP90"],
+        baseline["singingMean"],
+        baseline["singingP90"],
+        baseline["musicMean"],
+        baseline["musicP90"],
+        baseline["speechMean"],
+        baseline["speechP90"],
+        baseline["audioRmsMean"],
+        baseline["audioRmsP90"],
+        baseline["spectralFlatnessMean"],
+        baseline["spectralFluxMean"],
+        temporal_mean - baseline["temporalMean"],
+        singing_mean - baseline["singingMean"],
+        music_mean - baseline["musicMean"],
+        speech_mean - baseline["speechMean"],
+        rms_mean - baseline["audioRmsMean"],
     ]
 
 
@@ -343,6 +437,7 @@ def apply_segment_filter_predictions(
     keep_threshold: float = DEFAULT_FILTER_POLICY["keep_threshold"],
     trim_confidence_threshold: float = DEFAULT_FILTER_POLICY["trim_confidence_threshold"],
     trim_clamp_sec: float = DEFAULT_FILTER_POLICY["trim_clamp_sec"],
+    trim_scale: float = DEFAULT_FILTER_POLICY["trim_scale"],
     min_segment_duration_sec: float = DEFAULT_FILTER_POLICY["min_segment_duration_sec"],
 ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
     sorted_items = sorted(
@@ -362,8 +457,8 @@ def apply_segment_filter_predictions(
             "provisional": False,
         }
         keep_probability = clamp(prediction.get("keepProbability", prediction.get("keep_probability", prediction.get("keep", 1.0))), 0.0, 1.0)
-        start_delta = clamp(prediction.get("startTrimDeltaSec", prediction.get("start_delta_sec", 0.0)), -trim_clamp_sec, trim_clamp_sec)
-        end_delta = clamp(prediction.get("endTrimDeltaSec", prediction.get("end_delta_sec", 0.0)), -trim_clamp_sec, trim_clamp_sec)
+        start_delta = clamp(prediction.get("startTrimDeltaSec", prediction.get("start_delta_sec", 0.0)), -trim_clamp_sec, trim_clamp_sec) * trim_scale
+        end_delta = clamp(prediction.get("endTrimDeltaSec", prediction.get("end_delta_sec", 0.0)), -trim_clamp_sec, trim_clamp_sec) * trim_scale
         if keep_probability < keep_threshold:
             adjustments.append({"index": original_index, "action": "drop", "keepProbability": round(keep_probability, 4), "original": original})
             continue
