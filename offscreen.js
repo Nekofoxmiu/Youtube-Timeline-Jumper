@@ -12,6 +12,14 @@ import { EventSegmentTracker } from './lib/songDetection/eventSegmentTracker.js'
 import { HeuristicSongDetector, HEURISTIC_DETECTOR_VERSION } from './lib/songDetection/heuristicDetector.js';
 import { FireRedAedSongDetector, FIRERED_AED_DETECTOR_VERSION } from './lib/songDetection/fireredAedDetector.js';
 import { GLOBAL_SMOOTHING_VERSION, smoothFireRedAnalyses } from './lib/songDetection/globalSmoothing.js';
+import {
+  DEFAULT_SEGMENT_FILTER_OPTIONS,
+  SEGMENT_FILTER_VERSION,
+  applySegmentFilterPredictions,
+  loadEdgeTrimAdvisorModel,
+  loadSegmentFilterModel,
+  runSegmentFilterPipeline,
+} from './lib/songDetection/segmentFilter.js';
 
 const HOP_MS = 500;
 const REPORT_INTERVAL_MS = 2000;
@@ -22,9 +30,24 @@ const DEFAULT_DETECTOR_MODE = DETECTOR_MODES.FIRERED_AED;
 const DEFAULT_MIN_SEGMENT_DURATION_SEC = 90;
 const AUDIO_CAPTURE_WORKLET_NAME = 'ytj-audio-capture-worklet';
 const AUDIO_CAPTURE_WORKLET_PATH = 'lib/songDetection/audioCapture.worklet.js';
-const LIVE_FINALIZE_DELAY_SEC = 90;
+const LIVE_FINALIZE_DELAY_SEC = 180;
 const LIVE_RESMOOTH_INTERVAL_SEC = 5;
 const LIVE_RESMOOTH_WINDOW_SEC = null;
+const LIVE_SEGMENT_FILTER_ENABLED = true;
+const LIVE_SEGMENT_FILTER_KEEP_THRESHOLD = 0.35;
+const LIVE_EDGE_TRIM_DURING_STREAM = false;
+const LIVE_SEGMENT_FILTER_EXECUTION_PROVIDERS = ['wasm'];
+const LIVE_FILTER_DROP_PROTECTION = Object.freeze({
+  minDurationSec: 90,
+  minConfidence: 0.65,
+  minTemporalMean: 0.5,
+  minSingingMean: 0.12,
+  minSingingP90: 0.55,
+  minSingingRatioMean: 0.08,
+  maxLowSingingHighMusicRatio: 0.65,
+});
+const LIVE_PCM_ROLLOVER_SEC = 30 * 60;
+const LIVE_PCM_OVERLAP_SEC = 120;
 const MAX_ANALYSIS_CACHE_FRAMES = 12 * 60 * 60 * 2; // 12 hours at 0.5s hop.
 const FIRERED_TRACKER_START_THRESHOLD = 0.54;
 const FIRERED_TRACKER_END_THRESHOLD = 0.28;
@@ -34,6 +57,7 @@ const FIRERED_TRACKER_START_MARGIN = 0.02;
 const FIRERED_TRACKER_HYSTERESIS_GAP = 0.18;
 const PLAYBACK_CLOCK_SEEK_JUMP_SEC = 8;
 const PLAYBACK_CLOCK_CONTINUITY_TOLERANCE_SEC = 4;
+const LIVE_ANALYSIS_TIME_GRID_SEC = HOP_MS / 1000;
 
 const FIRERED_DECISION_RULES = Object.freeze({
   historyWindowSec: 45,
@@ -139,6 +163,49 @@ function appendAnalysisCacheFrame(session, currentTimeSec, analysis) {
   }
 }
 
+function consumeFireRedAnalysisFrame(session, frame) {
+  const frameTimeSec = Number(frame?.timeSec);
+  if (!Number.isFinite(frameTimeSec)) {
+    return { transitioned: false, status: session.segmentTracker?.isSong ? 'Detecting' : 'Listening' };
+  }
+
+  appendAnalysisCacheFrame(session, frameTimeSec, frame);
+  session.lastAnalysisFrameTimeSec = frameTimeSec;
+
+  const beforeTrackerState = getTrackerDebugState(session.segmentTracker);
+  const decisionResult = applyFireRedDecisionRules(session, frameTimeSec, frame);
+  const updateResult = session.segmentTracker.update(
+    frameTimeSec,
+    decisionResult?.trackerEvidence || {
+      songProbability: decisionResult?.songProbability ?? frame.songProbability,
+      hasSingingAnchor: false,
+      hasRecentAnchor: false,
+      hasMusicSustain: false,
+      speechDominant: false,
+      startSecOverride: decisionResult?.startSecOverride ?? null,
+    }
+  );
+
+  appendDebugTrace(session, frameTimeSec, frame, decisionResult, updateResult, beforeTrackerState);
+  return {
+    transitioned: Boolean(updateResult?.transitioned),
+    status: session.segmentTracker.isSong ? 'Detecting' : 'Listening',
+  };
+}
+
+function consumeFireRedAnalysisFrames(session, frames) {
+  let transitioned = false;
+  let status = session.segmentTracker?.isSong ? 'Detecting' : 'Listening';
+  let lastTimeSec = null;
+  for (const frame of Array.isArray(frames) ? frames : []) {
+    const result = consumeFireRedAnalysisFrame(session, frame);
+    transitioned = transitioned || result.transitioned;
+    status = result.status;
+    if (Number.isFinite(Number(frame?.timeSec))) lastTimeSec = Number(frame.timeSec);
+  }
+  return { transitioned, status, lastTimeSec };
+}
+
 function buildAnalysisCacheSummary(session, refinedSegments = []) {
   const frames = Array.isArray(session.analysisCache) ? session.analysisCache : [];
   const first = frames[0] || null;
@@ -224,7 +291,471 @@ function getCachedGlobalSmoothing(session, currentTimeSec, { finalizeAll = false
   return result;
 }
 
-function buildActiveReportSegments(session, currentTimeSec, { finalizeAll = false } = {}) {
+function buildSegmentFilterRuntimeInfo(runtimes = null, error = null) {
+  const segmentMeta = runtimes?.segmentFilter?.meta || {};
+  const edgeMeta = runtimes?.edgeTrimAdvisor?.meta || {};
+  return {
+    version: SEGMENT_FILTER_VERSION,
+    enabled: LIVE_SEGMENT_FILTER_ENABLED,
+    executionProviders: LIVE_SEGMENT_FILTER_EXECUTION_PROVIDERS,
+    segmentFilterLoaded: Boolean(runtimes?.segmentFilter),
+    edgeTrimAdvisorLoaded: Boolean(runtimes?.edgeTrimAdvisor),
+    liveKeepThreshold: LIVE_SEGMENT_FILTER_KEEP_THRESHOLD,
+    liveEdgeTrimDuringStream: LIVE_EDGE_TRIM_DURING_STREAM,
+    keepThreshold: Number.isFinite(Number(segmentMeta.keepThreshold))
+      ? Number(segmentMeta.keepThreshold)
+      : DEFAULT_SEGMENT_FILTER_OPTIONS.keepThreshold,
+    trimConfidenceThreshold: Number.isFinite(Number(edgeMeta.trimConfidenceThreshold))
+      ? Number(edgeMeta.trimConfidenceThreshold)
+      : DEFAULT_SEGMENT_FILTER_OPTIONS.trimConfidenceThreshold,
+    error: error ? (error?.message || String(error)) : null,
+  };
+}
+
+function resolveNumberOption(value, fallback) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+function buildLiveSegmentFilterOptions(session, runtimes, overrides = {}) {
+  const segmentMeta = runtimes?.segmentFilter?.meta || {};
+  const edgeMeta = runtimes?.edgeTrimAdvisor?.meta || {};
+  return {
+    ...DEFAULT_SEGMENT_FILTER_OPTIONS,
+    keepThreshold: resolveNumberOption(segmentMeta.keepThreshold, DEFAULT_SEGMENT_FILTER_OPTIONS.keepThreshold),
+    trimConfidenceThreshold: resolveNumberOption(edgeMeta.trimConfidenceThreshold, DEFAULT_SEGMENT_FILTER_OPTIONS.trimConfidenceThreshold),
+    trimClampSec: resolveNumberOption(edgeMeta.trimClampSec, DEFAULT_SEGMENT_FILTER_OPTIONS.trimClampSec),
+    trimScale: resolveNumberOption(edgeMeta.trimScale, DEFAULT_SEGMENT_FILTER_OPTIONS.trimScale),
+    minSegmentDurationSec: session.minSegmentDurationSec,
+    ...overrides,
+  };
+}
+
+async function loadOptionalSegmentFilterRuntime(label, loadRuntime) {
+  try {
+    return await loadRuntime();
+  } catch (error) {
+    console.warn(`${label} unavailable; finalization falls back to heuristic smoothing.`, error);
+    return null;
+  }
+}
+
+async function getLiveSegmentFilterRuntimes(session) {
+  if (!LIVE_SEGMENT_FILTER_ENABLED || !session || session.detectorMode !== DETECTOR_MODES.FIRERED_AED) {
+    return null;
+  }
+  if (session.segmentFilterUnavailable) return null;
+  if (session.segmentFilterRuntimes) return session.segmentFilterRuntimes;
+  if (session.segmentFilterRuntimesPromise) return session.segmentFilterRuntimesPromise;
+
+  const ort = globalThis.ort;
+  if (!ort?.InferenceSession || !ort?.Tensor) {
+    const error = new Error('ONNX Runtime Web is unavailable for live segment finalization.');
+    session.segmentFilterUnavailable = true;
+    session.segmentFilterLastError = error.message;
+    session.segmentFilterRuntimeInfo = buildSegmentFilterRuntimeInfo(null, error);
+    return null;
+  }
+
+  session.segmentFilterRuntimesPromise = (async () => {
+    const [segmentFilter, edgeTrimAdvisor] = await Promise.all([
+      loadOptionalSegmentFilterRuntime('Live segment filter', () => loadSegmentFilterModel({
+        ort,
+        executionProviders: LIVE_SEGMENT_FILTER_EXECUTION_PROVIDERS,
+      })),
+      loadOptionalSegmentFilterRuntime('Live edge trim advisor', () => loadEdgeTrimAdvisorModel({
+        ort,
+        executionProviders: LIVE_SEGMENT_FILTER_EXECUTION_PROVIDERS,
+      })),
+    ]);
+
+    if (!segmentFilter) {
+      if (edgeTrimAdvisor?.session && typeof edgeTrimAdvisor.session.release === 'function') {
+        try {
+          await edgeTrimAdvisor.session.release();
+        } catch (error) {
+          console.warn('Failed to release unused live edge trim advisor session.', error);
+        }
+      }
+      session.segmentFilterUnavailable = true;
+      session.segmentFilterLastError = 'Live segment keep filter runtime not loaded.';
+      session.segmentFilterRuntimeInfo = buildSegmentFilterRuntimeInfo(null, session.segmentFilterLastError);
+      return null;
+    }
+
+    session.segmentFilterRuntimes = { segmentFilter, edgeTrimAdvisor };
+    session.segmentFilterRuntimeInfo = buildSegmentFilterRuntimeInfo(session.segmentFilterRuntimes);
+    return session.segmentFilterRuntimes;
+  })().finally(() => {
+    session.segmentFilterRuntimesPromise = null;
+  });
+
+  return session.segmentFilterRuntimesPromise;
+}
+
+async function releaseLiveSegmentFilterRuntimes(session) {
+  if (session?.segmentFilterRuntimesPromise) {
+    try {
+      await session.segmentFilterRuntimesPromise;
+    } catch (error) {
+      // Loading already failed; nothing to release.
+    }
+  }
+  const runtimes = session?.segmentFilterRuntimes;
+  const sessionsToRelease = [
+    runtimes?.segmentFilter?.session,
+    runtimes?.edgeTrimAdvisor?.session,
+  ].filter(Boolean);
+  await Promise.all(sessionsToRelease.map(async (ortSession) => {
+    if (typeof ortSession.release !== 'function') return;
+    try {
+      await ortSession.release();
+    } catch (error) {
+      console.warn('Failed to release live segment filter ONNX session.', error);
+    }
+  }));
+  if (session) {
+    session.segmentFilterRuntimes = null;
+    session.segmentFilterRuntimesPromise = null;
+    resetLiveFinalizationState(session);
+  }
+}
+
+function createLiveFinalizationState() {
+  return {
+    segments: [],
+    sourceRanges: [],
+    adjustments: [],
+    filterApplied: false,
+    runtimeInfo: null,
+    maxSourceEndSec: null,
+  };
+}
+
+function ensureLiveFinalizationState(session) {
+  if (!session.liveFinalizationState) {
+    session.liveFinalizationState = createLiveFinalizationState();
+  }
+  return session.liveFinalizationState;
+}
+
+function resetLiveFinalizationState(session) {
+  if (!session) return;
+  session.liveFinalizationState = createLiveFinalizationState();
+}
+
+function selectNewFinalizationCandidates(session, finalCandidates) {
+  const state = ensureLiveFinalizationState(session);
+  const maxSourceEndSec = Number(state.maxSourceEndSec);
+  const hasMaxSourceEnd = state.maxSourceEndSec !== null && Number.isFinite(maxSourceEndSec);
+  return sortReportSegments(finalCandidates, { provisional: false })
+    .filter((segment) => {
+      const startSec = Number(segment.startSec);
+      const endSec = Number(segment.endSec);
+      if (!Number.isFinite(startSec) || !Number.isFinite(endSec)) return false;
+      if (!hasMaxSourceEnd) return true;
+      if (endSec <= maxSourceEndSec + 0.25) return false;
+      // Once a segment has been frozen, do not let later smoothing merge back into it.
+      return startSec >= maxSourceEndSec - 1;
+    });
+}
+
+function appendLiveFinalizedSegments(session, sourceSegments, filteredResult) {
+  const state = ensureLiveFinalizationState(session);
+  const sourceRanges = sortReportSegments(sourceSegments, { provisional: false })
+    .map((segment) => ({
+      sourceStartSec: roundNumber(Number(segment.startSec) || 0, 3),
+      sourceEndSec: roundNumber(Number(segment.endSec) || 0, 3),
+    }));
+  state.sourceRanges.push(...sourceRanges);
+  if (sourceRanges.length) {
+    state.maxSourceEndSec = Math.max(
+      Number(state.maxSourceEndSec) || 0,
+      ...sourceRanges.map((range) => Number(range.sourceEndSec) || 0)
+    );
+  }
+  state.segments = mergeReportSegments(
+    state.segments,
+    sortReportSegments(filteredResult?.segments || [], { provisional: false })
+  );
+  state.adjustments.push(...(Array.isArray(filteredResult?.adjustments) ? filteredResult.adjustments : []));
+  state.filterApplied = Boolean(state.filterApplied || filteredResult?.applied);
+  state.runtimeInfo = filteredResult?.runtimeInfo || state.runtimeInfo;
+  return state;
+}
+
+function summarizeLiveSegmentEvidence(frames, segment) {
+  const startSec = Number(segment?.startSec);
+  const endSec = Number(segment?.endSec);
+  const sourceFrames = Array.isArray(frames) ? frames : [];
+  const segmentFrames = sourceFrames.filter((frame) => {
+    const timeSec = Number(frame?.timeSec);
+    return Number.isFinite(timeSec) && timeSec >= startSec && timeSec <= endSec;
+  });
+  if (!segmentFrames.length) {
+    return {
+      frameCount: 0,
+      temporalMean: 0,
+      singingMean: 0,
+      singingP90: 0,
+      singingRatioMean: 0,
+      lowSingingHighMusicRatio: 1,
+    };
+  }
+
+  const values = (fieldName) => segmentFrames
+    .map((frame) => Number(frame?.[fieldName]))
+    .filter(Number.isFinite);
+  const mean = (fieldName) => {
+    const list = values(fieldName);
+    if (!list.length) return 0;
+    return list.reduce((sum, value) => sum + value, 0) / list.length;
+  };
+  const percentile = (fieldName, ratio) => {
+    const list = values(fieldName).sort((a, b) => a - b);
+    if (!list.length) return 0;
+    const index = Math.min(list.length - 1, Math.max(0, Math.floor((list.length - 1) * ratio)));
+    return list[index];
+  };
+  const lowSingingHighMusicCount = segmentFrames.filter((frame) => {
+    const music = Number(frame?.musicProbability) || 0;
+    const singing = Number(frame?.singingProbability) || 0;
+    const speech = Number(frame?.speechProbability) || 0;
+    return music >= 0.7 && singing <= 0.05 && speech <= 0.2;
+  }).length;
+
+  return {
+    frameCount: segmentFrames.length,
+    temporalMean: mean('temporalHeadProbability'),
+    singingMean: mean('singingProbability'),
+    singingP90: percentile('singingProbability', 0.9),
+    singingRatioMean: mean('singingRatio'),
+    lowSingingHighMusicRatio: lowSingingHighMusicCount / segmentFrames.length,
+  };
+}
+
+function shouldProtectLiveFilterDrop(segment, frames) {
+  const durationSec = Number(segment?.endSec) - Number(segment?.startSec);
+  const confidence = Number(segment?.confidence) || 0;
+  if (durationSec < LIVE_FILTER_DROP_PROTECTION.minDurationSec) return false;
+  if (confidence < LIVE_FILTER_DROP_PROTECTION.minConfidence) return false;
+
+  const evidence = summarizeLiveSegmentEvidence(frames, segment);
+  if (evidence.frameCount < 10) return false;
+  const hasTemporalEvidence = evidence.temporalMean >= LIVE_FILTER_DROP_PROTECTION.minTemporalMean;
+  const hasVocalEvidence = evidence.singingMean >= LIVE_FILTER_DROP_PROTECTION.minSingingMean
+    || evidence.singingP90 >= LIVE_FILTER_DROP_PROTECTION.minSingingP90
+    || evidence.singingRatioMean >= LIVE_FILTER_DROP_PROTECTION.minSingingRatioMean;
+  const looksMusicOnly = evidence.lowSingingHighMusicRatio >= LIVE_FILTER_DROP_PROTECTION.maxLowSingingHighMusicRatio;
+
+  return hasTemporalEvidence && hasVocalEvidence && !looksMusicOnly;
+}
+
+function protectLiveFilterDrops(originalSegments, filteredResult, frames) {
+  const inputSegments = Array.isArray(originalSegments) ? originalSegments : [];
+  const result = filteredResult || { segments: [], adjustments: [], changed: false };
+  const adjustments = Array.isArray(result.adjustments) ? result.adjustments.map((item) => ({ ...item })) : [];
+  const keptSegments = Array.isArray(result.segments) ? result.segments.slice() : [];
+  let restored = false;
+
+  for (let index = 0; index < adjustments.length; index += 1) {
+    const adjustment = adjustments[index];
+    if (adjustment?.action !== 'drop') continue;
+    const sourceIndex = Number.isInteger(adjustment.index) ? adjustment.index : index;
+    const sourceSegment = inputSegments[sourceIndex];
+    if (!sourceSegment || !shouldProtectLiveFilterDrop(sourceSegment, frames)) continue;
+
+    const evidence = summarizeLiveSegmentEvidence(frames, sourceSegment);
+    const normalized = {
+      ...sourceSegment,
+      provisional: false,
+    };
+    keptSegments.push(normalized);
+    adjustments[index] = {
+      ...adjustment,
+      action: 'keep-live-protected',
+      segment: normalized,
+      evidence: {
+        frameCount: evidence.frameCount,
+        temporalMean: roundNumber(evidence.temporalMean, 4),
+        singingMean: roundNumber(evidence.singingMean, 4),
+        singingP90: roundNumber(evidence.singingP90, 4),
+        singingRatioMean: roundNumber(evidence.singingRatioMean, 4),
+        lowSingingHighMusicRatio: roundNumber(evidence.lowSingingHighMusicRatio, 4),
+      },
+    };
+    restored = true;
+  }
+
+  if (!restored) return result;
+  return {
+    ...result,
+    segments: sortReportSegments(keptSegments, { provisional: false }),
+    adjustments,
+    changed: adjustments.some((item) => item.action === 'drop' || item.action === 'trim'),
+  };
+}
+
+function resolveFinalizationEndBound(finalSegments, allSegments, finalCutoffSec, finalizeAll) {
+  if (finalizeAll) return finalCutoffSec;
+  const nextProvisionalStart = (Array.isArray(allSegments) ? allSegments : [])
+    .filter((segment) => Number(segment?.endSec) > finalCutoffSec)
+    .map((segment) => Number(segment?.startSec))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b)[0];
+  if (!Number.isFinite(nextProvisionalStart)) return finalCutoffSec;
+  return Math.max(
+    Number(finalSegments[finalSegments.length - 1]?.startSec) || 0,
+    Math.min(finalCutoffSec, nextProvisionalStart)
+  );
+}
+
+async function applyLiveSegmentFilterToFinalSegments(
+  session,
+  finalSegments,
+  smoothing,
+  frames,
+  currentTimeSec,
+  finalCutoffSec,
+  { finalizeAll = false, lowerBoundSec = null } = {}
+) {
+  const normalizedFinalSegments = sortReportSegments(finalSegments, { provisional: false });
+  if (!normalizedFinalSegments.length) {
+    return {
+      segments: normalizedFinalSegments,
+      adjustments: [],
+      applied: false,
+      changed: false,
+      runtimeInfo: session.segmentFilterRuntimeInfo || buildSegmentFilterRuntimeInfo(),
+    };
+  }
+
+  const runtimes = await getLiveSegmentFilterRuntimes(session);
+  if (!runtimes) {
+    return {
+      segments: normalizedFinalSegments,
+      adjustments: [],
+      applied: false,
+      changed: false,
+      runtimeInfo: session.segmentFilterRuntimeInfo || buildSegmentFilterRuntimeInfo(null, session.segmentFilterLastError),
+    };
+  }
+
+  const finalEndBoundSec = resolveFinalizationEndBound(
+    normalizedFinalSegments,
+    smoothing?.segments,
+    Math.max(0, Number(finalCutoffSec) || 0),
+    finalizeAll
+  );
+
+  try {
+    const firstFrame = frames[0] || null;
+    const predictionEndSec = finalizeAll
+      ? Math.max(
+          Number(currentTimeSec) || 0,
+          Number(frames[frames.length - 1]?.timeSec) || 0,
+          finalEndBoundSec
+        )
+      : finalEndBoundSec;
+    const predictionContext = {
+      trackerSegments: smoothing?.trackerSegments || [],
+      modelRunSegments: smoothing?.modelRunSegments || [],
+      fallbackSegments: smoothing?.fallbackSegments || [],
+      selectedModelFallbackSegments: smoothing?.selectedModelFallbackSegments || [],
+      endSec: predictionEndSec,
+    };
+    const activeRuntimes = (finalizeAll || LIVE_EDGE_TRIM_DURING_STREAM)
+      ? runtimes
+      : { segmentFilter: runtimes.segmentFilter, edgeTrimAdvisor: null };
+    const predictionOptions = buildLiveSegmentFilterOptions(session, activeRuntimes, {
+      keepThreshold: finalizeAll
+        ? resolveNumberOption(runtimes?.segmentFilter?.meta?.keepThreshold, DEFAULT_SEGMENT_FILTER_OPTIONS.keepThreshold)
+        : LIVE_SEGMENT_FILTER_KEEP_THRESHOLD,
+      startSec: Number.isFinite(Number(firstFrame?.timeSec)) ? Number(firstFrame.timeSec) : 0,
+      endSec: predictionEndSec,
+    });
+    const applyOptions = {
+      ...predictionOptions,
+      startSec: Number.isFinite(Number(lowerBoundSec))
+        ? Number(lowerBoundSec)
+        : predictionOptions.startSec,
+      endSec: finalEndBoundSec,
+    };
+    const predictions = await runSegmentFilterPipeline(
+      activeRuntimes,
+      normalizedFinalSegments,
+      frames,
+      predictionContext,
+      predictionOptions
+    );
+    const filtered = protectLiveFilterDrops(
+      normalizedFinalSegments,
+      applySegmentFilterPredictions(normalizedFinalSegments, predictions, applyOptions),
+      frames
+    );
+    return {
+      segments: sortReportSegments(filtered.segments, { provisional: false }),
+      adjustments: filtered.adjustments || [],
+      applied: true,
+      changed: Boolean(filtered.changed),
+      runtimeInfo: session.segmentFilterRuntimeInfo || buildSegmentFilterRuntimeInfo(runtimes),
+    };
+  } catch (error) {
+    console.warn('Live segment finalization filter failed; using heuristic final segments.', error);
+    session.segmentFilterLastError = error?.message || String(error);
+    session.segmentFilterRuntimeInfo = buildSegmentFilterRuntimeInfo(runtimes, error);
+    return {
+      segments: normalizedFinalSegments,
+      adjustments: [],
+      applied: false,
+      changed: false,
+      runtimeInfo: session.segmentFilterRuntimeInfo,
+    };
+  }
+}
+
+async function finalizeNewLiveSegments(
+  session,
+  finalCandidates,
+  smoothing,
+  frames,
+  currentTimeSec,
+  finalCutoffSec,
+  { finalizeAll = false } = {}
+) {
+  const state = ensureLiveFinalizationState(session);
+  const newCandidates = selectNewFinalizationCandidates(session, finalCandidates);
+  if (!newCandidates.length) {
+    return {
+      segments: sortReportSegments(state.segments, { provisional: false }),
+      adjustments: state.adjustments,
+      applied: state.filterApplied,
+      runtimeInfo: state.runtimeInfo || session.segmentFilterRuntimeInfo || buildSegmentFilterRuntimeInfo(),
+    };
+  }
+
+  const previousFinalEndSec = state.segments.length
+    ? Math.max(...state.segments.map((segment) => Number(segment.endSec) || 0))
+    : null;
+  const filtered = await applyLiveSegmentFilterToFinalSegments(
+    session,
+    newCandidates,
+    smoothing,
+    frames,
+    currentTimeSec,
+    finalCutoffSec,
+    { finalizeAll, lowerBoundSec: previousFinalEndSec }
+  );
+  const nextState = appendLiveFinalizedSegments(session, newCandidates, filtered);
+  return {
+    segments: sortReportSegments(nextState.segments, { provisional: false }),
+    adjustments: nextState.adjustments,
+    applied: nextState.filterApplied,
+    runtimeInfo: nextState.runtimeInfo || session.segmentFilterRuntimeInfo || buildSegmentFilterRuntimeInfo(),
+  };
+}
+
+async function buildActiveReportSegments(session, currentTimeSec, { finalizeAll = false } = {}) {
   const allFinalSegments = session.segmentTracker.getFinalSegments();
   const trackerProvisionalSegments = session.segmentTracker.getProvisionalSegments(currentTimeSec);
 
@@ -239,12 +770,36 @@ function buildActiveReportSegments(session, currentTimeSec, { finalizeAll = fals
 
   const smoothing = getCachedGlobalSmoothing(session, currentTimeSec, { finalizeAll });
   if (smoothing && Array.isArray(smoothing.segments)) {
+    const smoothingFrames = getLiveSmoothingFrames(
+      Array.isArray(session.analysisCache) ? session.analysisCache : [],
+      currentTimeSec,
+      { finalizeAll }
+    );
     if (finalizeAll) {
+      const lastSmoothingFrame = smoothingFrames[smoothingFrames.length - 1] || null;
+      const smoothingEndSec = Math.max(
+        Number(currentTimeSec) || 0,
+        Number(lastSmoothingFrame?.timeSec) || 0,
+        Number(smoothing.segments[smoothing.segments.length - 1]?.endSec) || 0
+      );
+      const filtered = await finalizeNewLiveSegments(
+        session,
+        smoothing.segments,
+        smoothing,
+        smoothingFrames,
+        currentTimeSec,
+        smoothingEndSec,
+        { finalizeAll }
+      );
       return {
-        finalSegments: sortReportSegments(smoothing.segments),
+        finalSegments: sortReportSegments(filtered.segments),
         provisionalSegments: [],
-        refinedBy: GLOBAL_SMOOTHING_VERSION,
-        smoothingMethod: smoothing.method || null,
+        refinedBy: filtered.applied ? `${GLOBAL_SMOOTHING_VERSION}+${SEGMENT_FILTER_VERSION}` : GLOBAL_SMOOTHING_VERSION,
+        smoothingMethod: filtered.applied
+          ? `${smoothing.method || 'unknown'}+segment-filter-final`
+          : smoothing.method || null,
+        segmentFilterAdjustments: filtered.adjustments,
+        segmentFilterRuntimeInfo: filtered.runtimeInfo,
       };
     }
 
@@ -260,37 +815,57 @@ function buildActiveReportSegments(session, currentTimeSec, { finalizeAll = fals
       }
     }
 
+    const filtered = await finalizeNewLiveSegments(
+      session,
+      finalSegments,
+      smoothing,
+      smoothingFrames,
+      currentTimeSec,
+      finalCutoffSec,
+      { finalizeAll }
+    );
+    const visibleProvisionalSegments = provisionalSegments
+      .filter((segment) => !filtered.segments.some((knownSegment) => segmentsOverlap(knownSegment, segment)));
+
     for (const segment of trackerProvisionalSegments) {
-      const overlapsKnownSegment = [...finalSegments, ...provisionalSegments]
+      const overlapsKnownSegment = [...filtered.segments, ...visibleProvisionalSegments]
         .some((knownSegment) => segmentsOverlap(knownSegment, segment));
       if (!overlapsKnownSegment) {
-        provisionalSegments.push(segment);
+        visibleProvisionalSegments.push(segment);
       }
     }
 
     return {
-      finalSegments: sortReportSegments(finalSegments),
-      provisionalSegments: sortReportSegments(provisionalSegments, { provisional: true }),
-      refinedBy: GLOBAL_SMOOTHING_VERSION,
-      smoothingMethod: smoothing.method || null,
+      finalSegments: sortReportSegments(filtered.segments),
+      provisionalSegments: sortReportSegments(visibleProvisionalSegments, { provisional: true }),
+      refinedBy: filtered.applied ? `${GLOBAL_SMOOTHING_VERSION}+${SEGMENT_FILTER_VERSION}` : GLOBAL_SMOOTHING_VERSION,
+      smoothingMethod: filtered.applied
+        ? `${smoothing.method || 'unknown'}+segment-filter-final`
+        : smoothing.method || null,
+      segmentFilterAdjustments: filtered.adjustments,
+      segmentFilterRuntimeInfo: filtered.runtimeInfo,
     };
   }
 
   const finalCutoffSec = Math.max(0, currentTimeSec - LIVE_FINALIZE_DELAY_SEC);
-  const finalSegments = [];
+  const finalizationState = ensureLiveFinalizationState(session);
+  const finalSegments = sortReportSegments(finalizationState.segments, { provisional: false });
   const delayedFinalSegments = [];
 
   for (const segment of allFinalSegments) {
     if (Number(segment.endSec) <= finalCutoffSec) {
-      finalSegments.push(segment);
+      const overlapsFrozen = finalSegments.some((knownSegment) => segmentsOverlap(knownSegment, segment));
+      if (!overlapsFrozen) finalSegments.push(segment);
     } else {
       delayedFinalSegments.push({ ...segment, provisional: true });
     }
   }
+  const visibleDelayedFinalSegments = delayedFinalSegments
+    .filter((segment) => !finalSegments.some((knownSegment) => segmentsOverlap(knownSegment, segment)));
 
   return {
     finalSegments: sortReportSegments(finalSegments),
-    provisionalSegments: sortReportSegments([...delayedFinalSegments, ...trackerProvisionalSegments], { provisional: true }),
+    provisionalSegments: sortReportSegments([...visibleDelayedFinalSegments, ...trackerProvisionalSegments], { provisional: true }),
     refinedBy: null,
     smoothingMethod: null,
   };
@@ -335,8 +910,8 @@ function buildCompletedRangesSummary(session, activeSummary = null) {
   };
 }
 
-function buildLiveReportSegments(session, currentTimeSec, { finalizeAll = false } = {}) {
-  const activeReport = buildActiveReportSegments(session, currentTimeSec, { finalizeAll });
+async function buildLiveReportSegments(session, currentTimeSec, { finalizeAll = false } = {}) {
+  const activeReport = await buildActiveReportSegments(session, currentTimeSec, { finalizeAll });
   const completedSegments = getCompletedRangeSegments(session);
 
   return {
@@ -346,9 +921,9 @@ function buildLiveReportSegments(session, currentTimeSec, { finalizeAll = false 
   };
 }
 
-function captureCompletedAnalysisRange(session, finalTimeSec, reason = 'discontinuity') {
+async function captureCompletedAnalysisRange(session, finalTimeSec, reason = 'discontinuity') {
   const frames = Array.isArray(session.analysisCache) ? session.analysisCache : [];
-  const activeReport = buildActiveReportSegments(session, finalTimeSec, { finalizeAll: true });
+  const activeReport = await buildActiveReportSegments(session, finalTimeSec, { finalizeAll: true });
   const finalSegments = sortReportSegments(activeReport.finalSegments);
   if (!frames.length && !finalSegments.length) return false;
 
@@ -366,6 +941,10 @@ function captureCompletedAnalysisRange(session, finalTimeSec, reason = 'disconti
     finalSegments,
     refinedBy: activeReport.refinedBy || null,
     smoothingMethod: activeReport.smoothingMethod || null,
+    segmentFilterRuntimeInfo: activeReport.segmentFilterRuntimeInfo || null,
+    segmentFilterAdjustmentCount: Array.isArray(activeReport.segmentFilterAdjustments)
+      ? activeReport.segmentFilterAdjustments.length
+      : 0,
     analysisCacheSummary,
   };
 
@@ -381,6 +960,18 @@ function computeNextIntegerSecond(currentTimeSec) {
   return Math.ceil(current);
 }
 
+function snapLiveAnalysisTimeSec(session, currentTimeSec) {
+  const current = toSeconds(currentTimeSec);
+  const origin = Number.isFinite(Number(session?.analysisStartOriginSec))
+    ? Number(session.analysisStartOriginSec)
+    : Math.floor(current);
+  const step = LIVE_ANALYSIS_TIME_GRID_SEC;
+  if (!Number.isFinite(step) || step <= 0) return roundNumber(current, 3);
+  if (current <= origin) return roundNumber(origin, 3);
+  const steps = Math.max(0, Math.floor(((current - origin) / step) + 1e-6));
+  return roundNumber(origin + (steps * step), 3);
+}
+
 function isWaitingForIntegerStart(session, currentTimeSec) {
   if (!session?.integerStartPending) return false;
   if (!Number.isFinite(Number(session.startAnalysisAtSec))) {
@@ -394,8 +985,16 @@ function isAnalysisGateClosed(session) {
 }
 
 function openAnalysisGate(session, currentTimeSec) {
+  const originSec = Number.isFinite(Number(session.startAnalysisAtSec))
+    ? Number(session.startAnalysisAtSec)
+    : computeNextIntegerSecond(currentTimeSec);
   session.integerStartPending = false;
   session.startAnalysisAtSec = null;
+  session.analysisStartOriginSec = originSec;
+  session.lastAnalysisFrameTimeSec = null;
+  if (typeof session.detector?.setTimeOffsetSec === 'function') {
+    session.detector.setTimeOffsetSec(originSec);
+  }
   session.eventDecisionHistory = [];
   session.eventDecisionSnapshot = null;
   session.lastSingingAnchorSec = null;
@@ -408,6 +1007,17 @@ function openAnalysisGate(session, currentTimeSec) {
     session.detector.resetAnalysisState();
   }
   markPlaybackClock(session, currentTimeSec);
+}
+
+function resetIntegerStartGate(session, currentTimeSec) {
+  if (!session) return;
+  session.integerStartPending = true;
+  session.startAnalysisAtSec = computeNextIntegerSecond(currentTimeSec);
+  session.analysisStartOriginSec = null;
+  session.lastAnalysisFrameTimeSec = null;
+  if (typeof session.detector?.resetAnalysisState === 'function') {
+    session.detector.resetAnalysisState();
+  }
 }
 
 function getTrackerDebugState(tracker) {
@@ -433,6 +1043,13 @@ function buildDebugTracePayload(session) {
     detectorVersion: session.detectorVersion,
     exportedAt: new Date().toISOString(),
     trackerState: getTrackerDebugState(session.segmentTracker),
+    integerStart: {
+      pending: Boolean(session.integerStartPending),
+      startAnalysisAtSec: Number.isFinite(Number(session.startAnalysisAtSec)) ? Number(session.startAnalysisAtSec) : null,
+      analysisStartOriginSec: Number.isFinite(Number(session.analysisStartOriginSec)) ? Number(session.analysisStartOriginSec) : null,
+      lastAnalysisFrameTimeSec: Number.isFinite(Number(session.lastAnalysisFrameTimeSec)) ? Number(session.lastAnalysisFrameTimeSec) : null,
+      gridSec: LIVE_ANALYSIS_TIME_GRID_SEC,
+    },
     finalSegments: session.segmentTracker ? session.segmentTracker.getFinalSegments() : [],
     provisionalSegments: session.segmentTracker ? session.segmentTracker.getProvisionalSegments(session.lastPlaybackTimeSec || 0) : [],
     trace: Array.isArray(session.debugTrace) ? session.debugTrace.slice() : [],
@@ -529,6 +1146,27 @@ function withTimeout(promise, timeoutMs) {
     });
 }
 
+function delayMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+async function waitForAnalysisIdle(session, { timeoutMs = 5000 } = {}) {
+  const startedAt = Date.now();
+  while (session && (session.analysisLock || session.analysisScheduled)) {
+    if (Date.now() - startedAt >= timeoutMs) return false;
+    await delayMs(40);
+  }
+  return true;
+}
+
+async function flushDetectorPendingFrames(session, { onProgress = null } = {}) {
+  if (!session || session.detectorMode !== DETECTOR_MODES.FIRERED_AED) return [];
+  if (typeof session.detector?.flushPendingFrames !== 'function') return [];
+  const frames = await session.detector.flushPendingFrames({ onProgress });
+  consumeFireRedAnalysisFrames(session, frames);
+  return frames;
+}
+
 async function requestPlaybackSnapshot(tabId) {
   try {
     const response = await withTimeout(
@@ -606,6 +1244,31 @@ async function requestCurrentVideoId(tabId) {
   }
 }
 
+async function detectVideoBoundary(session, snapshot) {
+  if (!session || snapshot?.estimated) return null;
+  const knownVideoId = session.videoId || null;
+  if (!knownVideoId) return null;
+
+  const snapshotVideoId = snapshot?.videoId || null;
+  if (snapshotVideoId && snapshotVideoId !== knownVideoId) {
+    return { reason: 'videoChanged', previousVideoId: knownVideoId, nextVideoId: snapshotVideoId };
+  }
+
+  if (!snapshotVideoId) {
+    const currentVideoId = await requestCurrentVideoId(session.tabId);
+    if (currentVideoId && currentVideoId !== knownVideoId) {
+      return { reason: 'videoChanged', previousVideoId: knownVideoId, nextVideoId: currentVideoId };
+    }
+    const currentTimeSec = Number(snapshot?.currentTime);
+    const lastTimeSec = Number(session.lastPlaybackTimeSec);
+    if (!currentVideoId && Number.isFinite(currentTimeSec) && Number.isFinite(lastTimeSec) && lastTimeSec > 30 && currentTimeSec < 5) {
+      return { reason: 'videoChangedUnknown', previousVideoId: knownVideoId, nextVideoId: null };
+    }
+  }
+
+  return null;
+}
+
 async function notifyStatus(session, status, extra = {}) {
   const normalized = normalizeDetectionStatus(status);
   const nextError = extra.error || null;
@@ -655,10 +1318,14 @@ async function maybeReport(session, currentTimeSec, { force = false, finalizeAll
     provisionalSegments,
     refinedBy = null,
     smoothingMethod = null,
-  } = buildLiveReportSegments(session, currentTimeSec, { finalizeAll });
-  const status = (session.segmentTracker.isSong || provisionalSegments.length > 0)
-    ? 'Detecting'
-    : 'Listening';
+    segmentFilterAdjustments = [],
+    segmentFilterRuntimeInfo = null,
+  } = await buildLiveReportSegments(session, currentTimeSec, { finalizeAll });
+  const status = finalizeAll
+    ? 'Stopped'
+    : ((session.segmentTracker.isSong || provisionalSegments.length > 0)
+      ? 'Detecting'
+      : 'Listening');
   const activeSummary = finalizeAll && session.detectorMode === DETECTOR_MODES.FIRERED_AED
     ? buildAnalysisCacheSummary(session, finalSegments)
     : null;
@@ -701,6 +1368,10 @@ async function maybeReport(session, currentTimeSec, { force = false, finalizeAll
       liveResmoothIntervalSec: session.detectorMode === DETECTOR_MODES.FIRERED_AED ? LIVE_RESMOOTH_INTERVAL_SEC : null,
       refinedBy: finalizeAll ? refinedBy : null,
       smoothingMethod: finalizeAll ? smoothingMethod : null,
+      segmentFilterRuntimeInfo: segmentFilterRuntimeInfo || null,
+      segmentFilterAdjustmentCount: finalizeAll && Array.isArray(segmentFilterAdjustments)
+        ? segmentFilterAdjustments.length
+        : 0,
       analysisCacheSummary,
       minSegmentDurationSec: session.minSegmentDurationSec,
     });
@@ -1060,7 +1731,7 @@ function isContinuousPlaybackJump(session, delta, snapshot = {}) {
   return matchesWallClock || matchesAudioClock;
 }
 
-function reconcilePlaybackClock(session, currentTimeSec, snapshot = {}) {
+async function reconcilePlaybackClock(session, currentTimeSec, snapshot = {}) {
   const current = toSeconds(currentTimeSec);
   const last = Number(session.lastPlaybackTimeSec);
 
@@ -1076,12 +1747,13 @@ function reconcilePlaybackClock(session, currentTimeSec, snapshot = {}) {
     const forcedTransition = session.segmentTracker
       ? session.segmentTracker.finalizeAt(Math.max(0, last))
       : false;
-    captureCompletedAnalysisRange(session, Math.max(0, last), delta < 0 ? 'seek-backward' : 'seek-forward');
+    await captureCompletedAnalysisRange(session, Math.max(0, last), delta < 0 ? 'seek-backward' : 'seek-forward');
     session.eventDecisionHistory = [];
     session.eventDecisionSnapshot = null;
     session.lastSingingAnchorSec = null;
     session.analysisCache = [];
     session.liveSmoothingCache = null;
+    resetLiveFinalizationState(session);
     session.analysisCacheDiscontinuities = (Number(session.analysisCacheDiscontinuities) || 0) + 1;
     if (typeof session.detector?.resetAnalysisState === 'function') {
       session.detector.resetAnalysisState();
@@ -1089,8 +1761,9 @@ function reconcilePlaybackClock(session, currentTimeSec, snapshot = {}) {
     if (typeof session.segmentTracker?.reset === 'function') {
       session.segmentTracker.reset();
     }
+    resetIntegerStartGate(session, current);
     markPlaybackClock(session, current);
-    return { shouldAnalyze: true, forcedTransition };
+    return { shouldAnalyze: false, forcedTransition };
   }
 
   if (delta < 0.05) {
@@ -1122,6 +1795,8 @@ async function createDetectorForSession(session, requestedMode) {
     try {
       const detector = new FireRedAedSongDetector({
         sourceSampleRate: session.audioContext.sampleRate,
+        chunkSec: LIVE_PCM_ROLLOVER_SEC,
+        overlapSec: LIVE_PCM_OVERLAP_SEC,
       });
       await detector.initialize();
       return {
@@ -1176,8 +1851,25 @@ async function analyzeSession(tabId) {
 
   try {
     const playbackSnapshot = await resolvePlaybackSnapshot(session);
+    if (session.stopping) return;
     if (!playbackSnapshot || typeof playbackSnapshot.currentTime !== 'number') {
       await notifyStatus(session, 'Listening');
+      return;
+    }
+
+    const videoBoundary = await detectVideoBoundary(session, playbackSnapshot);
+    if (videoBoundary) {
+      session.videoBoundaryReason = videoBoundary.reason;
+      await notifyStatus(session, 'PostProcessing', {
+        warning: videoBoundary.nextVideoId
+          ? `Video changed to ${videoBoundary.nextVideoId}; stopping detection for ${videoBoundary.previousVideoId}.`
+          : 'Video changed; stopping detection for the previous video.',
+      });
+      await stopSession(tabId, {
+        emitStopped: true,
+        skipWaitForAnalysisIdle: true,
+        stopReason: videoBoundary.reason,
+      });
       return;
     }
 
@@ -1195,8 +1887,21 @@ async function analyzeSession(tabId) {
       return;
     }
 
-    const clockState = reconcilePlaybackClock(session, currentTimeSec, playbackSnapshot);
+    const clockState = await reconcilePlaybackClock(session, currentTimeSec, playbackSnapshot);
     if (!clockState.shouldAnalyze) {
+      if (clockState.forcedTransition) {
+        await maybeReport(session, currentTimeSec, { force: true });
+      }
+      await notifyStatus(session, session.segmentTracker.isSong ? 'Detecting' : 'Listening');
+      return;
+    }
+
+    const analysisTimeSec = snapLiveAnalysisTimeSec(session, currentTimeSec);
+    if (
+      !clockState.forcedTransition
+      && Number.isFinite(Number(session.lastAnalysisFrameTimeSec))
+      && analysisTimeSec <= Number(session.lastAnalysisFrameTimeSec) + 0.001
+    ) {
       await notifyStatus(session, session.segmentTracker.isSong ? 'Detecting' : 'Listening');
       return;
     }
@@ -1204,6 +1909,7 @@ async function analyzeSession(tabId) {
     const analysis = session.detectorMode === DETECTOR_MODES.FIRERED_AED
       ? await session.detector.analyze()
       : await session.detector.analyze(session.audioContext.sampleRate);
+    if (session.stopping) return;
 
     if (!analysis.ready) {
       if (clockState.forcedTransition) {
@@ -1213,57 +1919,41 @@ async function analyzeSession(tabId) {
       return;
     }
 
-    appendAnalysisCacheFrame(session, currentTimeSec, analysis);
+    if (session.detectorMode === DETECTOR_MODES.FIRERED_AED) {
+      const frames = Array.isArray(analysis.frames) ? analysis.frames : [analysis];
+      const consumed = consumeFireRedAnalysisFrames(session, frames);
+      const reportTimeSec = Number.isFinite(Number(consumed.lastTimeSec)) ? consumed.lastTimeSec : analysisTimeSec;
+      await notifyStatus(session, consumed.status);
+      await maybeReport(session, reportTimeSec, { force: consumed.transitioned || clockState.forcedTransition || frames.length > 1 });
+      return;
+    }
 
-    let effectiveSongProbability = analysis.songProbability;
-    let updateOptions = {};
-    let decisionResult = null;
-    let updateResult = null;
+    session.lastAnalysisFrameTimeSec = analysisTimeSec;
+    appendAnalysisCacheFrame(session, analysisTimeSec, analysis);
+    const effectiveSongProbability = analysis.songProbability;
+    const updateOptions = {};
     const beforeTrackerState = getTrackerDebugState(session.segmentTracker);
-
-    if (session.detectorMode === DETECTOR_MODES.FIRERED_AED) {
-      const ruled = applyFireRedDecisionRules(session, currentTimeSec, analysis);
-      decisionResult = ruled;
-      effectiveSongProbability = ruled.songProbability;
-      updateOptions = { startSecOverride: ruled.startSecOverride };
-    }
-
-    if (session.detectorMode === DETECTOR_MODES.FIRERED_AED) {
-      updateResult = session.segmentTracker.update(
-        currentTimeSec,
-        decisionResult?.trackerEvidence || {
-          songProbability: effectiveSongProbability,
-          hasSingingAnchor: effectiveSongProbability >= (session.trackerThresholds?.start || FIRERED_TRACKER_START_THRESHOLD),
-          hasRecentAnchor: false,
-          hasMusicSustain: false,
-          speechDominant: false,
-          startSecOverride: updateOptions.startSecOverride,
-        }
-      );
-    } else {
-      const transitioned = session.segmentTracker.update(currentTimeSec, effectiveSongProbability, updateOptions);
-      updateResult = {
-        transitioned,
-        decision: transitioned ? 'transition' : (session.segmentTracker.isSong ? 'song' : 'idle'),
-        state: session.segmentTracker.isSong ? 'song' : 'idle',
-      };
-      decisionResult = {
-        songProbability: effectiveSongProbability,
-        snapshot: null,
-      };
-    }
-
+    const rawTransitioned = session.segmentTracker.update(analysisTimeSec, effectiveSongProbability, updateOptions);
+    const updateResult = {
+      transitioned: rawTransitioned,
+      decision: rawTransitioned ? 'transition' : (session.segmentTracker.isSong ? 'song' : 'idle'),
+      state: session.segmentTracker.isSong ? 'song' : 'idle',
+    };
+    const decisionResult = {
+      songProbability: effectiveSongProbability,
+      snapshot: null,
+    };
     const transitioned = Boolean(updateResult?.transitioned) || clockState.forcedTransition;
     const nextStatus = session.segmentTracker.isSong ? 'Detecting' : 'Listening';
 
-    appendDebugTrace(session, currentTimeSec, analysis, decisionResult, updateResult, beforeTrackerState);
+    appendDebugTrace(session, analysisTimeSec, analysis, decisionResult, updateResult, beforeTrackerState);
     await notifyStatus(session, nextStatus);
-    await maybeReport(session, currentTimeSec, { force: transitioned });
+    await maybeReport(session, analysisTimeSec, { force: transitioned });
   } catch (error) {
     await notifyStatus(session, 'Stopped', {
       error: error?.message || String(error),
     });
-    await stopSession(tabId, { emitStopped: false });
+    await stopSession(tabId, { emitStopped: false, skipWaitForAnalysisIdle: true });
   } finally {
     const latest = sessions.get(tabId);
     if (latest) latest.analysisLock = false;
@@ -1380,6 +2070,12 @@ async function startSession({ tabId, streamId, videoId, detectorMode, minSegment
     lastSingingAnchorSec: null,
     analysisCache: [],
     liveSmoothingCache: null,
+    liveFinalizationState: createLiveFinalizationState(),
+    segmentFilterRuntimes: null,
+    segmentFilterRuntimesPromise: null,
+    segmentFilterUnavailable: false,
+    segmentFilterLastError: null,
+    segmentFilterRuntimeInfo: buildSegmentFilterRuntimeInfo(),
     completedAnalysisRanges: [],
     analysisCacheDiscontinuities: 0,
     debugTrace,
@@ -1397,6 +2093,8 @@ async function startSession({ tabId, streamId, videoId, detectorMode, minSegment
     nextPlaybackSnapshotRetryAt: null,
     integerStartPending: true,
     startAnalysisAtSec: null,
+    analysisStartOriginSec: null,
+    lastAnalysisFrameTimeSec: null,
     videoId: currentVideoId || null,
     lastReportSignature: '',
     lastReportAt: 0,
@@ -1443,6 +2141,11 @@ async function startSession({ tabId, streamId, videoId, detectorMode, minSegment
   }, HOP_MS);
 
   sessions.set(tabId, session);
+  if (session.detectorMode === DETECTOR_MODES.FIRERED_AED) {
+    void getLiveSegmentFilterRuntimes(session).catch((error) => {
+      console.warn('Live segment finalization preload failed.', error);
+    });
+  }
 
   await notifyStatus(session, 'Listening', {
     detectorMode: session.detectorMode,
@@ -1467,17 +2170,44 @@ async function startSession({ tabId, streamId, videoId, detectorMode, minSegment
 }
 
 async function stopSession(tabId, options = {}) {
-  const { emitStopped = true, skipFinalReport = false } = options;
+  const {
+    emitStopped = true,
+    skipFinalReport = false,
+    skipWaitForAnalysisIdle = false,
+    stopReason = null,
+  } = options;
   const session = sessions.get(tabId);
   if (!session) return false;
+
+  if (session.stopping) {
+    return { stopped: false, stopping: true, debugTrace: buildDebugTracePayload(session) };
+  }
 
   session.stopping = true;
 
   if (session.analysisTimer) {
     clearInterval(session.analysisTimer);
+    session.analysisTimer = null;
   }
 
-  const finalTime = toSeconds(session.segmentTracker.lastTimeSec);
+  stopSessionCaptureResources(session);
+
+  if (!skipWaitForAnalysisIdle) {
+    await waitForAnalysisIdle(session);
+  }
+
+  if (!skipFinalReport) {
+    await notifyStatus(session, 'PostProcessing');
+  }
+
+  if (!skipFinalReport) {
+    await flushDetectorPendingFrames(session);
+  }
+
+  const finalTime = Math.max(
+    toSeconds(session.segmentTracker.lastTimeSec),
+    Number.isFinite(Number(session.lastAnalysisFrameTimeSec)) ? Number(session.lastAnalysisFrameTimeSec) : 0
+  );
   session.segmentTracker.finalizeAt(finalTime);
 
   if (!skipFinalReport) {
@@ -1486,6 +2216,33 @@ async function stopSession(tabId, options = {}) {
 
   const debugTrace = buildDebugTracePayload(session);
   if (debugTrace) completedDebugTraces.set(tabId, debugTrace);
+
+  await releaseLiveSegmentFilterRuntimes(session);
+
+  sessions.delete(tabId);
+
+  if (emitStopped) {
+    try {
+      await chrome.runtime.sendMessage({
+        action: 'songDetectionStatusChanged',
+        tabId,
+        videoId: session.videoId || null,
+        status: 'Stopped',
+        reason: stopReason || session.videoBoundaryReason || null,
+        detectorMode: session.detectorMode,
+        detectorVersion: session.detectorVersion,
+      });
+    } catch (error) {
+      // ignore
+    }
+  }
+
+  return { stopped: true, debugTrace };
+}
+
+function stopSessionCaptureResources(session) {
+  if (!session || session.captureResourcesStopped) return;
+  session.captureResourcesStopped = true;
 
   try { session.source.disconnect(); } catch (error) { /* ignore */ }
   try { session.monitorGain.disconnect(); } catch (error) { /* ignore */ }
@@ -1497,26 +2254,13 @@ async function stopSession(tabId, options = {}) {
 
   try { session.captureSinkGain.disconnect(); } catch (error) { /* ignore */ }
   try { session.stream.getTracks().forEach((track) => track.stop()); } catch (error) { /* ignore */ }
-  try { await session.audioContext.close(); } catch (error) { /* ignore */ }
-
-  sessions.delete(tabId);
-
-  if (emitStopped) {
-    try {
-      await chrome.runtime.sendMessage({
-        action: 'songDetectionStatusChanged',
-        tabId,
-        videoId: session.videoId || null,
-        status: 'Stopped',
-        detectorMode: session.detectorMode,
-        detectorVersion: session.detectorVersion,
-      });
-    } catch (error) {
-      // ignore
+  try {
+    if (session.audioContext && session.audioContext.state !== 'closed') {
+      void session.audioContext.close().catch(() => {});
     }
+  } catch (error) {
+    // ignore
   }
-
-  return { stopped: true, debugTrace };
 }
 
 async function createCaptureTap(audioContext, source, onMonoChunk) {
@@ -1611,6 +2355,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({
           success: true,
           stopped: Boolean(stopResult && stopResult.stopped),
+          stopping: Boolean(stopResult && stopResult.stopping),
           debugTrace: stopResult ? stopResult.debugTrace : null,
         });
         return;

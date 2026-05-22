@@ -91,7 +91,7 @@ function uniqueSegments(segments) {
 
 const args = parseArgs(process.argv);
 if (!args.frames || !args.manual || !args.out) {
-  throw new Error('Usage: node tools/simulate_live_smoothing.mjs --frames <frames.json> --manual <manual.txt> --out <summary.json> [--lookahead-sec 20 30 60] [--step-sec 30] [--policy full|rolling] [--resmooth-window-sec 180]');
+  throw new Error('Usage: node tools/simulate_live_smoothing.mjs --frames <frames.json> --manual <manual.txt> --out <summary.json> [--lookahead-sec 180] [--step-sec 30] [--policy full|rolling] [--resmooth-window-sec 180] [--overlap-sec 30] [--min-segment-duration-sec 90] [--freeze-policy legacy|offscreen] [--include-segments] [--with-future]');
 }
 
 const framesPayload = JSON.parse(await readFile(args.frames, 'utf8'));
@@ -99,11 +99,15 @@ const frames = Array.isArray(framesPayload.frames) ? framesPayload.frames : [];
 const manual = await loadManual(args.manual);
 const endSec = Number(framesPayload.durationSec) || frames.at(-1)?.timeSec || 0;
 const startSec = frames[0]?.timeSec ? Math.max(0, Number(frames[0].timeSec) - Number(framesPayload.hopSec || 0.5)) : 0;
-const lookaheads = parseNumberList(args['lookahead-sec'], [20, 30, 60, 90, 120]);
+const lookaheads = parseNumberList(args['lookahead-sec'], [180]);
 const stepSec = Number(args['step-sec']) || 30;
 const resmoothWindowSec = Number(args['resmooth-window-sec']) || 180;
 const overlapSec = Number(args['overlap-sec']) || 30;
+const minSegmentDurationSec = Number(args['min-segment-duration-sec']) || 90;
 const policy = String(args.policy || 'full').toLowerCase() === 'rolling' ? 'rolling' : 'full';
+const freezePolicy = String(args['freeze-policy'] || 'legacy').toLowerCase() === 'offscreen' ? 'offscreen' : 'legacy';
+const includeSegments = Boolean(args['include-segments']);
+const noFuture = !Boolean(args['with-future']);
 const results = [];
 
 for (const lookaheadSec of lookaheads) {
@@ -112,8 +116,10 @@ for (const lookaheadSec of lookaheads) {
   const actual = [];
   const checkpoints = [];
   const finalizedSegments = [];
+  const finalizationBatches = [];
+  let maxSourceEndSec = null;
   for (let nowSec = Math.max(30, startSec + stepSec); nowSec <= endSec; nowSec += stepSec) {
-    const visibleEndSec = Math.min(endSec, nowSec + lookaheadSec);
+    const visibleEndSec = noFuture ? Math.min(endSec, nowSec) : Math.min(endSec, nowSec + lookaheadSec);
     const visibleFrames = frames.filter((frame) => Number(frame.timeSec) <= visibleEndSec);
     const finalCutoffSec = Math.max(0, nowSec - lookaheadSec);
     const frozenUntilSec = Math.max(0, finalCutoffSec - overlapSec);
@@ -123,12 +129,47 @@ for (const lookaheadSec of lookaheads) {
     const windowFrames = policy === 'rolling'
       ? visibleFrames.filter((frame) => Number(frame.timeSec) >= windowStartSec)
       : visibleFrames;
-    const smoothing = smoothFireRedAnalyses(windowFrames, visibleEndSec, { startSec: windowStartSec });
-    const newlyFinal = smoothing.segments
-      .filter((segment) => Number(segment.endSec) <= finalCutoffSec)
-      .filter((segment) => !finalizedSegments.some((known) => Math.abs(Number(known.startSec) - Number(segment.startSec)) < 0.001
-        && Math.abs(Number(known.endSec) - Number(segment.endSec)) < 0.001));
+    const smoothing = smoothFireRedAnalyses(windowFrames, visibleEndSec, {
+      startSec: windowStartSec,
+      minSegmentDurationSec,
+    });
+    const finalCandidates = smoothing.segments
+      .filter((segment) => Number(segment.endSec) <= finalCutoffSec);
+    const newlyFinal = finalCandidates
+      .filter((segment) => {
+        if (freezePolicy === 'legacy') {
+          return !finalizedSegments.some((known) => Math.abs(Number(known.startSec) - Number(segment.startSec)) < 0.001
+            && Math.abs(Number(known.endSec) - Number(segment.endSec)) < 0.001);
+        }
+        if (maxSourceEndSec === null || !Number.isFinite(maxSourceEndSec)) return true;
+        if (Number(segment.endSec) <= maxSourceEndSec + 0.25) return false;
+        return Number(segment.startSec) >= maxSourceEndSec - 1;
+      });
     finalizedSegments.push(...newlyFinal);
+    if (freezePolicy === 'offscreen' && newlyFinal.length) {
+      maxSourceEndSec = Math.max(
+        Number(maxSourceEndSec) || 0,
+        ...newlyFinal.map((segment) => Number(segment.endSec) || 0)
+      );
+    }
+    if (includeSegments && newlyFinal.length) {
+      finalizationBatches.push({
+        nowSec,
+        visibleEndSec,
+        finalCutoffSec,
+        windowStartSec,
+        freezePolicy,
+        segments: newlyFinal,
+        smoothing: {
+          method: smoothing.method,
+          endSec: visibleEndSec,
+          trackerSegments: smoothing.trackerSegments || [],
+          modelRunSegments: smoothing.modelRunSegments || [],
+          fallbackSegments: smoothing.fallbackSegments || [],
+          selectedModelFallbackSegments: smoothing.selectedModelFallbackSegments || [],
+        },
+      });
+    }
     const visibleTimes = frames
       .map((frame) => Number(frame.timeSec) || 0)
       .filter((time) => time > nowSec - stepSec && time <= nowSec);
@@ -141,8 +182,12 @@ for (const lookaheadSec of lookaheads) {
       visibleEndSec,
       finalCutoffSec,
       windowStartSec,
+      freezePolicy,
+      noFuture,
+      maxSourceEndSec,
       segmentCount: liveSegments.length,
       finalizedSegmentCount: finalizedSegments.length,
+      newlyFinalCount: newlyFinal.length,
       method: smoothing.method,
     });
   }
@@ -151,10 +196,17 @@ for (const lookaheadSec of lookaheads) {
     stepSec,
     resmoothWindowSec,
     overlapSec,
+    minSegmentDurationSec,
     policy,
+    freezePolicy,
+    noFuture,
     metrics: metrics(predicted, actual),
     checkpointCount: checkpoints.length,
     checkpoints,
+    finalSegmentCount: finalizedSegments.length,
+    finalSegmentTotalSec: finalizedSegments.reduce((total, segment) => total + Math.max(0, Number(segment.endSec) - Number(segment.startSec)), 0),
+    finalSegments: includeSegments ? uniqueSegments(finalizedSegments) : undefined,
+    finalizationBatches: includeSegments ? finalizationBatches : undefined,
   });
 }
 

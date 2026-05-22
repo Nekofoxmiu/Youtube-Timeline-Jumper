@@ -56,6 +56,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             status_idle: 'Idle',
             status_listening: 'Listening',
             status_detecting: 'Detecting',
+            status_postprocessing: 'Post-processing',
             status_stopped: 'Stopped',
             status_error: 'Error',
             no_active_youtube_tab: 'No active YouTube tab.',
@@ -75,6 +76,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             runtime_webgpu: 'Runtime: WebGPU',
             runtime_webgpu_with_head: 'Runtime: WebGPU (head: $1)',
             runtime_wasm_fallback: 'Runtime: WASM fallback',
+            runtime_finalizer_loaded: 'Finalizer: ONNX loaded',
+            runtime_finalizer_fallback: 'Finalizer: fallback',
             runtime_thread_reason_forced_single: 'single-thread mode',
             runtime_thread_reason_no_isolation: 'cross-origin isolation disabled for tabCapture compatibility',
             runtime_thread_reason_no_sab: 'SharedArrayBuffer unavailable',
@@ -131,6 +134,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             status_idle: '閒置',
             status_listening: '監聽中',
             status_detecting: '偵測中',
+            status_postprocessing: '後處理中',
             status_stopped: '已停止',
             status_error: '錯誤',
             no_active_youtube_tab: '沒有可用的 YouTube 分頁。',
@@ -150,6 +154,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             runtime_webgpu: '執行後端：WebGPU',
             runtime_webgpu_with_head: '執行後端：WebGPU（head：$1）',
             runtime_wasm_fallback: '執行後端：WASM fallback',
+            runtime_finalizer_loaded: '後處理模型：ONNX 已載入',
+            runtime_finalizer_fallback: '後處理模型：fallback',
             runtime_thread_reason_forced_single: '固定單執行緒模式',
             runtime_thread_reason_no_isolation: '為了相容 tabCapture 已停用 cross-origin isolation',
             runtime_thread_reason_no_sab: 'SharedArrayBuffer 不可用',
@@ -310,6 +316,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     const sortOptions = Array.from(document.querySelectorAll('#sortSelectMenu .custom-select-option[data-value]'));
     let lastDetectionStatus = 'Idle';
     let lastDetectionOptions = {};
+    let detectionPanelRefreshSeq = 0;
+
+    function invalidateDetectionPanelRefresh() {
+        detectionPanelRefreshSeq += 1;
+    }
 
     await loadUserPreferences();
     applyPopupLanguage();
@@ -390,15 +401,26 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function formatRuntimeHint(runtimeInfo) {
-        if (!runtimeInfo || !Number.isFinite(Number(runtimeInfo.numThreads))) return '';
+        if (!runtimeInfo) return '';
+        const hints = [];
+        const finalizerInfo = runtimeInfo.segmentFilterRuntimeInfo || null;
+        if (finalizerInfo) {
+            hints.push(finalizerInfo.segmentFilterLoaded
+                ? t('runtime_finalizer_loaded')
+                : t('runtime_finalizer_fallback'));
+        }
+        if (!Number.isFinite(Number(runtimeInfo.numThreads))) {
+            return hints.join(' ');
+        }
         const provider = String(runtimeInfo.executionProvider || 'wasm').toLowerCase();
         if (provider === 'webgpu') {
             const headProvider = runtimeInfo.temporalHeadExecutionProvider
                 ? String(runtimeInfo.temporalHeadExecutionProvider).toUpperCase()
                 : '';
-            return headProvider && headProvider !== 'WEBGPU'
+            hints.unshift(headProvider && headProvider !== 'WEBGPU'
                 ? t('runtime_webgpu_with_head', [headProvider])
-                : t('runtime_webgpu');
+                : t('runtime_webgpu'));
+            return hints.join(' ');
         }
         const count = Math.max(1, Math.floor(Number(runtimeInfo.numThreads)));
         const reasons = [];
@@ -417,9 +439,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             reasons.push(t('runtime_thread_reason_low_cores'));
         }
         if (count === 1 && reasons.length) {
-            return t('runtime_threads_with_reason', [count, reasons.join(', ')]);
+            hints.unshift(t('runtime_threads_with_reason', [count, reasons.join(', ')]));
+            return hints.join(' ');
         }
-        return t('runtime_threads', [count]);
+        hints.unshift(t('runtime_threads', [count]));
+        return hints.join(' ');
     }
 
     function formatDetectionDebugTrace(debugTrace) {
@@ -464,7 +488,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         detectStatusText.textContent = `${t('status_label')}: ${statusLabel(normalized)} (FireRed AED)`;
         const isRunning = normalized === 'Listening' || normalized === 'Detecting';
-        authorizeStartBtn.disabled = isRunning;
+        const isPostProcessing = normalized === 'PostProcessing';
+        authorizeStartBtn.disabled = isRunning || isPostProcessing;
         stopDetectBtn.disabled = !isRunning;
 
         const hints = [];
@@ -533,11 +558,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     async function refreshDetectionPanel() {
+        const refreshSeq = ++detectionPanelRefreshSeq;
+        const isStale = () => refreshSeq !== detectionPanelRefreshSeq;
         try {
             const [configResult, pendingResult] = await Promise.all([
                 chrome.runtime.sendMessage({ action: 'getSongDetectionConfig' }),
                 chrome.runtime.sendMessage({ action: 'getSongDetectionAuthorizationContext' }),
             ]);
+            if (isStale()) return;
 
             if (configResult && configResult.success) {
                 const minSegment = normalizeMinSegmentDurationSec(configResult.minSegmentDurationSec);
@@ -546,8 +574,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
             }
 
-            const preferredTabId = pendingResult?.success && pendingResult.pending ? pendingResult.pending.tabId : null;
-            const targetTab = await getActiveYouTubeTab(preferredTabId);
+            const invokedTab = await getInvokedYouTubeTab();
+            const preferredTabId = invokedTab?.id
+                ?? (pendingResult?.success && pendingResult.pending ? pendingResult.pending.tabId : null);
+            const targetTab = invokedTab || await getActiveYouTubeTab(preferredTabId);
+            if (isStale()) return;
             if (!targetTab) {
                 setDetectionStatus('Idle', {
                     warning: '',
@@ -561,6 +592,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 action: 'getSongDetectionStatus',
                 tabId: targetTab.id
             });
+            if (isStale()) return;
 
             if (statusResult && statusResult.success) {
                 setDetectionStatus(statusResult.status, {
@@ -578,6 +610,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 detectHint.textContent = '';
             }
         } catch (error) {
+            if (isStale()) return;
             setDetectionStatus('Error', {
                 error: error?.message || String(error)
             });
@@ -612,6 +645,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             minSegmentSecInput.value = String(minSegmentDurationSec);
             await saveSongDetectionConfig({ minSegmentDurationSec });
 
+            invalidateDetectionPanelRefresh();
             setDetectionStatus('Listening');
 
             const result = await chrome.runtime.sendMessage({
@@ -625,6 +659,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (result && result.requiresPopupAuthorization) {
                     detectHint.textContent = t('switch_to_youtube_tab_for_capture');
                 }
+                invalidateDetectionPanelRefresh();
                 setDetectionStatus('Error', {
                     error: (result && result.message) ? result.message : t('start_detection_failed'),
                     debugTrace: result && result.debugTrace ? result.debugTrace : null
@@ -636,6 +671,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return;
             }
 
+            invalidateDetectionPanelRefresh();
             setDetectionStatus(result.status || 'Listening', {
                 warning: result.warning || '',
                 runtimeInfo: result.runtimeInfo || null
@@ -646,6 +682,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 showToast(t('song_detection_started'));
             }
         } catch (error) {
+            invalidateDetectionPanelRefresh();
             setDetectionStatus('Error', {
                 error: error?.message || String(error),
                 debugTrace: error?.debugTrace || null
@@ -658,22 +695,34 @@ document.addEventListener('DOMContentLoaded', async () => {
         try {
             const context = await chrome.runtime.sendMessage({ action: 'getSongDetectionAuthorizationContext' });
             const preferredTabId = context?.success && context.pending ? context.pending.tabId : null;
-            const targetTab = await getActiveYouTubeTab(preferredTabId);
+            const targetTab = await getInvokedYouTubeTab() || await getActiveYouTubeTab(preferredTabId);
             if (!targetTab) {
                 showToast(t('no_active_youtube_tab'));
                 return;
             }
+            invalidateDetectionPanelRefresh();
+            setDetectionStatus('PostProcessing');
+
             const result = await chrome.runtime.sendMessage({
                 action: 'stopSongDetectionForActiveTab',
                 tabId: targetTab.id
             });
             if (!result || !result.success) {
+                invalidateDetectionPanelRefresh();
+                setDetectionStatus('Error', {
+                    error: (result && result.message) ? result.message : t('stop_detection_failed')
+                });
                 showToast((result && result.message) ? result.message : t('stop_detection_failed'));
                 return;
             }
+            invalidateDetectionPanelRefresh();
             setDetectionStatus('Stopped');
             showToast(t('song_detection_stopped'));
         } catch (error) {
+            invalidateDetectionPanelRefresh();
+            setDetectionStatus('Error', {
+                error: error?.message || String(error)
+            });
             showToast(t('error_prefix', [error?.message || String(error)]));
         }
     });

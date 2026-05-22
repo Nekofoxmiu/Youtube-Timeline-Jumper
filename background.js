@@ -128,6 +128,7 @@ function normalizeDetectionStatus(status) {
   const key = String(status || '').trim().toLowerCase();
   if (key === 'listening') return 'Listening';
   if (key === 'detecting') return 'Detecting';
+  if (key === 'postprocessing' || key === 'post-processing' || key === 'post processing') return 'PostProcessing';
   if (key === 'stopped') return 'Stopped';
   if (key === 'error') return 'Error';
   return 'Idle';
@@ -176,6 +177,64 @@ function hasRunningDetectionSessions() {
   return Array.from(detectionSessions.values()).some(session => session.isRunning);
 }
 
+function getRunningDetectionSessions() {
+  return Array.from(detectionSessions.values())
+    .filter(session => session && session.isRunning);
+}
+
+function summarizeDetectionSession(session) {
+  if (!session) return null;
+  return {
+    tabId: session.tabId,
+    videoId: session.videoId || null,
+    status: session.status || 'Idle',
+    isRunning: Boolean(session.isRunning),
+    detectorMode: session.detectorMode || DEFAULT_DETECTOR_MODE,
+    detectorVersion: session.detectorVersion || getDefaultDetectorVersion(session.detectorMode),
+    updatedAt: session.updatedAt || null,
+  };
+}
+
+function resolveRunningStopTarget(preferredTabId) {
+  const preferredSession = typeof preferredTabId === 'number'
+    ? detectionSessions.get(preferredTabId)
+    : null;
+  const runningSessions = getRunningDetectionSessions();
+  const runningTabs = runningSessions.map(summarizeDetectionSession);
+
+  if (preferredSession && preferredSession.isRunning) {
+    return {
+      tabId: preferredTabId,
+      retargeted: false,
+      runningTabs,
+    };
+  }
+
+  if (typeof preferredTabId === 'number') {
+    return {
+      tabId: preferredTabId,
+      retargeted: false,
+      noRunning: true,
+      runningTabs,
+    };
+  }
+
+  if (runningSessions.length === 1) {
+    return {
+      tabId: runningSessions[0].tabId,
+      retargeted: true,
+      runningTabs,
+    };
+  }
+
+  return {
+    tabId: null,
+    retargeted: false,
+    ambiguous: runningSessions.length > 1,
+    runningTabs,
+  };
+}
+
 // 安全傳訊：避免未注入 content.js 或分頁不存在造成噪訊
 async function safeSendTabMessage(tabId, message) {
   if (typeof tabId !== 'number') return { ok: false, error: 'Invalid tabId' };
@@ -196,7 +255,7 @@ async function notifySongDetectionStatus(tabId, status, extra = {}) {
   const hasDebugTrace = Object.prototype.hasOwnProperty.call(extra, 'debugTrace');
   const session = updateDetectionSession(tabId, {
     status: normalizedStatus,
-    isRunning: normalizedStatus === 'Listening' || normalizedStatus === 'Detecting',
+    isRunning: normalizedStatus === 'Listening' || normalizedStatus === 'Detecting' || normalizedStatus === 'PostProcessing',
     videoId: extra.videoId ?? existingSession.videoId ?? null,
     detectorMode,
     detectorVersion: extra.detectorVersion || existingSession.detectorVersion || getDefaultDetectorVersion(detectorMode),
@@ -224,7 +283,7 @@ async function notifySongDetectionStatus(tabId, status, extra = {}) {
     minSegmentDurationSec: session.minSegmentDurationSec,
   });
 
-  if (!session.isRunning) {
+  if (!session.isRunning && !extra.skipCloseOffscreen) {
     await closeOffscreenDocumentIfIdle();
   }
   return session;
@@ -263,17 +322,70 @@ function comparePlaylistItems(a, b) {
   return aTitle.localeCompare(bTitle);
 }
 
-function buildAutoSongItem(segment, detectorVersion, provisional = false, index = 0, source = 'tabCapture') {
+function buildStableAutoSongId(provisional, index) {
+  return `ytj-auto-song-${provisional ? 'provisional' : 'final'}-${index}`;
+}
+
+function isDefaultAutoSongTitle(title) {
+  const text = String(title || '').trim();
+  return text === ''
+    || text === 'Auto Song'
+    || text === 'Auto Song (Provisional)';
+}
+
+function segmentOverlapSec(left, right) {
+  return Math.max(0, Math.min(left.endSec, right.endSec) - Math.max(left.startSec, right.startSec));
+}
+
+function findExistingAutoSongItem(existingAutoItems, segment, provisional, stableId, usedIds) {
+  const exact = existingAutoItems.find(item => item.id === stableId && !usedIds.has(item.id));
+  if (exact) {
+    usedIds.add(exact.id);
+    return exact;
+  }
+
+  function findBestCandidate(requireSameProvisional) {
+    return existingAutoItems
+      .filter(item => !usedIds.has(item.id) && (!requireSameProvisional || Boolean(item.provisional) === Boolean(provisional)))
+      .map(item => {
+        const overlap = segmentOverlapSec(segment, item);
+        const segmentDuration = Math.max(1, segment.endSec - segment.startSec);
+        const itemDuration = Math.max(1, item.endSec - item.startSec);
+        const overlapRatio = overlap / Math.min(segmentDuration, itemDuration);
+        const edgeDistance = Math.abs(segment.startSec - item.startSec) + Math.abs(segment.endSec - item.endSec);
+        return { item, overlap, overlapRatio, edgeDistance };
+      })
+      .filter(candidate => candidate.overlapRatio >= 0.55 || candidate.edgeDistance <= 10)
+      .sort((a, b) => (
+        b.overlapRatio - a.overlapRatio
+        || b.overlap - a.overlap
+        || a.edgeDistance - b.edgeDistance
+      ))[0]?.item || null;
+  }
+
+  const match = findBestCandidate(true) || findBestCandidate(false);
+  if (match) usedIds.add(match.id);
+  return match;
+}
+
+function buildAutoSongItem(segment, detectorVersion, provisional = false, index = 0, source = 'tabCapture', existingItem = null) {
   const normalized = normalizeSegment(segment);
+  const fallbackTitle = provisional ? 'Auto Song (Provisional)' : 'Auto Song';
+  const stableId = buildStableAutoSongId(provisional, index);
+  const title = existingItem && !isDefaultAutoSongTitle(existingItem.title)
+    ? existingItem.title
+    : fallbackTitle;
   return serializePlaylistItem(normalizePlaylistItem({
+    id: stableId,
     startSec: normalized.startSec,
     endSec: Math.max(normalized.startSec + 1, normalized.endSec),
-    title: provisional ? 'Auto Song (Provisional)' : 'Auto Song',
+    title,
     type: AUTO_SONG_TYPE,
     confidence: normalized.confidence,
     provisional: Boolean(provisional),
     detectorVersion: detectorVersion || DEFAULT_DETECTOR_VERSION,
     source,
+    sourceSegmentId: stableId,
   }, index));
 }
 
@@ -309,12 +421,22 @@ async function persistSongSegmentsToStorage(payload) {
   const existingMeta = store[metaKey] || {};
   const normalizedExisting = normalizePlaylist(existingItems, existingMeta).items;
   const manualItems = serializePlaylist(normalizedExisting.filter(item => item.type !== AUTO_SONG_TYPE));
+  const existingAutoItems = normalizedExisting.filter(item => item.type === AUTO_SONG_TYPE);
+  const usedAutoIds = new Set();
 
   const normalizedFinalSegments = (Array.isArray(finalSegments) ? finalSegments : []).map(normalizeSegment);
   const normalizedProvisionalSegments = (Array.isArray(provisionalSegments) ? provisionalSegments : []).map(normalizeSegment);
 
-  const autoFinalItems = normalizedFinalSegments.map((segment, index) => buildAutoSongItem(segment, detectorVersion, false, index, source));
-  const autoProvisionalItems = normalizedProvisionalSegments.map((segment, index) => buildAutoSongItem(segment, detectorVersion, true, index, source));
+  const autoFinalItems = normalizedFinalSegments.map((segment, index) => {
+    const stableId = buildStableAutoSongId(false, index);
+    const existingAuto = findExistingAutoSongItem(existingAutoItems, segment, false, stableId, usedAutoIds);
+    return buildAutoSongItem(segment, detectorVersion, false, index, source, existingAuto);
+  });
+  const autoProvisionalItems = normalizedProvisionalSegments.map((segment, index) => {
+    const stableId = buildStableAutoSongId(true, index);
+    const existingAuto = findExistingAutoSongItem(existingAutoItems, segment, true, stableId, usedAutoIds);
+    return buildAutoSongItem(segment, detectorVersion, true, index, source, existingAuto);
+  });
   const combinedItems = [...manualItems, ...autoFinalItems, ...autoProvisionalItems].sort(comparePlaylistItems);
 
   const nextMetaComparable = {
@@ -716,6 +838,7 @@ async function startSongDetectionForTab(tabId, videoIdHint = null, detectorModeH
     warning: session.warning,
     runtimeInfo: session.runtimeInfo,
     debugTrace: session.debugTrace,
+    runningSessionCount: getRunningDetectionSessions().length,
   };
 }
 
@@ -739,20 +862,75 @@ function formatSongDetectionStartError(error) {
 }
 
 async function stopSongDetectionForTab(tabId, options = {}) {
-  const { notifyTab = true, removeSession = false } = options;
+  const { notifyTab = true, removeSession = false, skipCloseOffscreen = false } = options;
 
   if (typeof tabId !== 'number') {
     return { success: false, message: 'Invalid tabId' };
   }
 
+  const existingSession = detectionSessions.get(tabId) || null;
   let offscreenResponse = null;
+  let offscreenError = null;
   try {
     offscreenResponse = await chrome.runtime.sendMessage({
       action: 'offscreenStopSongDetection',
       tabId,
     });
   } catch (error) {
-    // ignore; offscreen may already be closed
+    // Offscreen may already be closed. Treat it as a stale background session
+    // recovery path instead of forcing users to click Stop twice.
+    offscreenError = error;
+  }
+
+  if (offscreenResponse && offscreenResponse.success === false) {
+    return {
+      success: false,
+      tabId,
+      status: existingSession?.status || 'Idle',
+      message: offscreenResponse.message || 'Offscreen stop failed.',
+      offscreenResponse,
+    };
+  }
+
+  if (offscreenResponse && offscreenResponse.stopping) {
+    updateDetectionSession(tabId, {
+      isRunning: true,
+      status: 'PostProcessing',
+      error: null,
+      warning: null,
+      debugTrace: offscreenResponse.debugTrace || existingSession?.debugTrace || null,
+    });
+    if (notifyTab) {
+      await notifySongDetectionStatus(tabId, 'PostProcessing', {
+        debugTrace: offscreenResponse.debugTrace || existingSession?.debugTrace || null,
+      });
+    }
+    return {
+      success: true,
+      tabId,
+      status: 'PostProcessing',
+      stopping: true,
+      offscreenResponse,
+    };
+  }
+
+  const offscreenStopped = Boolean(offscreenResponse && offscreenResponse.stopped);
+  const wasRunning = Boolean(existingSession && existingSession.isRunning);
+
+  if (!wasRunning && !offscreenStopped && !offscreenError) {
+    if (removeSession) {
+      detectionSessions.delete(tabId);
+    }
+    if (!skipCloseOffscreen) {
+      await closeOffscreenDocumentIfIdle();
+    }
+    return {
+      success: true,
+      tabId,
+      status: 'Stopped',
+      alreadyStopped: true,
+      offscreenResponse,
+    };
   }
 
   updateDetectionSession(tabId, {
@@ -774,8 +952,16 @@ async function stopSongDetectionForTab(tabId, options = {}) {
     detectionSessions.delete(tabId);
   }
 
-  await closeOffscreenDocumentIfIdle();
-  return { success: true, tabId, status: 'Stopped', offscreenResponse };
+  if (!skipCloseOffscreen) {
+    await closeOffscreenDocumentIfIdle();
+  }
+  return {
+    success: true,
+    tabId,
+    status: 'Stopped',
+    offscreenResponse,
+    recoveredStaleSession: Boolean(offscreenError && wasRunning),
+  };
 }
 
 async function handleSongSegmentsUpdated(request) {
@@ -791,6 +977,13 @@ async function handleSongSegmentsUpdated(request) {
   const detectorVersion = request.detectorVersion || session.detectorVersion || getDefaultDetectorVersion(detectorMode);
   const finalSegments = Array.isArray(request.finalSegments) ? request.finalSegments : [];
   const provisionalSegments = Array.isArray(request.provisionalSegments) ? request.provisionalSegments : [];
+  const segmentFilterRuntimeInfo = request.segmentFilterRuntimeInfo || null;
+  const nextRuntimeInfo = segmentFilterRuntimeInfo
+    ? {
+      ...(session.runtimeInfo || {}),
+      segmentFilterRuntimeInfo,
+    }
+    : session.runtimeInfo || null;
 
   const signature = buildDetectionSignature(
     videoId,
@@ -809,12 +1002,13 @@ async function handleSongSegmentsUpdated(request) {
   updateDetectionSession(tabId, {
     videoId,
     status,
-    isRunning: status === 'Listening' || status === 'Detecting',
+    isRunning: status === 'Listening' || status === 'Detecting' || status === 'PostProcessing',
     detectorMode,
     detectorVersion,
     lastSegmentSignature: signature,
     error: null,
     warning: request.warning || session.warning || null,
+    runtimeInfo: nextRuntimeInfo,
     minSegmentDurationSec: normalizeMinSegmentDurationSec(
       request.minSegmentDurationSec,
       session.minSegmentDurationSec
@@ -841,6 +1035,8 @@ async function handleSongSegmentsUpdated(request) {
       detectorMode,
       detectorVersion,
       warning: request.warning || session.warning || null,
+      runtimeInfo: nextRuntimeInfo,
+      skipCloseOffscreen: status === 'Stopped',
     });
   }
 
@@ -1065,6 +1261,7 @@ const BACKGROUND_ACTIONS = new Set([
   'stopSongDetectionForActiveTab',
   'prepareSongDetectionOffscreen',
   'getSongDetectionStatus',
+  'getRunningSongDetectionTabs',
   'getSongDetectionConfig',
   'setSongDetectionMode',
   'setSongDetectionConfig',
@@ -1174,13 +1371,29 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       }
 
       if (request.action === 'stopSongDetectionForActiveTab') {
-        const tabId = await resolveTargetTabId(sender, request);
+        const requestedTabId = await resolveTargetTabId(sender, request);
+        const stopTarget = resolveRunningStopTarget(requestedTabId);
+        if (stopTarget.ambiguous) {
+          sendResponse({
+            success: false,
+            message: 'Multiple song detection sessions are running. Please stop from the target YouTube tab.',
+            runningTabs: stopTarget.runningTabs,
+          });
+          return;
+        }
+        const tabId = stopTarget.tabId;
         if (typeof tabId !== 'number') {
           sendResponse({ success: false, message: 'No active tab available for stop.' });
           return;
         }
         const result = await stopSongDetectionForTab(tabId, { notifyTab: true, removeSession: false });
-        sendResponse(result);
+        sendResponse({
+          ...result,
+          requestedTabId,
+          retargeted: Boolean(stopTarget.retargeted),
+          runningTabs: stopTarget.runningTabs,
+          alreadyStopped: Boolean(stopTarget.noRunning || result.alreadyStopped),
+        });
         return;
       }
 
@@ -1220,6 +1433,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           runtimeInfo: session.runtimeInfo,
           debugTrace: session.debugTrace || null,
           minSegmentDurationSec: session.minSegmentDurationSec,
+        });
+        return;
+      }
+
+      if (request.action === 'getRunningSongDetectionTabs') {
+        sendResponse({
+          success: true,
+          tabs: getRunningDetectionSessions().map(summarizeDetectionSession),
         });
         return;
       }

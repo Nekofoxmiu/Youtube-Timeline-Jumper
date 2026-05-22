@@ -168,6 +168,10 @@ $packagePaths = @(
     "models/fireredvad/aed/cmvn.json",
     "models/fireredvad/aed/firered_song_head.meta.json",
     "models/fireredvad/aed/firered_song_head.onnx",
+    "models/fireredvad/aed/segment_filter.meta.json",
+    "models/fireredvad/aed/segment_filter.onnx",
+    "models/fireredvad/aed/edge_trim_advisor.meta.json",
+    "models/fireredvad/aed/edge_trim_advisor.onnx",
     "models/fireredvad/aed/model.meta.json",
     "models/fireredvad/aed/model.onnx",
     "LICENSE"

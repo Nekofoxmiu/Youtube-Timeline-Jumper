@@ -86,6 +86,8 @@
     let playlistTimeManager;
     let stateManager;
     let playlistController;
+    let playlistRefreshTimer = null;
+    let playlistRefreshPromise = null;
 
     // 常數（選擇器等）
     const sidebarQuery              = '#related.style-scope.ytd-watch-flexy';
@@ -168,6 +170,9 @@
         }
 
         if (request.action === 'songDetectionStatusChanged') {
+            if (playlistController) {
+                playlistController.setDetectionStatus(request.status);
+            }
             sendResponse({ success: true });
             return false;
         }
@@ -181,7 +186,10 @@
                     if (request.videoId && currentVideoId && request.videoId !== currentVideoId) {
                         return;
                     }
-                    await refreshPlaylistFromStorage();
+                    if (playlistController) {
+                        playlistController.setDetectionStatus(request.status);
+                    }
+                    schedulePlaylistRefreshFromStorage();
                 } catch (error) {
                     console.debug('songSegmentsUpdated refresh failed:', error);
                 }
@@ -351,6 +359,7 @@
         });
         playlistController.bind();
         await playlistController.loadFromStorage();
+        await syncSongDetectionStatus();
 
         // 將 import/export/編輯 按鈕加入到 importexportContainer
         importexportContainer.appendChild(importPlaylistButton);
@@ -423,6 +432,34 @@
         }
     }
 
+    function schedulePlaylistRefreshFromStorage(delayMs = 160) {
+        if (playlistRefreshTimer) clearTimeout(playlistRefreshTimer);
+        playlistRefreshTimer = setTimeout(() => {
+            playlistRefreshTimer = null;
+            const refreshRun = (playlistRefreshPromise || Promise.resolve())
+                .then(() => refreshPlaylistFromStorage())
+                .catch((error) => console.debug('Playlist refresh failed:', error));
+            const nextRefreshPromise = refreshRun.finally(() => {
+                if (playlistRefreshPromise === nextRefreshPromise) {
+                    playlistRefreshPromise = null;
+                }
+            });
+            playlistRefreshPromise = nextRefreshPromise;
+        }, delayMs);
+    }
+
+    async function syncSongDetectionStatus() {
+        if (!playlistController) return;
+        try {
+            const result = await chrome.runtime.sendMessage({ action: 'getSongDetectionStatus' });
+            if (result && result.success) {
+                playlistController.setDetectionStatus(result.status);
+            }
+        } catch (error) {
+            // Background may be unavailable during navigation; a later update will resync.
+        }
+    }
+
     // === [ 七、主要事件或 DOM 操作函式 ] ============================================
 
     /**
@@ -453,6 +490,10 @@
      * 刪除整個插件產生的 DOM（當切換影片或重新載入時可能需要用到）
      */
     async function deleteAppElement() {
+        if (playlistRefreshTimer) {
+            clearTimeout(playlistRefreshTimer);
+            playlistRefreshTimer = null;
+        }
         if (playlistController) {
             playlistController.destroy();
             playlistController = null;

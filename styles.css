@@ -744,3 +744,23 @@ body.light-theme .ytj-popup {
     border-left-style: dashed;
     opacity: 0.86;
 }
+
+.ytj-auto-song-locked .ytj-playlist-item-text-start,
+.ytj-auto-song-locked .ytj-playlist-item-text-end {
+    cursor: default;
+    opacity: 0.74;
+}
+
+.ytj-auto-song-locked .ytj-drag-handle,
+.ytj-auto-song-locked .ytj-set-start-time,
+.ytj-auto-song-locked .ytj-set-end-time,
+.ytj-auto-song-locked .ytj-delete-item {
+    cursor: not-allowed;
+    opacity: 0.28;
+}
+
+.ytj-auto-song-locked .ytj-set-start-time:hover,
+.ytj-auto-song-locked .ytj-set-end-time:hover,
+.ytj-auto-song-locked .ytj-delete-item:hover {
+    background-color: transparent;
+}
