@@ -29,6 +29,7 @@ const DEFAULT_MIN_SEGMENT_DURATION_SEC = 90;
 const LIVE_SEGMENT_FILTER_KEEP_THRESHOLD = 0.35;
 const LIVE_FINAL_SEGMENT_FILTER_KEEP_THRESHOLD = 0.9;
 const DEFAULT_LIVE_START_EDGE_TRIM_ENABLED = true;
+const DEFAULT_LIVE_START_EDGE_TRIM_MODE = 'bidirectional';
 const DEFAULT_LIVE_START_EDGE_TRIM_SCALE = 0.75;
 const DEFAULT_LIVE_START_EDGE_TRIM_MIN_ABS_SEC = 2;
 const LIVE_LARGE_END_TRIM_THRESHOLD_SEC = 30;
@@ -810,7 +811,7 @@ async function applyFinalizer(runtimes, segments, frames, smoothing, {
       : (Number.isFinite(Number(firstFrame?.timeSec)) ? Number(firstFrame.timeSec) : 0),
     endSec: finalCutoffSec,
     allowStartTrim: liveStartEdgeTrimEnabled,
-    startTrimMode: 'extend-only',
+    startTrimMode: DEFAULT_LIVE_START_EDGE_TRIM_MODE,
     startTrimScale: liveStartEdgeTrimScale,
     startTrimMinAbsSec: liveStartEdgeTrimMinAbsSec,
     startTrimEvidenceFrames: frames,

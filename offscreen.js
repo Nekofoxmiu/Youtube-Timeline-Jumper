@@ -48,6 +48,7 @@ const LIVE_SEGMENT_FILTER_KEEP_THRESHOLD = 0.35;
 const LIVE_FINAL_SEGMENT_FILTER_KEEP_THRESHOLD = 0.9;
 const LIVE_EDGE_TRIM_DURING_STREAM = false;
 const LIVE_START_EDGE_TRIM_ENABLED = true;
+const LIVE_START_EDGE_TRIM_MODE = 'bidirectional';
 const LIVE_START_EDGE_TRIM_SCALE = 0.75;
 const LIVE_START_EDGE_TRIM_MIN_ABS_SEC = 2;
 const LIVE_LARGE_END_TRIM_THRESHOLD_SEC = 30;
@@ -821,7 +822,7 @@ async function applyLiveSegmentFilterToFinalSegments(
         : predictionOptions.startSec,
       endSec: finalEndBoundSec,
       allowStartTrim: LIVE_START_EDGE_TRIM_ENABLED,
-      startTrimMode: 'extend-only',
+      startTrimMode: LIVE_START_EDGE_TRIM_MODE,
       startTrimScale: LIVE_START_EDGE_TRIM_SCALE,
       startTrimMinAbsSec: LIVE_START_EDGE_TRIM_MIN_ABS_SEC,
       startTrimEvidenceFrames: frames,
