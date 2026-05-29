@@ -7,6 +7,112 @@
  * 整個 content script 的邏輯都寫在這個區塊裡。
  */
 (async () => {
+    const STUDIO_HIDE_LIVE_CHAT_PARAM = 'ytj_hide_live_chat';
+    const LIVE_CHAT_HIDE_RETRY_MS = 500;
+    const LIVE_CHAT_HIDE_MAX_ATTEMPTS = 24;
+    const LIVE_CHAT_HIDE_REQUEST_TTL_MS = 30000;
+    let studioHideLiveChatRequestUntil = 0;
+
+    function shouldHideLiveChatForStudioPlayback() {
+        try {
+            if (Date.now() <= studioHideLiveChatRequestUntil) return true;
+            return new URL(window.location.href).searchParams.get(STUDIO_HIDE_LIVE_CHAT_PARAM) === '1';
+        } catch (error) {
+            return Date.now() <= studioHideLiveChatRequestUntil;
+        }
+    }
+
+    function requestStudioLiveChatCollapse() {
+        studioHideLiveChatRequestUntil = Math.max(studioHideLiveChatRequestUntil, Date.now() + LIVE_CHAT_HIDE_REQUEST_TTL_MS);
+        scheduleStudioLiveChatCollapse();
+    }
+
+    function collapseLiveChatPageData(conversationBar) {
+        const liveChatRenderer = conversationBar?.liveChatRenderer;
+        if (!liveChatRenderer) return false;
+        const expandedByDefault = liveChatRenderer.initialDisplayState === 'LIVE_CHAT_DISPLAY_STATE_EXPANDED';
+        liveChatRenderer.initialDisplayState = 'LIVE_CHAT_DISPLAY_STATE_COLLAPSED';
+        const toggleButton = liveChatRenderer.showHideButton?.toggleButtonRenderer;
+        if (toggleButton) {
+            toggleButton.isToggled = false;
+            if (expandedByDefault && toggleButton.defaultText && toggleButton.toggledText) {
+                [toggleButton.defaultText, toggleButton.toggledText] = [toggleButton.toggledText, toggleButton.defaultText];
+            }
+        }
+        return true;
+    }
+
+    function findLiveChatHideButton(chatElement) {
+        if (!chatElement) return null;
+        const candidates = [];
+        const collectCandidates = (root) => {
+            if (!root || typeof root.querySelectorAll !== 'function') return;
+            candidates.push(...root.querySelectorAll('button, tp-yt-paper-button, yt-button-shape button'));
+            root.querySelectorAll('*').forEach((element) => {
+                if (element.shadowRoot) collectCandidates(element.shadowRoot);
+            });
+        };
+        collectCandidates(chatElement);
+        return candidates.find((button) => {
+            const text = [
+                button.getAttribute('aria-label'),
+                button.getAttribute('title'),
+                button.textContent
+            ].filter(Boolean).join(' ').toLowerCase();
+            return text.includes('hide chat')
+                || text.includes('隱藏聊天室')
+                || text.includes('隱藏即時')
+                || text.includes('非表示')
+                || text.includes('チャットを非表示');
+        }) || null;
+    }
+
+    function collapseLiveChatElement() {
+        const chat = document.getElementById('chat') || document.querySelector('ytd-live-chat-frame');
+        if (!chat) return false;
+
+        const alreadyCollapsed = chat.collapsed === true || chat.hasAttribute('collapsed');
+        if (!alreadyCollapsed) {
+            const hideButton = findLiveChatHideButton(chat);
+            if (hideButton && typeof hideButton.click === 'function') {
+                hideButton.click();
+            }
+        }
+
+        try {
+            chat.collapsed = true;
+        } catch (error) {
+            // Some YouTube custom element versions expose collapsed as read-only.
+        }
+        chat.setAttribute('collapsed', '');
+        return true;
+    }
+
+    function scheduleStudioLiveChatCollapse() {
+        if (!shouldHideLiveChatForStudioPlayback()) return;
+        let attempts = 0;
+        const run = () => {
+            if (!shouldHideLiveChatForStudioPlayback()) return;
+            const collapsed = collapseLiveChatElement();
+            attempts += 1;
+            if (!collapsed && attempts < LIVE_CHAT_HIDE_MAX_ATTEMPTS) {
+                setTimeout(run, LIVE_CHAT_HIDE_RETRY_MS);
+            }
+        };
+        run();
+    }
+
+    document.addEventListener('yt-page-data-fetched', (event) => {
+        if (!shouldHideLiveChatForStudioPlayback()) return;
+        const conversationBar = event.detail?.pageData?.response?.contents?.twoColumnWatchNextResults?.conversationBar;
+        collapseLiveChatPageData(conversationBar);
+        scheduleStudioLiveChatCollapse();
+    }, true);
+    document.addEventListener('yt-navigate-finish', scheduleStudioLiveChatCollapse, true);
+    if (shouldHideLiveChatForStudioPlayback()) {
+        requestStudioLiveChatCollapse();
+    }
+
     // === [ 一、動態引入各種模組 ] =====================================================
     let dataClassModule;
     let playlistToolModule;
@@ -119,8 +225,12 @@
                 currentTime: video ? Number(video.currentTime) : null,
                 duration: video && Number.isFinite(Number(video.duration)) ? Number(video.duration) : null,
                 paused: video ? Boolean(video.paused) : null,
+                ended: video ? Boolean(video.ended) : null,
                 playbackRate: video ? Number(video.playbackRate) : null,
-                muted: video ? Boolean(video.muted) : null
+                muted: video ? Boolean(video.muted) : null,
+                readyState: video ? Number(video.readyState) : null,
+                networkState: video ? Number(video.networkState) : null,
+                seeking: video ? Boolean(video.seeking) : null
             });
             return false;
         }
@@ -161,11 +271,20 @@
                     paused: Boolean(video.paused),
                     ended: Boolean(video.ended),
                     playbackRate: Number(video.playbackRate),
-                    muted: Boolean(video.muted)
+                    muted: Boolean(video.muted),
+                    readyState: Number(video.readyState),
+                    networkState: Number(video.networkState),
+                    seeking: Boolean(video.seeking)
                 });
             } catch (error) {
                 sendResponse({ success: false, message: error?.message || String(error) });
             }
+            return false;
+        }
+
+        if (request.action === 'workbenchHideLiveChat') {
+            requestStudioLiveChatCollapse();
+            sendResponse({ success: true });
             return false;
         }
 

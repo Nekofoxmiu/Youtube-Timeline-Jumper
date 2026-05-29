@@ -56,6 +56,66 @@ function labelsFromSegments(times, segments) {
   return times.map((time) => segments.some((segment) => time >= segment.startSec && time < segment.endSec) ? 1 : 0);
 }
 
+function normalizeIgnoreRange(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') {
+    const startSec = toSeconds(raw.startSec ?? raw.start_sec ?? raw.start ?? raw.from);
+    const endSec = toSeconds(raw.endSec ?? raw.end_sec ?? raw.end ?? raw.to);
+    if (endSec <= startSec) return null;
+    return {
+      startSec,
+      endSec,
+      reason: String(raw.reason || raw.title || raw.label || '').trim(),
+    };
+  }
+  const text = String(raw || '').trim();
+  if (!text) return null;
+  let parts = null;
+  for (const separator of ['~', '-', ',']) {
+    if (text.includes(separator)) {
+      parts = text.split(separator, 2);
+      break;
+    }
+  }
+  if (!parts && text.split(':').length === 2) parts = text.split(':', 2);
+  if (!parts || parts.length < 2) return null;
+  const startSec = toSeconds(parts[0]);
+  const endSec = toSeconds(parts[1]);
+  return endSec > startSec ? { startSec, endSec, reason: '' } : null;
+}
+
+function collectIgnoreRanges(args, framesPayload) {
+  const params = framesPayload?.params && typeof framesPayload.params === 'object' ? framesPayload.params : {};
+  const rawGroups = [
+    args['ignore-ranges'] ? String(args['ignore-ranges']).split(',') : null,
+    framesPayload.ignoreRanges,
+    framesPayload.ignore,
+    framesPayload.evaluationIgnoreRanges,
+    params.ignoreRanges,
+    params.ignore,
+    params.evaluationIgnoreRanges,
+  ];
+  const output = [];
+  const seen = new Set();
+  for (const rawGroup of rawGroups) {
+    if (!rawGroup) continue;
+    const items = Array.isArray(rawGroup) ? rawGroup : [rawGroup];
+    for (const item of items) {
+      const normalized = normalizeIgnoreRange(item);
+      if (!normalized) continue;
+      const key = `${normalized.startSec.toFixed(3)}:${normalized.endSec.toFixed(3)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      output.push(normalized);
+    }
+  }
+  return output.sort((a, b) => a.startSec - b.startSec);
+}
+
+function isIgnoredTime(timeSec, ignoreRanges) {
+  return ignoreRanges.some((range) => timeSec >= range.startSec && timeSec < range.endSec);
+}
+
 function metrics(pred, actual) {
   let tp = 0;
   let fp = 0;
@@ -100,12 +160,13 @@ function segmentMatches(predicted, manual) {
 
 const args = parseArgs(process.argv);
 if (!args.frames || !args.manual || !args.out) {
-  throw new Error('Usage: node tools/run_global_smoothing.mjs --frames <frames.json> --manual <manual.txt> --out <summary.json> [--split-medley] [--segment-filter-predictions <predictions.json>]');
+  throw new Error('Usage: node tools/run_global_smoothing.mjs --frames <frames.json> --manual <manual.txt> --out <summary.json> [--smoothing-profile offline-final|live-pcm30|live-realtime-aed60] [--ignore-ranges start:end,...] [--split-medley] [--segment-filter-predictions <predictions.json>]');
 }
 
 const framesPayload = JSON.parse(await readFile(args.frames, 'utf8'));
 const frames = Array.isArray(framesPayload.frames) ? framesPayload.frames : [];
 const manual = await loadManual(args.manual);
+const ignoreRanges = collectIgnoreRanges(args, framesPayload);
 const endSec = Number(framesPayload.durationSec) || frames.at(-1)?.timeSec || 0;
 const startSec = frames[0]?.timeSec ? Math.max(0, Number(frames[0].timeSec) - Number(framesPayload.hopSec || 0.5)) : 0;
 let segmentFilterPredictions = null;
@@ -117,6 +178,7 @@ if (args['segment-filter-predictions']) {
 }
 const smoothing = smoothFireRedAnalyses(frames, endSec, {
   startSec,
+  smoothingProfile: args['smoothing-profile'] || 'offline-final',
   segmentFilterEnabled: Boolean(segmentFilterPredictions),
   segmentFilterPredictions,
 });
@@ -134,15 +196,22 @@ const rawModelLabels = frames.map((frame) => {
   const threshold = Number(frame.temporalHeadThreshold) || Number(framesPayload.temporalHeadThreshold) || 0.75;
   return Number(frame.temporalHeadProbability ?? frame.songProbability) >= threshold ? 1 : 0;
 });
+const evaluationMask = times.map((timeSec) => !isIgnoredTime(timeSec, ignoreRanges));
+const filterByEvaluationMask = (values) => values.filter((_, index) => evaluationMask[index]);
+const ignoredEvaluationFrameCount = evaluationMask.reduce((total, keep) => total + (keep ? 0 : 1), 0);
 
 const summary = {
   frames: args.frames,
   manual: args.manual,
+  ignoreRanges,
   method: smoothing.method,
   smoothingVersion: smoothing.smoothingVersion,
+  smoothingProfile: smoothing.smoothingProfile,
   endSec,
-  metrics: metrics(predictedLabels, manualLabels),
-  rawModelMetrics: metrics(rawModelLabels, manualLabels),
+  evaluationIgnoredFrameCount: ignoredEvaluationFrameCount,
+  evaluationIgnoredSec: ignoredEvaluationFrameCount * (Number(framesPayload.hopSec) || 0.5),
+  metrics: metrics(filterByEvaluationMask(predictedLabels), filterByEvaluationMask(manualLabels)),
+  rawModelMetrics: metrics(filterByEvaluationMask(rawModelLabels), filterByEvaluationMask(manualLabels)),
   segments: finalSegments,
   trackerSegments: smoothing.trackerSegments,
   modelRunSegments: smoothing.modelRunSegments,

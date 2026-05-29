@@ -19,6 +19,11 @@ const DETECTOR_MODES = {
   HEURISTIC: 'heuristic',
 };
 const DEFAULT_DETECTOR_MODE = DETECTOR_MODES.FIRERED_AED;
+const LIVE_ANALYSIS_METHODS = {
+  AED_CACHE_60S: 'aed-cache-60s',
+  PCM_ROLLOVER_30MIN: 'pcm-rollover-30min',
+};
+const DEFAULT_LIVE_ANALYSIS_METHOD = LIVE_ANALYSIS_METHODS.AED_CACHE_60S;
 const DETECTOR_VERSION_BY_MODE = {
   [DETECTOR_MODES.FIRERED_AED]: 'firered-aed-onnx-v1',
   [DETECTOR_MODES.HEURISTIC]: 'heuristic-v1',
@@ -34,6 +39,13 @@ function normalizeMinSegmentDurationSec(value, fallback = DEFAULT_MIN_SEGMENT_DU
   const num = Number(value);
   if (!Number.isFinite(num)) return fallback;
   return Math.max(15, Math.min(600, Math.round(num)));
+}
+
+function normalizeLiveAnalysisMethod(value, fallback = DEFAULT_LIVE_ANALYSIS_METHOD) {
+  const key = String(value || '').trim().toLowerCase();
+  if (key === LIVE_ANALYSIS_METHODS.AED_CACHE_60S) return LIVE_ANALYSIS_METHODS.AED_CACHE_60S;
+  if (key === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN) return LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN;
+  return fallback;
 }
 
 // 遷移腳本(migration)表：依目標版執行對應遷移
@@ -154,6 +166,7 @@ function getOrCreateDetectionSession(tabId) {
       status: 'Idle',
       isRunning: false,
       detectorMode: DEFAULT_DETECTOR_MODE,
+      liveAnalysisMethod: DEFAULT_LIVE_ANALYSIS_METHOD,
       detectorVersion: getDefaultDetectorVersion(DEFAULT_DETECTOR_MODE),
       lastSegmentSignature: '',
       error: null,
@@ -190,6 +203,7 @@ function summarizeDetectionSession(session) {
     status: session.status || 'Idle',
     isRunning: Boolean(session.isRunning),
     detectorMode: session.detectorMode || DEFAULT_DETECTOR_MODE,
+    liveAnalysisMethod: session.liveAnalysisMethod || DEFAULT_LIVE_ANALYSIS_METHOD,
     detectorVersion: session.detectorVersion || getDefaultDetectorVersion(session.detectorMode),
     updatedAt: session.updatedAt || null,
   };
@@ -251,6 +265,7 @@ async function notifySongDetectionStatus(tabId, status, extra = {}) {
   const normalizedStatus = normalizeDetectionStatus(status);
   const existingSession = getOrCreateDetectionSession(tabId);
   const detectorMode = normalizeDetectorMode(extra.detectorMode || existingSession.detectorMode || DEFAULT_DETECTOR_MODE);
+  const liveAnalysisMethod = normalizeLiveAnalysisMethod(extra.liveAnalysisMethod, existingSession.liveAnalysisMethod || DEFAULT_LIVE_ANALYSIS_METHOD);
   const hasRuntimeInfo = Object.prototype.hasOwnProperty.call(extra, 'runtimeInfo');
   const hasDebugTrace = Object.prototype.hasOwnProperty.call(extra, 'debugTrace');
   const session = updateDetectionSession(tabId, {
@@ -258,6 +273,7 @@ async function notifySongDetectionStatus(tabId, status, extra = {}) {
     isRunning: normalizedStatus === 'Listening' || normalizedStatus === 'Detecting' || normalizedStatus === 'PostProcessing',
     videoId: extra.videoId ?? existingSession.videoId ?? null,
     detectorMode,
+    liveAnalysisMethod,
     detectorVersion: extra.detectorVersion || existingSession.detectorVersion || getDefaultDetectorVersion(detectorMode),
     error: extra.error || null,
     warning: extra.warning || existingSession.warning || null,
@@ -275,6 +291,7 @@ async function notifySongDetectionStatus(tabId, status, extra = {}) {
     videoId: session.videoId,
     isRunning: session.isRunning,
     detectorMode: session.detectorMode,
+    liveAnalysisMethod: session.liveAnalysisMethod,
     detectorVersion: session.detectorVersion,
     error: session.error,
     warning: session.warning,
@@ -389,6 +406,16 @@ function buildAutoSongItem(segment, detectorVersion, provisional = false, index 
   }, index));
 }
 
+function isOwnedAutoSongItem(item, source = 'tabCapture') {
+  if (!item || item.type !== AUTO_SONG_TYPE) return false;
+  const normalizedSource = String(source || 'tabCapture');
+  const itemSource = String(item.source || '');
+  if (normalizedSource === 'tabCapture') {
+    return itemSource === '' || itemSource === 'tabCapture';
+  }
+  return itemSource === normalizedSource;
+}
+
 function buildDetectionSignature(videoId, finalSegments, provisionalSegments, detectorMode, detectorVersion) {
   return JSON.stringify({
     videoId: videoId || null,
@@ -420,8 +447,10 @@ async function persistSongSegmentsToStorage(payload) {
   const existingItems = Array.isArray(store[itemsKey]) ? store[itemsKey] : [];
   const existingMeta = store[metaKey] || {};
   const normalizedExisting = normalizePlaylist(existingItems, existingMeta).items;
-  const manualItems = serializePlaylist(normalizedExisting.filter(item => item.type !== AUTO_SONG_TYPE));
-  const existingAutoItems = normalizedExisting.filter(item => item.type === AUTO_SONG_TYPE);
+  const preservedItems = serializePlaylist(normalizedExisting.filter(
+    item => item.type !== AUTO_SONG_TYPE || !isOwnedAutoSongItem(item, source)
+  ));
+  const existingAutoItems = normalizedExisting.filter(item => isOwnedAutoSongItem(item, source));
   const usedAutoIds = new Set();
 
   const normalizedFinalSegments = (Array.isArray(finalSegments) ? finalSegments : []).map(normalizeSegment);
@@ -437,7 +466,7 @@ async function persistSongSegmentsToStorage(payload) {
     const existingAuto = findExistingAutoSongItem(existingAutoItems, segment, true, stableId, usedAutoIds);
     return buildAutoSongItem(segment, detectorVersion, true, index, source, existingAuto);
   });
-  const combinedItems = [...manualItems, ...autoFinalItems, ...autoProvisionalItems].sort(comparePlaylistItems);
+  const combinedItems = [...preservedItems, ...autoFinalItems, ...autoProvisionalItems].sort(comparePlaylistItems);
 
   const nextMetaComparable = {
     detectorVersion: detectorVersion || existingMeta.detectorVersion || DEFAULT_DETECTOR_VERSION,
@@ -512,6 +541,14 @@ async function requestCurrentVideoSnapshotFromTab(tabId) {
   return {
     currentTime: Math.max(0, currentTime),
     videoId: response.res.videoId || null,
+    duration: Number.isFinite(Number(response.res.duration)) ? Math.max(0, Number(response.res.duration)) : null,
+    paused: typeof response.res.paused === 'boolean' ? response.res.paused : null,
+    ended: typeof response.res.ended === 'boolean' ? response.res.ended : null,
+    playbackRate: Number.isFinite(Number(response.res.playbackRate)) ? Math.max(0, Number(response.res.playbackRate)) : null,
+    muted: typeof response.res.muted === 'boolean' ? response.res.muted : null,
+    readyState: Number.isFinite(Number(response.res.readyState)) ? Number(response.res.readyState) : null,
+    networkState: Number.isFinite(Number(response.res.networkState)) ? Number(response.res.networkState) : null,
+    seeking: typeof response.res.seeking === 'boolean' ? response.res.seeking : null,
   };
 }
 
@@ -582,8 +619,10 @@ async function getSongDetectionConfig() {
   const stored = await chrome.storage.local.get(DETECTION_CONFIG_KEY);
   const rawConfig = stored[DETECTION_CONFIG_KEY] || {};
   const mode = DEFAULT_DETECTOR_MODE;
+  const liveAnalysisMethod = normalizeLiveAnalysisMethod(rawConfig.liveAnalysisMethod);
   return {
     mode,
+    liveAnalysisMethod,
     minSegmentDurationSec: normalizeMinSegmentDurationSec(rawConfig.minSegmentDurationSec),
     updatedAt: rawConfig.updatedAt || null,
   };
@@ -595,6 +634,10 @@ async function updateSongDetectionConfig(patch = {}) {
   const nextConfig = {
     ...current,
     mode,
+    liveAnalysisMethod: normalizeLiveAnalysisMethod(
+      patch.liveAnalysisMethod,
+      current.liveAnalysisMethod || DEFAULT_LIVE_ANALYSIS_METHOD
+    ),
     minSegmentDurationSec: normalizeMinSegmentDurationSec(
       patch.minSegmentDurationSec,
       current.minSegmentDurationSec
@@ -729,7 +772,7 @@ async function openSongDetectionPermissionPopup(tabId, videoId = null, reason = 
   }
 }
 
-async function startSongDetectionForTab(tabId, videoIdHint = null, detectorModeHint = null) {
+async function startSongDetectionForTab(tabId, videoIdHint = null, detectorModeHint = null, liveAnalysisMethodHint = null) {
   if (typeof tabId !== 'number') {
     throw new Error('Invalid tabId for startSongDetectionForTab');
   }
@@ -742,6 +785,7 @@ async function startSongDetectionForTab(tabId, videoIdHint = null, detectorModeH
 
   const config = await getSongDetectionConfig();
   const detectorMode = DEFAULT_DETECTOR_MODE;
+  const liveAnalysisMethod = normalizeLiveAnalysisMethod(liveAnalysisMethodHint, config.liveAnalysisMethod);
   const minSegmentDurationSec = normalizeMinSegmentDurationSec(config.minSegmentDurationSec);
 
   try {
@@ -787,6 +831,7 @@ async function startSongDetectionForTab(tabId, videoIdHint = null, detectorModeH
     streamId,
     videoId: videoId || null,
     detectorMode,
+    liveAnalysisMethod,
     minSegmentDurationSec,
     debugTrace,
   });
@@ -814,6 +859,7 @@ async function startSongDetectionForTab(tabId, videoIdHint = null, detectorModeH
     warning: response.warning || null,
     runtimeInfo: response.runtimeInfo || null,
     minSegmentDurationSec,
+    liveAnalysisMethod,
     debugTrace: debugTrace.concat(Array.isArray(response.debugTrace) ? response.debugTrace : []),
   });
 
@@ -826,6 +872,7 @@ async function startSongDetectionForTab(tabId, videoIdHint = null, detectorModeH
     warning: session.warning,
     runtimeInfo: session.runtimeInfo,
     minSegmentDurationSec: session.minSegmentDurationSec,
+    liveAnalysisMethod: session.liveAnalysisMethod,
   });
 
   return {
@@ -834,6 +881,7 @@ async function startSongDetectionForTab(tabId, videoIdHint = null, detectorModeH
     videoId: session.videoId,
     status: session.status,
     detectorMode: session.detectorMode,
+    liveAnalysisMethod: session.liveAnalysisMethod,
     detectorVersion: session.detectorVersion,
     warning: session.warning,
     runtimeInfo: session.runtimeInfo,
@@ -974,6 +1022,7 @@ async function handleSongSegmentsUpdated(request) {
   const status = normalizeDetectionStatus(request.status || session.status || 'Listening');
   const videoId = request.videoId || session.videoId || null;
   const detectorMode = normalizeDetectorMode(request.detectorMode || session.detectorMode || DEFAULT_DETECTOR_MODE);
+  const liveAnalysisMethod = normalizeLiveAnalysisMethod(request.liveAnalysisMethod, session.liveAnalysisMethod || DEFAULT_LIVE_ANALYSIS_METHOD);
   const detectorVersion = request.detectorVersion || session.detectorVersion || getDefaultDetectorVersion(detectorMode);
   const finalSegments = Array.isArray(request.finalSegments) ? request.finalSegments : [];
   const provisionalSegments = Array.isArray(request.provisionalSegments) ? request.provisionalSegments : [];
@@ -1004,6 +1053,7 @@ async function handleSongSegmentsUpdated(request) {
     status,
     isRunning: status === 'Listening' || status === 'Detecting' || status === 'PostProcessing',
     detectorMode,
+    liveAnalysisMethod,
     detectorVersion,
     lastSegmentSignature: signature,
     error: null,
@@ -1033,6 +1083,7 @@ async function handleSongSegmentsUpdated(request) {
     await notifySongDetectionStatus(tabId, status, {
       videoId,
       detectorMode,
+      liveAnalysisMethod,
       detectorVersion,
       warning: request.warning || session.warning || null,
       runtimeInfo: nextRuntimeInfo,
@@ -1345,7 +1396,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           const result = await startSongDetectionForTab(
             tabId,
             request.videoId || null,
-            request.detectorMode || null
+            request.detectorMode || null,
+            request.liveAnalysisMethod || null
           );
           sendResponse(result);
         } catch (error) {
@@ -1412,6 +1464,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             isRunning: false,
             videoId: null,
             detectorMode: DEFAULT_DETECTOR_MODE,
+            liveAnalysisMethod: DEFAULT_LIVE_ANALYSIS_METHOD,
             detectorVersion: getDefaultDetectorVersion(DEFAULT_DETECTOR_MODE),
             error: null,
             warning: null,
@@ -1427,6 +1480,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           isRunning: session.isRunning,
           videoId: session.videoId,
           detectorMode: session.detectorMode,
+          liveAnalysisMethod: session.liveAnalysisMethod || DEFAULT_LIVE_ANALYSIS_METHOD,
           detectorVersion: session.detectorVersion,
           error: session.error,
           warning: session.warning,
@@ -1450,6 +1504,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({
           success: true,
           mode: config.mode,
+          liveAnalysisMethod: config.liveAnalysisMethod,
           minSegmentDurationSec: config.minSegmentDurationSec,
           updatedAt: config.updatedAt,
         });
@@ -1461,6 +1516,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({
           success: true,
           mode: config.mode,
+          liveAnalysisMethod: config.liveAnalysisMethod,
           minSegmentDurationSec: config.minSegmentDurationSec,
           updatedAt: config.updatedAt,
         });
@@ -1469,11 +1525,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
       if (request.action === 'setSongDetectionConfig') {
         const config = await updateSongDetectionConfig({
+          liveAnalysisMethod: request.liveAnalysisMethod,
           minSegmentDurationSec: request.minSegmentDurationSec,
         });
         sendResponse({
           success: true,
           mode: config.mode,
+          liveAnalysisMethod: config.liveAnalysisMethod,
           minSegmentDurationSec: config.minSegmentDurationSec,
           updatedAt: config.updatedAt,
         });
@@ -1519,6 +1577,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           tabId,
           currentTime: snapshot.currentTime,
           videoId: snapshot.videoId,
+          duration: snapshot.duration,
+          paused: snapshot.paused,
+          ended: snapshot.ended,
+          playbackRate: snapshot.playbackRate,
+          muted: snapshot.muted,
+          readyState: snapshot.readyState,
+          networkState: snapshot.networkState,
+          seeking: snapshot.seeking,
         });
         return;
       }
@@ -1553,6 +1619,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         const session = await notifySongDetectionStatus(tabId, request.status, {
           videoId: request.videoId ?? null,
           detectorMode: request.detectorMode || DEFAULT_DETECTOR_MODE,
+          liveAnalysisMethod: request.liveAnalysisMethod || DEFAULT_LIVE_ANALYSIS_METHOD,
           detectorVersion: request.detectorVersion || getDefaultDetectorVersion(request.detectorMode),
           error: request.error || null,
           warning: request.warning || null,

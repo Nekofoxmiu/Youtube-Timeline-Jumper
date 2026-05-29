@@ -11,11 +11,17 @@ import { SongSegmentTracker } from './lib/songDetection/segmentTracker.js';
 import { EventSegmentTracker } from './lib/songDetection/eventSegmentTracker.js';
 import { HeuristicSongDetector, HEURISTIC_DETECTOR_VERSION } from './lib/songDetection/heuristicDetector.js';
 import { FireRedAedSongDetector, FIRERED_AED_DETECTOR_VERSION } from './lib/songDetection/fireredAedDetector.js';
+import {
+  summarizeAnalysisFrameDistribution,
+  summarizeRecentAnalysisFrameDistribution,
+} from './lib/songDetection/frameDiagnostics.js';
+import { normalizeAnalysisFrame } from './lib/songDetection/analysisFrame.js';
 import { GLOBAL_SMOOTHING_VERSION, smoothFireRedAnalyses } from './lib/songDetection/globalSmoothing.js';
 import {
   DEFAULT_SEGMENT_FILTER_OPTIONS,
   SEGMENT_FILTER_VERSION,
   applySegmentFilterPredictions,
+  refineLiveSegmentEndsBySpeechReset,
   loadEdgeTrimAdvisorModel,
   loadSegmentFilterModel,
   runSegmentFilterPipeline,
@@ -23,7 +29,11 @@ import {
 
 const HOP_MS = 500;
 const REPORT_INTERVAL_MS = 2000;
+const LIVE_RUNTIME_STATUS_INTERVAL_MS = 3000;
+const LIVE_RUNTIME_FRAME_DISTRIBUTION_WINDOW_SEC = 10 * 60;
+const MAX_PLAYBACK_DIAGNOSTIC_EVENTS = 120;
 const PLAYBACK_SNAPSHOT_TIMEOUT_MS = 700;
+const PLAYBACK_SNAPSHOT_UNAVAILABLE_GRACE_MS = 3000;
 const ENABLE_DEBUG_TRACE = false;
 const MAX_DEBUG_TRACE_FRAMES = 24000;
 const DEFAULT_DETECTOR_MODE = DETECTOR_MODES.FIRERED_AED;
@@ -35,9 +45,16 @@ const LIVE_RESMOOTH_INTERVAL_SEC = 5;
 const LIVE_RESMOOTH_WINDOW_SEC = null;
 const LIVE_SEGMENT_FILTER_ENABLED = true;
 const LIVE_SEGMENT_FILTER_KEEP_THRESHOLD = 0.35;
+const LIVE_FINAL_SEGMENT_FILTER_KEEP_THRESHOLD = 0.9;
 const LIVE_EDGE_TRIM_DURING_STREAM = false;
+const LIVE_START_EDGE_TRIM_ENABLED = false;
+const LIVE_START_EDGE_TRIM_SCALE = 0.5;
+const LIVE_START_EDGE_TRIM_MIN_ABS_SEC = 2;
+const LIVE_LARGE_END_TRIM_THRESHOLD_SEC = 30;
+const LIVE_LARGE_END_TRIM_SCALE = 1.6;
 const LIVE_SEGMENT_FILTER_EXECUTION_PROVIDERS = ['wasm'];
 const LIVE_FILTER_DROP_PROTECTION = Object.freeze({
+  minKeepProbability: 0.86,
   minDurationSec: 90,
   minConfidence: 0.65,
   minTemporalMean: 0.5,
@@ -46,6 +63,13 @@ const LIVE_FILTER_DROP_PROTECTION = Object.freeze({
   minSingingRatioMean: 0.08,
   maxLowSingingHighMusicRatio: 0.65,
 });
+const LIVE_ANALYSIS_METHODS = Object.freeze({
+  AED_CACHE_60S: 'aed-cache-60s',
+  PCM_ROLLOVER_30MIN: 'pcm-rollover-30min',
+});
+const DEFAULT_LIVE_ANALYSIS_METHOD = LIVE_ANALYSIS_METHODS.AED_CACHE_60S;
+const LIVE_AED_CACHE_SEC = 60;
+const LIVE_AED_CACHE_OVERLAP_SEC = 60;
 const LIVE_PCM_ROLLOVER_SEC = 30 * 60;
 const LIVE_PCM_OVERLAP_SEC = 120;
 const MAX_ANALYSIS_CACHE_FRAMES = 12 * 60 * 60 * 2; // 12 hours at 0.5s hop.
@@ -57,6 +81,7 @@ const FIRERED_TRACKER_START_MARGIN = 0.02;
 const FIRERED_TRACKER_HYSTERESIS_GAP = 0.18;
 const PLAYBACK_CLOCK_SEEK_JUMP_SEC = 8;
 const PLAYBACK_CLOCK_CONTINUITY_TOLERANCE_SEC = 4;
+const PLAYBACK_READY_STATE_HAVE_CURRENT_DATA = 2;
 const LIVE_ANALYSIS_TIME_GRID_SEC = HOP_MS / 1000;
 
 const FIRERED_DECISION_RULES = Object.freeze({
@@ -96,6 +121,41 @@ function normalizeMinSegmentDurationSec(value, fallback = DEFAULT_MIN_SEGMENT_DU
   return Math.max(15, Math.min(600, Math.round(num)));
 }
 
+function normalizePlaybackRate(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return 1;
+  return Math.max(0.25, Math.min(4, num));
+}
+
+function normalizeLiveAnalysisMethod(value, fallback = DEFAULT_LIVE_ANALYSIS_METHOD) {
+  const key = String(value || '').trim().toLowerCase();
+  if (key === LIVE_ANALYSIS_METHODS.AED_CACHE_60S) return LIVE_ANALYSIS_METHODS.AED_CACHE_60S;
+  if (key === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN) return LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN;
+  return fallback;
+}
+
+function segmentFilterProfileForLiveAnalysisMethod(method) {
+  return normalizeLiveAnalysisMethod(method) === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN
+    ? 'live-pcm30'
+    : 'live-realtime-aed60';
+}
+
+function resolveLiveFrameBuilderConfig(method) {
+  const liveAnalysisMethod = normalizeLiveAnalysisMethod(method);
+  if (liveAnalysisMethod === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN) {
+    return {
+      liveAnalysisMethod,
+      chunkSec: LIVE_PCM_ROLLOVER_SEC,
+      overlapSec: LIVE_PCM_OVERLAP_SEC,
+    };
+  }
+  return {
+    liveAnalysisMethod: LIVE_ANALYSIS_METHODS.AED_CACHE_60S,
+    chunkSec: LIVE_AED_CACHE_SEC,
+    overlapSec: LIVE_AED_CACHE_OVERLAP_SEC,
+  };
+}
+
 function buildSignature(finalSegments, provisionalSegments, status, videoId, detectorVersion, detectorMode) {
   return JSON.stringify({
     videoId: videoId || null,
@@ -109,9 +169,13 @@ function buildSignature(finalSegments, provisionalSegments, status, videoId, det
 
 function normalizeLiveAnalysisCacheFrame(currentTimeSec, analysis) {
   if (!analysis || !analysis.ready) return null;
-  return {
+  return normalizeAnalysisFrame({
     ready: true,
     timeSec: roundNumber(currentTimeSec, 3),
+    sourceMode: analysis.sourceMode || null,
+    sourceRangeId: analysis.sourceRangeId || null,
+    discontinuityBefore: Boolean(analysis.discontinuityBefore),
+    discontinuityAfter: Boolean(analysis.discontinuityAfter),
     songProbability: roundNumber(Number(analysis.songProbability) || 0, 4),
     baseSongProbability: roundNumber(Number(analysis.baseSongProbability) || 0, 4),
     temporalHeadReady: Boolean(analysis.temporalHeadReady),
@@ -141,7 +205,7 @@ function normalizeLiveAnalysisCacheFrame(currentTimeSec, analysis) {
     highEnergyRatio: roundNumber(Number(analysis.highEnergyRatio) || 0, 4),
     analyzedAudioSec: roundNumber(Number(analysis.analyzedAudioSec) || 0, 3),
     detectorVersion: analysis.detectorVersion || null,
-  };
+  });
 }
 
 function appendAnalysisCacheFrame(session, currentTimeSec, analysis) {
@@ -216,6 +280,9 @@ function buildAnalysisCacheSummary(session, refinedSegments = []) {
     startSec: first ? roundNumber(first.timeSec, 3) : null,
     endSec: last ? roundNumber(last.timeSec, 3) : null,
     segmentCount: Array.isArray(refinedSegments) ? refinedSegments.length : 0,
+    frameDistribution: summarizeAnalysisFrameDistribution(frames, {
+      segments: refinedSegments,
+    }),
   };
 }
 
@@ -276,6 +343,7 @@ function getCachedGlobalSmoothing(session, currentTimeSec, { finalizeAll = false
     roundNumber(Number(firstFrame?.timeSec) || 0, 1),
     roundNumber(endSec, 1),
     finalizeAll ? 'final' : 'live',
+    segmentFilterProfileForLiveAnalysisMethod(session.liveAnalysisMethod),
   ].join(':');
 
   if (session.liveSmoothingCache && session.liveSmoothingCache.key === key) {
@@ -285,6 +353,7 @@ function getCachedGlobalSmoothing(session, currentTimeSec, { finalizeAll = false
   const result = smoothFireRedAnalyses(smoothingFrames, endSec, {
     startSec: Number.isFinite(Number(firstFrame?.timeSec)) ? Number(firstFrame.timeSec) : null,
     minSegmentDurationSec: session.minSegmentDurationSec,
+    smoothingProfile: segmentFilterProfileForLiveAnalysisMethod(session.liveAnalysisMethod),
   });
 
   session.liveSmoothingCache = { key, result, computedAtSec: endSec };
@@ -300,14 +369,22 @@ function buildSegmentFilterRuntimeInfo(runtimes = null, error = null) {
     executionProviders: LIVE_SEGMENT_FILTER_EXECUTION_PROVIDERS,
     segmentFilterLoaded: Boolean(runtimes?.segmentFilter),
     edgeTrimAdvisorLoaded: Boolean(runtimes?.edgeTrimAdvisor),
+    requestedAssetProfile: runtimes?.segmentFilter?.requestedAssetProfile || runtimes?.edgeTrimAdvisor?.requestedAssetProfile || null,
+    segmentFilterAssetProfile: runtimes?.segmentFilter?.assetProfile || null,
+    segmentFilterAssetProfileFallbackUsed: Boolean(runtimes?.segmentFilter?.assetProfileFallbackUsed),
+    edgeTrimAdvisorAssetProfile: runtimes?.edgeTrimAdvisor?.assetProfile || null,
+    edgeTrimAdvisorAssetProfileFallbackUsed: Boolean(runtimes?.edgeTrimAdvisor?.assetProfileFallbackUsed),
     liveKeepThreshold: LIVE_SEGMENT_FILTER_KEEP_THRESHOLD,
+    liveFinalKeepThreshold: resolveLiveFinalKeepThreshold(segmentMeta),
     liveEdgeTrimDuringStream: LIVE_EDGE_TRIM_DURING_STREAM,
+    liveStartEdgeTrimEnabled: LIVE_START_EDGE_TRIM_ENABLED,
     keepThreshold: Number.isFinite(Number(segmentMeta.keepThreshold))
       ? Number(segmentMeta.keepThreshold)
       : DEFAULT_SEGMENT_FILTER_OPTIONS.keepThreshold,
     trimConfidenceThreshold: Number.isFinite(Number(edgeMeta.trimConfidenceThreshold))
       ? Number(edgeMeta.trimConfidenceThreshold)
       : DEFAULT_SEGMENT_FILTER_OPTIONS.trimConfidenceThreshold,
+    liveEdgeTrimDisabledByModel: shouldDisableLiveEdgeTrim(edgeMeta),
     error: error ? (error?.message || String(error)) : null,
   };
 }
@@ -315,6 +392,25 @@ function buildSegmentFilterRuntimeInfo(runtimes = null, error = null) {
 function resolveNumberOption(value, fallback) {
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
+}
+
+function resolveLiveFinalKeepThreshold(segmentMeta = {}) {
+  const profileThreshold = Number(segmentMeta.liveFinalKeepThreshold);
+  if (Number.isFinite(profileThreshold)) {
+    return Math.max(0.01, Math.min(0.99, profileThreshold));
+  }
+  return Math.max(
+    LIVE_FINAL_SEGMENT_FILTER_KEEP_THRESHOLD,
+    resolveNumberOption(segmentMeta.keepThreshold, DEFAULT_SEGMENT_FILTER_OPTIONS.keepThreshold)
+  );
+}
+
+function shouldDisableLiveEdgeTrim(edgeMeta = {}) {
+  return edgeMeta.disableLiveEdgeTrim === true;
+}
+
+function shouldEnableLiveEndTrimEvidenceGuard(edgeMeta = {}) {
+  return edgeMeta.enableLiveEndTrimEvidenceGuard === true;
 }
 
 function buildLiveSegmentFilterOptions(session, runtimes, overrides = {}) {
@@ -358,13 +454,18 @@ async function getLiveSegmentFilterRuntimes(session) {
   }
 
   session.segmentFilterRuntimesPromise = (async () => {
+    const assetProfile = segmentFilterProfileForLiveAnalysisMethod(session.liveAnalysisMethod);
     const [segmentFilter, edgeTrimAdvisor] = await Promise.all([
       loadOptionalSegmentFilterRuntime('Live segment filter', () => loadSegmentFilterModel({
         ort,
+        assetProfile,
+        requireAssetProfile: true,
         executionProviders: LIVE_SEGMENT_FILTER_EXECUTION_PROVIDERS,
       })),
       loadOptionalSegmentFilterRuntime('Live edge trim advisor', () => loadEdgeTrimAdvisorModel({
         ort,
+        assetProfile,
+        requireAssetProfile: true,
         executionProviders: LIVE_SEGMENT_FILTER_EXECUTION_PROVIDERS,
       })),
     ]);
@@ -402,6 +503,26 @@ async function releaseLiveSegmentFilterRuntimes(session) {
     }
   }
   const runtimes = session?.segmentFilterRuntimes;
+  const pendingRuns = [
+    runtimes?.segmentFilter?.runQueue,
+    runtimes?.edgeTrimAdvisor?.runQueue,
+  ].filter((queue) => queue && typeof queue.then === 'function');
+  if (pendingRuns.length) {
+    let timedOut = false;
+    try {
+      await Promise.race([
+        Promise.allSettled(pendingRuns),
+        delayMs(10000).then(() => {
+          timedOut = true;
+        }),
+      ]);
+      if (timedOut) {
+        console.warn('Timed out waiting for live segment filter ONNX queue before release.');
+      }
+    } catch (error) {
+      console.warn('Failed while waiting for live segment filter ONNX queue before release.', error);
+    }
+  }
   const sessionsToRelease = [
     runtimes?.segmentFilter?.session,
     runtimes?.edgeTrimAdvisor?.session,
@@ -534,7 +655,9 @@ function summarizeLiveSegmentEvidence(frames, segment) {
   };
 }
 
-function shouldProtectLiveFilterDrop(segment, frames) {
+function shouldProtectLiveFilterDrop(segment, frames, keepProbability = 1) {
+  const probability = Number(keepProbability);
+  if (Number.isFinite(probability) && probability < LIVE_FILTER_DROP_PROTECTION.minKeepProbability) return false;
   const durationSec = Number(segment?.endSec) - Number(segment?.startSec);
   const confidence = Number(segment?.confidence) || 0;
   if (durationSec < LIVE_FILTER_DROP_PROTECTION.minDurationSec) return false;
@@ -563,7 +686,7 @@ function protectLiveFilterDrops(originalSegments, filteredResult, frames) {
     if (adjustment?.action !== 'drop') continue;
     const sourceIndex = Number.isInteger(adjustment.index) ? adjustment.index : index;
     const sourceSegment = inputSegments[sourceIndex];
-    if (!sourceSegment || !shouldProtectLiveFilterDrop(sourceSegment, frames)) continue;
+    if (!sourceSegment || !shouldProtectLiveFilterDrop(sourceSegment, frames, adjustment.keepProbability)) continue;
 
     const evidence = summarizeLiveSegmentEvidence(frames, sourceSegment);
     const normalized = {
@@ -617,10 +740,24 @@ async function applyLiveSegmentFilterToFinalSegments(
   frames,
   currentTimeSec,
   finalCutoffSec,
-  { finalizeAll = false, lowerBoundSec = null } = {}
+  {
+    finalizeAll = false,
+    lowerBoundSec = null,
+    skipSegmentFilter = false,
+    disableEdgeTrim = false,
+  } = {}
 ) {
   const normalizedFinalSegments = sortReportSegments(finalSegments, { provisional: false });
   if (!normalizedFinalSegments.length) {
+    return {
+      segments: normalizedFinalSegments,
+      adjustments: [],
+      applied: false,
+      changed: false,
+      runtimeInfo: session.segmentFilterRuntimeInfo || buildSegmentFilterRuntimeInfo(),
+    };
+  }
+  if (skipSegmentFilter) {
     return {
       segments: normalizedFinalSegments,
       adjustments: [],
@@ -664,12 +801,15 @@ async function applyLiveSegmentFilterToFinalSegments(
       selectedModelFallbackSegments: smoothing?.selectedModelFallbackSegments || [],
       endSec: predictionEndSec,
     };
-    const activeRuntimes = (finalizeAll || LIVE_EDGE_TRIM_DURING_STREAM)
+    const edgeMeta = runtimes?.edgeTrimAdvisor?.meta || {};
+    const edgeTrimDisabledByModel = shouldDisableLiveEdgeTrim(edgeMeta);
+    const endTrimEvidenceGuardEnabled = shouldEnableLiveEndTrimEvidenceGuard(edgeMeta);
+    const activeRuntimes = !disableEdgeTrim && !edgeTrimDisabledByModel && (finalizeAll || LIVE_EDGE_TRIM_DURING_STREAM)
       ? runtimes
       : { segmentFilter: runtimes.segmentFilter, edgeTrimAdvisor: null };
     const predictionOptions = buildLiveSegmentFilterOptions(session, activeRuntimes, {
       keepThreshold: finalizeAll
-        ? resolveNumberOption(runtimes?.segmentFilter?.meta?.keepThreshold, DEFAULT_SEGMENT_FILTER_OPTIONS.keepThreshold)
+        ? resolveLiveFinalKeepThreshold(runtimes?.segmentFilter?.meta || {})
         : LIVE_SEGMENT_FILTER_KEEP_THRESHOLD,
       startSec: Number.isFinite(Number(firstFrame?.timeSec)) ? Number(firstFrame.timeSec) : 0,
       endSec: predictionEndSec,
@@ -680,6 +820,17 @@ async function applyLiveSegmentFilterToFinalSegments(
         ? Number(lowerBoundSec)
         : predictionOptions.startSec,
       endSec: finalEndBoundSec,
+      allowStartTrim: LIVE_START_EDGE_TRIM_ENABLED,
+      startTrimMode: 'extend-only',
+      startTrimScale: LIVE_START_EDGE_TRIM_SCALE,
+      startTrimMinAbsSec: LIVE_START_EDGE_TRIM_MIN_ABS_SEC,
+      startTrimEvidenceFrames: frames,
+      startTrimEvidenceMinFrames: 3,
+      endTrimEvidenceFrames: endTrimEvidenceGuardEnabled ? frames : [],
+      endTrimEvidenceGuard: endTrimEvidenceGuardEnabled,
+      endTrimEvidenceMinFrames: 4,
+      largeEndTrimThresholdSec: LIVE_LARGE_END_TRIM_THRESHOLD_SEC,
+      largeEndTrimScale: LIVE_LARGE_END_TRIM_SCALE,
     };
     const predictions = await runSegmentFilterPipeline(
       activeRuntimes,
@@ -693,11 +844,20 @@ async function applyLiveSegmentFilterToFinalSegments(
       applySegmentFilterPredictions(normalizedFinalSegments, predictions, applyOptions),
       frames
     );
+    const speechResetRefined = finalizeAll
+      ? refineLiveSegmentEndsBySpeechReset(filtered.segments, frames, {
+        minSegmentDurationSec: session.minSegmentDurationSec,
+      })
+      : { segments: filtered.segments, adjustments: [], changed: false };
+    const finalSegments = speechResetRefined.segments || filtered.segments;
     return {
-      segments: sortReportSegments(filtered.segments, { provisional: false }),
-      adjustments: filtered.adjustments || [],
+      segments: sortReportSegments(finalSegments, { provisional: false }),
+      adjustments: [
+        ...(filtered.adjustments || []),
+        ...(speechResetRefined.adjustments || []),
+      ],
       applied: true,
-      changed: Boolean(filtered.changed),
+      changed: Boolean(filtered.changed || speechResetRefined.changed),
       runtimeInfo: session.segmentFilterRuntimeInfo || buildSegmentFilterRuntimeInfo(runtimes),
     };
   } catch (error) {
@@ -721,7 +881,7 @@ async function finalizeNewLiveSegments(
   frames,
   currentTimeSec,
   finalCutoffSec,
-  { finalizeAll = false } = {}
+  { finalizeAll = false, skipSegmentFilter = false } = {}
 ) {
   const state = ensureLiveFinalizationState(session);
   const newCandidates = selectNewFinalizationCandidates(session, finalCandidates);
@@ -744,7 +904,7 @@ async function finalizeNewLiveSegments(
     frames,
     currentTimeSec,
     finalCutoffSec,
-    { finalizeAll, lowerBoundSec: previousFinalEndSec }
+    { finalizeAll, lowerBoundSec: previousFinalEndSec, skipSegmentFilter }
   );
   const nextState = appendLiveFinalizedSegments(session, newCandidates, filtered);
   return {
@@ -755,9 +915,12 @@ async function finalizeNewLiveSegments(
   };
 }
 
-async function buildActiveReportSegments(session, currentTimeSec, { finalizeAll = false } = {}) {
+async function buildActiveReportSegments(session, currentTimeSec, { finalizeAll = false, skipSegmentFilter = false } = {}) {
   const allFinalSegments = session.segmentTracker.getFinalSegments();
   const trackerProvisionalSegments = session.segmentTracker.getProvisionalSegments(currentTimeSec);
+  const hasCompletedAnalysisRanges = Array.isArray(session.completedAnalysisRanges)
+    && session.completedAnalysisRanges.length > 0;
+  const effectiveSkipSegmentFilter = Boolean(skipSegmentFilter || hasCompletedAnalysisRanges);
 
   if (session.detectorMode !== DETECTOR_MODES.FIRERED_AED) {
     return {
@@ -789,7 +952,7 @@ async function buildActiveReportSegments(session, currentTimeSec, { finalizeAll 
         smoothingFrames,
         currentTimeSec,
         smoothingEndSec,
-        { finalizeAll }
+        { finalizeAll, skipSegmentFilter: effectiveSkipSegmentFilter }
       );
       return {
         finalSegments: sortReportSegments(filtered.segments),
@@ -822,7 +985,7 @@ async function buildActiveReportSegments(session, currentTimeSec, { finalizeAll 
       smoothingFrames,
       currentTimeSec,
       finalCutoffSec,
-      { finalizeAll }
+      { finalizeAll, skipSegmentFilter: effectiveSkipSegmentFilter }
     );
     const visibleProvisionalSegments = provisionalSegments
       .filter((segment) => !filtered.segments.some((knownSegment) => segmentsOverlap(knownSegment, segment)));
@@ -876,6 +1039,34 @@ function getCompletedRangeSegments(session) {
   return ranges.flatMap((range) => Array.isArray(range.finalSegments) ? range.finalSegments : []);
 }
 
+function cloneLiveAnalysisFrameForCompletedRange(frame) {
+  if (!frame || typeof frame !== 'object') return null;
+  return normalizeAnalysisFrame(frame);
+}
+
+function getCompletedRangeAnalysisFrames(session) {
+  const ranges = Array.isArray(session.completedAnalysisRanges) ? session.completedAnalysisRanges : [];
+  return ranges
+    .flatMap((range) => Array.isArray(range.analysisFrames) ? range.analysisFrames : [])
+    .filter(Boolean);
+}
+
+function mergeAnalysisFramesForFinalization(...frameLists) {
+  const frames = frameLists.flatMap((list) => (Array.isArray(list) ? list : []))
+    .filter((frame) => Number.isFinite(Number(frame?.timeSec)))
+    .sort((a, b) => Number(a.timeSec) - Number(b.timeSec));
+  const output = [];
+  for (const frame of frames) {
+    const previous = output[output.length - 1];
+    if (previous && Math.abs(Number(previous.timeSec) - Number(frame.timeSec)) < 0.05) {
+      output[output.length - 1] = frame;
+    } else {
+      output.push(frame);
+    }
+  }
+  return output;
+}
+
 function mergeReportSegments(completedSegments, activeSegments) {
   return sortReportSegments([...completedSegments, ...activeSegments])
     .filter((segment, index, list) => {
@@ -887,49 +1078,140 @@ function mergeReportSegments(completedSegments, activeSegments) {
     });
 }
 
+function summarizeCompletedAnalysisRanges(session) {
+  const ranges = Array.isArray(session?.completedAnalysisRanges) ? session.completedAnalysisRanges : [];
+  const reasonCounts = {};
+  let frameCount = 0;
+  let segmentCount = 0;
+
+  for (const range of ranges) {
+    const reason = String(range?.reason || 'unknown');
+    reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
+    frameCount += Number(range?.analysisCacheSummary?.frameCount) || 0;
+    segmentCount += Array.isArray(range?.finalSegments) ? range.finalSegments.length : 0;
+  }
+
+  return {
+    count: ranges.length,
+    frameCount,
+    segmentCount,
+    reasons: reasonCounts,
+    ranges: ranges.slice(-40).map((range) => ({
+      reason: range?.reason || null,
+      startSec: Number.isFinite(Number(range?.startSec)) ? roundNumber(Number(range.startSec), 3) : null,
+      endSec: Number.isFinite(Number(range?.endSec)) ? roundNumber(Number(range.endSec), 3) : null,
+      frameCount: Number(range?.analysisCacheSummary?.frameCount) || 0,
+      segmentCount: Array.isArray(range?.finalSegments) ? range.finalSegments.length : 0,
+      smoothingMethod: range?.smoothingMethod || null,
+      segmentFilterAdjustmentCount: Number(range?.segmentFilterAdjustmentCount) || 0,
+    })),
+  };
+}
+
 function buildCompletedRangesSummary(session, activeSummary = null) {
   const ranges = Array.isArray(session.completedAnalysisRanges) ? session.completedAnalysisRanges : [];
   if (!ranges.length) return activeSummary;
 
-  const completedFrameCount = ranges.reduce((total, range) => (
-    total + (Number(range?.analysisCacheSummary?.frameCount) || 0)
-  ), 0);
-  const completedSegmentCount = ranges.reduce((total, range) => (
-    total + (Array.isArray(range?.finalSegments) ? range.finalSegments.length : 0)
-  ), 0);
+  const completedRangesSummary = summarizeCompletedAnalysisRanges(session);
 
   return {
     ...(activeSummary || {}),
     smoothingVersion: GLOBAL_SMOOTHING_VERSION,
-    completedRangeCount: ranges.length,
-    completedFrameCount,
+    completedRangeCount: completedRangesSummary.count,
+    completedFrameCount: completedRangesSummary.frameCount,
     activeFrameCount: Number(activeSummary?.frameCount) || 0,
-    frameCount: completedFrameCount + (Number(activeSummary?.frameCount) || 0),
-    segmentCount: completedSegmentCount + (Number(activeSummary?.segmentCount) || 0),
+    frameCount: completedRangesSummary.frameCount + (Number(activeSummary?.frameCount) || 0),
+    segmentCount: completedRangesSummary.segmentCount + (Number(activeSummary?.segmentCount) || 0),
     discontinuities: Number(session.analysisCacheDiscontinuities) || 0,
+    completedRangesSummary,
   };
 }
 
 async function buildLiveReportSegments(session, currentTimeSec, { finalizeAll = false } = {}) {
   const activeReport = await buildActiveReportSegments(session, currentTimeSec, { finalizeAll });
   const completedSegments = getCompletedRangeSegments(session);
+  let finalSegments = mergeReportSegments(completedSegments, activeReport.finalSegments);
+  let segmentFilterAdjustments = activeReport.segmentFilterAdjustments || [];
+  let segmentFilterRuntimeInfo = activeReport.segmentFilterRuntimeInfo || null;
+  let refinedBy = activeReport.refinedBy || null;
+  let smoothingMethod = activeReport.smoothingMethod || null;
+
+  if (finalizeAll && completedSegments.length && session.detectorMode === DETECTOR_MODES.FIRERED_AED) {
+    const finalizationFrames = mergeAnalysisFramesForFinalization(
+      getCompletedRangeAnalysisFrames(session),
+      session.analysisCache
+    );
+    if (finalizationFrames.length >= 20 && finalSegments.length) {
+      const firstFrame = finalizationFrames[0] || null;
+      const lastFrame = finalizationFrames[finalizationFrames.length - 1] || null;
+      const smoothingEndSec = Math.max(
+        Number(currentTimeSec) || 0,
+        Number(lastFrame?.timeSec) || 0,
+        Number(finalSegments[finalSegments.length - 1]?.endSec) || 0
+      );
+      const smoothing = smoothFireRedAnalyses(finalizationFrames, smoothingEndSec, {
+        startSec: Number(firstFrame?.timeSec) || 0,
+        minSegmentDurationSec: session.minSegmentDurationSec,
+        smoothingProfile: segmentFilterProfileForLiveAnalysisMethod(session.liveAnalysisMethod),
+      });
+      const filtered = await applyLiveSegmentFilterToFinalSegments(
+        session,
+        finalSegments,
+        smoothing,
+        finalizationFrames,
+        currentTimeSec,
+        smoothingEndSec,
+        {
+          finalizeAll,
+          lowerBoundSec: null,
+          skipSegmentFilter: false,
+          disableEdgeTrim: true,
+        }
+      );
+      finalSegments = sortReportSegments(filtered.segments, { provisional: false });
+      segmentFilterAdjustments = filtered.adjustments || [];
+      segmentFilterRuntimeInfo = filtered.runtimeInfo || segmentFilterRuntimeInfo;
+      refinedBy = filtered.applied
+        ? `${GLOBAL_SMOOTHING_VERSION}+${SEGMENT_FILTER_VERSION}`
+        : refinedBy;
+      smoothingMethod = filtered.applied
+        ? `${smoothing.method || 'unknown'}+segment-filter-final-global`
+        : smoothingMethod;
+    }
+  }
 
   return {
     ...activeReport,
-    finalSegments: mergeReportSegments(completedSegments, activeReport.finalSegments),
+    finalSegments,
     provisionalSegments: sortReportSegments(activeReport.provisionalSegments, { provisional: true }),
+    refinedBy,
+    smoothingMethod,
+    segmentFilterAdjustments,
+    segmentFilterRuntimeInfo,
   };
 }
 
 async function captureCompletedAnalysisRange(session, finalTimeSec, reason = 'discontinuity') {
   const frames = Array.isArray(session.analysisCache) ? session.analysisCache : [];
-  const activeReport = await buildActiveReportSegments(session, finalTimeSec, { finalizeAll: true });
+  if (session.detectorMode === DETECTOR_MODES.FIRERED_AED) {
+    // Discontinuity finalization must match Stop finalization: rebuild from the
+    // full active frame cache instead of preserving earlier streaming freezes.
+    resetLiveFinalizationState(session);
+    session.liveSmoothingCache = null;
+  }
+  const activeReport = await buildActiveReportSegments(session, finalTimeSec, {
+    finalizeAll: true,
+    skipSegmentFilter: true,
+  });
   const finalSegments = sortReportSegments(activeReport.finalSegments);
   if (!frames.length && !finalSegments.length) return false;
 
   const firstFrame = frames[0] || null;
   const lastFrame = frames[frames.length - 1] || null;
   const analysisCacheSummary = buildAnalysisCacheSummary(session, finalSegments);
+  const analysisFrames = frames
+    .map(cloneLiveAnalysisFrameForCompletedRange)
+    .filter(Boolean);
   const range = {
     reason,
     startSec: roundNumber(firstFrame?.timeSec ?? finalSegments[0]?.startSec ?? finalTimeSec, 3),
@@ -946,11 +1228,50 @@ async function captureCompletedAnalysisRange(session, finalTimeSec, reason = 'di
       ? activeReport.segmentFilterAdjustments.length
       : 0,
     analysisCacheSummary,
+    analysisFrames,
   };
 
   if (!Array.isArray(session.completedAnalysisRanges)) session.completedAnalysisRanges = [];
   session.completedAnalysisRanges.push(range);
   return true;
+}
+
+function resetActiveLiveAnalysisState(session) {
+  if (!session) return;
+  session.eventDecisionHistory = [];
+  session.eventDecisionSnapshot = null;
+  session.lastSingingAnchorSec = null;
+  session.analysisCache = [];
+  session.liveSmoothingCache = null;
+  session.lastAnalysisFrameTimeSec = null;
+  resetLiveFinalizationState(session);
+  if (typeof session.detector?.resetAnalysisState === 'function') {
+    session.detector.resetAnalysisState();
+  }
+  if (typeof session.segmentTracker?.reset === 'function') {
+    session.segmentTracker.reset();
+  }
+}
+
+async function closeActiveAnalysisRangeForDiscontinuity(session, currentTimeSec, reason = 'discontinuity') {
+  if (!session || session.detectorMode !== DETECTOR_MODES.FIRERED_AED) return false;
+
+  const flushedFrames = await flushDetectorPendingFrames(session);
+  const lastFlushedFrame = Array.isArray(flushedFrames) ? flushedFrames[flushedFrames.length - 1] : null;
+  const finalTimeSec = Math.max(
+    Number(currentTimeSec) || 0,
+    Number(session.lastAnalysisFrameTimeSec) || 0,
+    Number(lastFlushedFrame?.timeSec) || 0
+  );
+  const forcedTransition = session.segmentTracker
+    ? session.segmentTracker.finalizeAt(finalTimeSec)
+    : false;
+  const captured = await captureCompletedAnalysisRange(session, finalTimeSec, reason);
+
+  resetActiveLiveAnalysisState(session);
+  session.pendingAnalysisResumeAfterDiscontinuity = true;
+  session.analysisCacheDiscontinuities = (Number(session.analysisCacheDiscontinuities) || 0) + (captured ? 1 : 0);
+  return Boolean(forcedTransition || captured);
 }
 
 function computeNextIntegerSecond(currentTimeSec) {
@@ -985,9 +1306,13 @@ function isAnalysisGateClosed(session) {
 }
 
 function openAnalysisGate(session, currentTimeSec) {
-  const originSec = Number.isFinite(Number(session.startAnalysisAtSec))
+  const scheduledOriginSec = Number.isFinite(Number(session.startAnalysisAtSec))
     ? Number(session.startAnalysisAtSec)
     : computeNextIntegerSecond(currentTimeSec);
+  const currentSec = toSeconds(currentTimeSec);
+  const originSec = currentSec > scheduledOriginSec + LIVE_ANALYSIS_TIME_GRID_SEC
+    ? computeNextIntegerSecond(currentSec)
+    : scheduledOriginSec;
   session.integerStartPending = false;
   session.startAnalysisAtSec = null;
   session.analysisStartOriginSec = originSec;
@@ -1184,16 +1509,21 @@ function calibratePlaybackClock(session, snapshot) {
   if (!session || !snapshot || typeof snapshot.currentTime !== 'number') return;
   const currentTimeSec = toSeconds(snapshot.currentTime);
   const audioClockSec = Number(session.audioContext?.currentTime);
+  const playbackRate = normalizePlaybackRate(snapshot.playbackRate);
+  session.playbackRate = playbackRate;
+  if (typeof session.detector?.setPlaybackRate === 'function') {
+    session.detector.setPlaybackRate(playbackRate);
+  }
   session.playbackClockCalibration = {
     currentTimeSec,
     audioClockSec: Number.isFinite(audioClockSec) ? audioClockSec : 0,
     wallTimeMs: Date.now(),
-    playbackRate: Number.isFinite(Number(snapshot.playbackRate)) ? Math.max(0, Number(snapshot.playbackRate)) : 1,
+    playbackRate,
     videoId: snapshot.videoId || session.videoId || null,
   };
 }
 
-function estimatePlaybackSnapshot(session) {
+function estimatePlaybackSnapshot(session, options = {}) {
   const calibration = session?.playbackClockCalibration;
   if (!calibration) return null;
 
@@ -1202,6 +1532,9 @@ function estimatePlaybackSnapshot(session) {
 
   const elapsedSec = Math.max(0, audioClockSec - calibration.audioClockSec);
   const playbackRate = Number.isFinite(Number(calibration.playbackRate)) ? calibration.playbackRate : 1;
+  if (typeof session.detector?.setPlaybackRate === 'function') {
+    session.detector.setPlaybackRate(playbackRate);
+  }
   return {
     success: true,
     estimated: true,
@@ -1209,6 +1542,7 @@ function estimatePlaybackSnapshot(session) {
     currentTime: Math.max(0, calibration.currentTimeSec + (elapsedSec * playbackRate)),
     playbackRate,
     paused: null,
+    snapshotUnavailable: Boolean(options.snapshotUnavailable),
   };
 }
 
@@ -1218,20 +1552,34 @@ async function resolvePlaybackSnapshot(session) {
     && Number.isFinite(Number(session.nextPlaybackSnapshotRetryAt))
     && Date.now() < Number(session.nextPlaybackSnapshotRetryAt)
   ) {
-    return estimatePlaybackSnapshot(session);
+    const lastRealAt = Number(session.lastRealPlaybackSnapshotAt);
+    const snapshotUnavailable = !Number.isFinite(lastRealAt)
+      || Date.now() - lastRealAt >= PLAYBACK_SNAPSHOT_UNAVAILABLE_GRACE_MS;
+    const estimated = estimatePlaybackSnapshot(session, { snapshotUnavailable });
+    recordPlaybackSnapshotDiagnostics(session, estimated, 'estimated');
+    return estimated;
   }
 
   const snapshot = await requestPlaybackSnapshot(session.tabId);
   if (snapshot && typeof snapshot.currentTime === 'number') {
     session.playbackSnapshotFailureCount = 0;
     session.nextPlaybackSnapshotRetryAt = null;
+    session.lastRealPlaybackSnapshotAt = Date.now();
     calibratePlaybackClock(session, snapshot);
-    return { ...snapshot, estimated: false };
+    const realSnapshot = { ...snapshot, estimated: false };
+    recordPlaybackSnapshotDiagnostics(session, realSnapshot, 'real');
+    return realSnapshot;
   }
 
   session.playbackSnapshotFailureCount = (Number(session.playbackSnapshotFailureCount) || 0) + 1;
+  recordPlaybackSnapshotDiagnostics(session, null, 'failure');
   session.nextPlaybackSnapshotRetryAt = Date.now() + Math.min(5000, session.playbackSnapshotFailureCount * 1000);
-  return estimatePlaybackSnapshot(session);
+  const lastRealAt = Number(session.lastRealPlaybackSnapshotAt);
+  const snapshotUnavailable = !Number.isFinite(lastRealAt)
+    || Date.now() - lastRealAt >= PLAYBACK_SNAPSHOT_UNAVAILABLE_GRACE_MS;
+  const estimated = estimatePlaybackSnapshot(session, { snapshotUnavailable });
+  recordPlaybackSnapshotDiagnostics(session, estimated, 'estimated');
+  return estimated;
 }
 
 async function requestCurrentVideoId(tabId) {
@@ -1251,17 +1599,40 @@ async function detectVideoBoundary(session, snapshot) {
 
   const snapshotVideoId = snapshot?.videoId || null;
   if (snapshotVideoId && snapshotVideoId !== knownVideoId) {
+    const diagnostics = ensurePlaybackDiagnostics(session);
+    diagnostics.videoBoundaryCount += 1;
+    recordPlaybackDiagnosticEvent(session, 'video-boundary', {
+      reason: 'videoChanged',
+      previousVideoId: knownVideoId,
+      nextVideoId: snapshotVideoId,
+    });
     return { reason: 'videoChanged', previousVideoId: knownVideoId, nextVideoId: snapshotVideoId };
   }
 
   if (!snapshotVideoId) {
     const currentVideoId = await requestCurrentVideoId(session.tabId);
     if (currentVideoId && currentVideoId !== knownVideoId) {
+      const diagnostics = ensurePlaybackDiagnostics(session);
+      diagnostics.videoBoundaryCount += 1;
+      recordPlaybackDiagnosticEvent(session, 'video-boundary', {
+        reason: 'videoChanged',
+        previousVideoId: knownVideoId,
+        nextVideoId: currentVideoId,
+      });
       return { reason: 'videoChanged', previousVideoId: knownVideoId, nextVideoId: currentVideoId };
     }
     const currentTimeSec = Number(snapshot?.currentTime);
     const lastTimeSec = Number(session.lastPlaybackTimeSec);
     if (!currentVideoId && Number.isFinite(currentTimeSec) && Number.isFinite(lastTimeSec) && lastTimeSec > 30 && currentTimeSec < 5) {
+      const diagnostics = ensurePlaybackDiagnostics(session);
+      diagnostics.videoBoundaryCount += 1;
+      recordPlaybackDiagnosticEvent(session, 'video-boundary', {
+        reason: 'videoChangedUnknown',
+        previousVideoId: knownVideoId,
+        nextVideoId: null,
+        currentTimeSec: roundNumber(currentTimeSec, 3),
+        lastTimeSec: roundNumber(lastTimeSec, 3),
+      });
       return { reason: 'videoChangedUnknown', previousVideoId: knownVideoId, nextVideoId: null };
     }
   }
@@ -1275,7 +1646,38 @@ async function notifyStatus(session, status, extra = {}) {
   const nextWarning = extra.warning || session.warning || null;
   const nextMode = extra.detectorMode || session.detectorMode;
   const nextVersion = extra.detectorVersion || session.detectorVersion;
-  const nextRuntimeInfo = extra.runtimeInfo || session.runtimeInfo || null;
+  const hasRuntimeInfoOverride = Object.prototype.hasOwnProperty.call(extra, 'runtimeInfo');
+  const nextRuntimeInfo = hasRuntimeInfoOverride
+    ? extra.runtimeInfo
+    : (typeof session.detector?.getRuntimeInfo === 'function'
+      ? session.detector.getRuntimeInfo()
+      : session.runtimeInfo || null);
+  const runtimeFrameDistribution = session.detectorMode === DETECTOR_MODES.FIRERED_AED
+    && Array.isArray(session.analysisCache)
+    && session.analysisCache.length >= 20
+    ? summarizeRecentAnalysisFrameDistribution(session.analysisCache, {
+      windowSec: LIVE_RUNTIME_FRAME_DISTRIBUTION_WINDOW_SEC,
+    })
+    : null;
+  const runtimeStatusSignature = JSON.stringify({
+    mode: nextRuntimeInfo?.liveFrameBuilder?.mode || null,
+    chunkSec: nextRuntimeInfo?.liveFrameBuilder?.chunkSec || null,
+    playbackRate: Number(nextRuntimeInfo?.liveFrameBuilder?.bufferedPcm?.playbackRate) || 1,
+    captureSuspended: Boolean(session.audioCaptureSuspended),
+    captureSuspendedReason: session.audioCaptureSuspendedReason || null,
+    skippedAudioSecBucket: Math.floor((Number(session.suspendedAudioSec) || 0) / 5),
+    frameDistributionFrameBucket: Math.floor((Number(runtimeFrameDistribution?.frameCount) || 0) / 20),
+    modelHighRatioBucket: Math.floor((Number(runtimeFrameDistribution?.modelHighRatio) || 0) * 20),
+    singingHighRatioBucket: Math.floor((Number(runtimeFrameDistribution?.singingHighRatio) || 0) * 20),
+    musicOnlyRatioBucket: Math.floor((Number(runtimeFrameDistribution?.musicOnlyLowVocalRatio) || 0) * 20),
+    chunkProgressSecBucket: Math.floor((Number(
+      nextRuntimeInfo?.liveFrameBuilder?.bufferedPcm?.chunkProgressSec
+      ?? nextRuntimeInfo?.liveFrameBuilder?.bufferedPcm?.bufferedSec
+    ) || 0) / 5),
+    totalAnalyzedSecBucket: Math.floor((Number(nextRuntimeInfo?.liveFrameBuilder?.bufferedPcm?.totalAnalyzedSec) || 0) / 5),
+  });
+  const shouldReportRuntimeProgress = runtimeStatusSignature !== session.lastRuntimeStatusSignature
+    && Date.now() - (Number(session.lastRuntimeStatusAt) || 0) >= LIVE_RUNTIME_STATUS_INTERVAL_MS;
 
   if (
     session.status === normalized
@@ -1283,6 +1685,7 @@ async function notifyStatus(session, status, extra = {}) {
     && session.warning === nextWarning
     && session.detectorMode === nextMode
     && session.detectorVersion === nextVersion
+    && !shouldReportRuntimeProgress
   ) {
     return;
   }
@@ -1293,6 +1696,27 @@ async function notifyStatus(session, status, extra = {}) {
   session.detectorMode = nextMode;
   session.detectorVersion = nextVersion;
   session.runtimeInfo = nextRuntimeInfo;
+  if (session.runtimeInfo?.liveFrameBuilder) {
+    session.runtimeInfo.liveFrameBuilder.captureSuspended = Boolean(session.audioCaptureSuspended);
+    session.runtimeInfo.liveFrameBuilder.captureSuspendedReason = session.audioCaptureSuspendedReason || null;
+    session.runtimeInfo.liveFrameBuilder.captureSuspensionStats = buildCaptureSuspensionStats(session);
+    session.runtimeInfo.liveFrameBuilder.frameDistribution = runtimeFrameDistribution;
+  }
+  if (Number.isFinite(Number(session.playbackRate)) && session.runtimeInfo?.liveFrameBuilder?.bufferedPcm) {
+    session.runtimeInfo.liveFrameBuilder.bufferedPcm.playbackRate = roundNumber(session.playbackRate, 3);
+    const bufferedPcm = session.runtimeInfo.liveFrameBuilder.bufferedPcm;
+    if (!Number.isFinite(Number(bufferedPcm.videoChunkProgressSec)) && Number.isFinite(Number(bufferedPcm.chunkProgressSec))) {
+      bufferedPcm.videoChunkProgressSec = roundNumber(Number(bufferedPcm.chunkProgressSec) * session.playbackRate, 3);
+    }
+    if (!Number.isFinite(Number(bufferedPcm.videoTotalCapturedSec)) && Number.isFinite(Number(bufferedPcm.totalCapturedSec))) {
+      bufferedPcm.videoTotalCapturedSec = roundNumber(Number(bufferedPcm.totalCapturedSec) * session.playbackRate, 3);
+    }
+    if (!Number.isFinite(Number(bufferedPcm.videoTotalAnalyzedSec)) && Number.isFinite(Number(bufferedPcm.totalAnalyzedSec))) {
+      bufferedPcm.videoTotalAnalyzedSec = roundNumber(Number(bufferedPcm.totalAnalyzedSec) * session.playbackRate, 3);
+    }
+  }
+  session.lastRuntimeStatusSignature = runtimeStatusSignature;
+  session.lastRuntimeStatusAt = Date.now();
 
   try {
     await chrome.runtime.sendMessage({
@@ -1303,6 +1727,7 @@ async function notifyStatus(session, status, extra = {}) {
       error: nextError,
       warning: nextWarning,
       detectorMode: nextMode,
+      liveAnalysisMethod: session.liveAnalysisMethod || DEFAULT_LIVE_ANALYSIS_METHOD,
       detectorVersion: nextVersion,
       runtimeInfo: nextRuntimeInfo,
       minSegmentDurationSec: session.minSegmentDurationSec,
@@ -1313,6 +1738,13 @@ async function notifyStatus(session, status, extra = {}) {
 }
 
 async function maybeReport(session, currentTimeSec, { force = false, finalizeAll = false } = {}) {
+  if (finalizeAll && session.detectorMode === DETECTOR_MODES.FIRERED_AED) {
+    // Streaming reports freeze old final segments for UI stability. On Stop, rebuild
+    // from the full AED cache so final timestamps can still be corrected globally.
+    resetLiveFinalizationState(session);
+    session.liveSmoothingCache = null;
+  }
+
   const {
     finalSegments,
     provisionalSegments,
@@ -1326,9 +1758,18 @@ async function maybeReport(session, currentTimeSec, { force = false, finalizeAll
     : ((session.segmentTracker.isSong || provisionalSegments.length > 0)
       ? 'Detecting'
       : 'Listening');
-  const activeSummary = finalizeAll && session.detectorMode === DETECTOR_MODES.FIRERED_AED
+  let activeSummary = finalizeAll && session.detectorMode === DETECTOR_MODES.FIRERED_AED
     ? buildAnalysisCacheSummary(session, finalSegments)
     : null;
+  if (activeSummary) {
+    activeSummary.liveFinalizationDiagnostics = buildLiveFinalizationDiagnostics(session, {
+      currentTimeSec,
+      finalSegments,
+      provisionalSegments,
+      segmentFilterAdjustments,
+      segmentFilterRuntimeInfo,
+    });
+  }
   const analysisCacheSummary = finalizeAll
     ? buildCompletedRangesSummary(session, activeSummary)
     : null;
@@ -1357,6 +1798,10 @@ async function maybeReport(session, currentTimeSec, { force = false, finalizeAll
       videoId: session.videoId,
       status,
       detectorMode: session.detectorMode,
+      liveAnalysisMethod: session.liveAnalysisMethod || DEFAULT_LIVE_ANALYSIS_METHOD,
+      smoothingProfile: session.detectorMode === DETECTOR_MODES.FIRERED_AED
+        ? segmentFilterProfileForLiveAnalysisMethod(session.liveAnalysisMethod)
+        : null,
       detectorVersion: session.detectorVersion,
       finalSegments,
       provisionalSegments,
@@ -1712,6 +2157,260 @@ function markPlaybackClock(session, currentTimeSec) {
   session.lastPlaybackAudioClockSec = Number.isFinite(audioClockSec) ? audioClockSec : null;
 }
 
+function setAudioCaptureSuspended(session, suspended, reason = null) {
+  if (!session) return;
+  const nextSuspended = Boolean(suspended);
+  const nextReason = nextSuspended ? (reason || 'playback-not-advancing') : null;
+  if (nextSuspended && (!session.audioCaptureSuspended || session.audioCaptureSuspendedReason !== nextReason)) {
+    session.audioCaptureSuspensionCount = (Number(session.audioCaptureSuspensionCount) || 0) + 1;
+    const diagnostics = ensurePlaybackDiagnostics(session);
+    diagnostics.suspensionReasons[nextReason] = (Number(diagnostics.suspensionReasons[nextReason]) || 0) + 1;
+    recordPlaybackDiagnosticEvent(session, 'capture-suspended', { reason: nextReason });
+  } else if (!nextSuspended && session.audioCaptureSuspended) {
+    recordPlaybackDiagnosticEvent(session, 'capture-resumed', {
+      previousReason: session.audioCaptureSuspendedReason || null,
+    });
+  }
+  session.audioCaptureSuspended = nextSuspended;
+  session.audioCaptureSuspendedReason = nextReason;
+}
+
+function recordSuspendedAudioChunk(session, samples) {
+  if (!session || !samples || !samples.length) return;
+  const sampleRate = Math.max(1, Number(session.audioContext?.sampleRate) || 48000);
+  const skippedSec = samples.length / sampleRate;
+  const reason = session.audioCaptureSuspendedReason || 'unknown';
+  session.suspendedAudioChunkCount = (Number(session.suspendedAudioChunkCount) || 0) + 1;
+  session.suspendedAudioSec = (Number(session.suspendedAudioSec) || 0) + skippedSec;
+  if (!session.suspendedAudioReasons || typeof session.suspendedAudioReasons !== 'object') {
+    session.suspendedAudioReasons = {};
+  }
+  session.suspendedAudioReasons[reason] = (Number(session.suspendedAudioReasons[reason]) || 0) + skippedSec;
+}
+
+function buildCaptureSuspensionStats(session) {
+  const reasons = {};
+  const rawReasons = session?.suspendedAudioReasons || {};
+  for (const [reason, seconds] of Object.entries(rawReasons)) {
+    reasons[reason] = roundNumber(seconds, 3);
+  }
+  const lastRealSnapshotAt = Number(session?.lastRealPlaybackSnapshotAt);
+  return {
+    suspended: Boolean(session?.audioCaptureSuspended),
+    reason: session?.audioCaptureSuspendedReason || null,
+    skippedAudioSec: roundNumber(Number(session?.suspendedAudioSec) || 0, 3),
+    skippedChunkCount: Math.max(0, Math.floor(Number(session?.suspendedAudioChunkCount) || 0)),
+    suspensionCount: Math.max(0, Math.floor(Number(session?.audioCaptureSuspensionCount) || 0)),
+    snapshotFailureCount: Math.max(0, Math.floor(Number(session?.playbackSnapshotFailureCount) || 0)),
+    lastRealSnapshotAgeSec: Number.isFinite(lastRealSnapshotAt)
+      ? roundNumber((Date.now() - lastRealSnapshotAt) / 1000, 3)
+      : null,
+    reasons,
+  };
+}
+
+function createPlaybackDiagnostics() {
+  return {
+    events: [],
+    counts: {},
+    snapshot: {
+      realCount: 0,
+      estimatedCount: 0,
+      failureCount: 0,
+      unavailableCount: 0,
+      lastRealAt: null,
+      lastFailureAt: null,
+      lastSnapshot: null,
+    },
+    suspensionReasons: {},
+    seekCount: 0,
+    videoBoundaryCount: 0,
+  };
+}
+
+function ensurePlaybackDiagnostics(session) {
+  if (!session.playbackDiagnostics || typeof session.playbackDiagnostics !== 'object') {
+    session.playbackDiagnostics = createPlaybackDiagnostics();
+  }
+  if (!Array.isArray(session.playbackDiagnostics.events)) {
+    session.playbackDiagnostics.events = [];
+  }
+  if (!session.playbackDiagnostics.counts || typeof session.playbackDiagnostics.counts !== 'object') {
+    session.playbackDiagnostics.counts = {};
+  }
+  if (!session.playbackDiagnostics.snapshot || typeof session.playbackDiagnostics.snapshot !== 'object') {
+    session.playbackDiagnostics.snapshot = createPlaybackDiagnostics().snapshot;
+  }
+  if (!session.playbackDiagnostics.suspensionReasons || typeof session.playbackDiagnostics.suspensionReasons !== 'object') {
+    session.playbackDiagnostics.suspensionReasons = {};
+  }
+  return session.playbackDiagnostics;
+}
+
+function recordPlaybackDiagnosticEvent(session, type, details = {}) {
+  if (!session) return;
+  const diagnostics = ensurePlaybackDiagnostics(session);
+  const eventType = String(type || 'unknown');
+  diagnostics.counts[eventType] = (Number(diagnostics.counts[eventType]) || 0) + 1;
+  const audioClockSec = Number(session.audioContext?.currentTime);
+  diagnostics.events.push({
+    at: new Date().toISOString(),
+    type: eventType,
+    playbackTimeSec: Number.isFinite(Number(session.lastPlaybackTimeSec))
+      ? roundNumber(Number(session.lastPlaybackTimeSec), 3)
+      : null,
+    audioClockSec: Number.isFinite(audioClockSec) ? roundNumber(audioClockSec, 3) : null,
+    ...details,
+  });
+  if (diagnostics.events.length > MAX_PLAYBACK_DIAGNOSTIC_EVENTS) {
+    diagnostics.events.splice(0, diagnostics.events.length - MAX_PLAYBACK_DIAGNOSTIC_EVENTS);
+  }
+}
+
+function recordPlaybackSnapshotDiagnostics(session, snapshot, kind) {
+  if (!session) return;
+  const diagnostics = ensurePlaybackDiagnostics(session);
+  const normalizedKind = String(kind || 'unknown');
+  if (normalizedKind === 'real') {
+    diagnostics.snapshot.realCount += 1;
+    diagnostics.snapshot.lastRealAt = new Date().toISOString();
+  } else if (normalizedKind === 'estimated') {
+    diagnostics.snapshot.estimatedCount += 1;
+  } else if (normalizedKind === 'failure') {
+    diagnostics.snapshot.failureCount += 1;
+    diagnostics.snapshot.lastFailureAt = new Date().toISOString();
+  }
+  if (snapshot?.snapshotUnavailable) {
+    diagnostics.snapshot.unavailableCount += 1;
+  }
+  if (snapshot && typeof snapshot.currentTime === 'number') {
+    diagnostics.snapshot.lastSnapshot = {
+      kind: normalizedKind,
+      videoId: snapshot.videoId || session.videoId || null,
+      currentTimeSec: roundNumber(Number(snapshot.currentTime) || 0, 3),
+      playbackRate: roundNumber(normalizePlaybackRate(snapshot.playbackRate), 3),
+      paused: typeof snapshot.paused === 'boolean' ? snapshot.paused : null,
+      ended: typeof snapshot.ended === 'boolean' ? snapshot.ended : null,
+      seeking: typeof snapshot.seeking === 'boolean' ? snapshot.seeking : null,
+      readyState: Number.isFinite(Number(snapshot.readyState)) ? Number(snapshot.readyState) : null,
+      networkState: Number.isFinite(Number(snapshot.networkState)) ? Number(snapshot.networkState) : null,
+      estimated: Boolean(snapshot.estimated),
+      snapshotUnavailable: Boolean(snapshot.snapshotUnavailable),
+    };
+  }
+}
+
+function summarizePlaybackDiagnostics(session) {
+  const diagnostics = ensurePlaybackDiagnostics(session);
+  return {
+    counts: { ...diagnostics.counts },
+    snapshot: { ...diagnostics.snapshot },
+    suspensionReasons: { ...diagnostics.suspensionReasons },
+    seekCount: Math.max(0, Math.floor(Number(diagnostics.seekCount) || 0)),
+    videoBoundaryCount: Math.max(0, Math.floor(Number(diagnostics.videoBoundaryCount) || 0)),
+    recentEvents: diagnostics.events.slice(-40),
+  };
+}
+
+function summarizeDiagnosticSegment(segment) {
+  const startSec = Number(segment?.startSec);
+  const endSec = Number(segment?.endSec);
+  return {
+    startSec: roundNumber(Number.isFinite(startSec) ? startSec : 0, 3),
+    endSec: roundNumber(Number.isFinite(endSec) ? endSec : 0, 3),
+    durationSec: roundNumber(
+      Number.isFinite(startSec) && Number.isFinite(endSec) ? Math.max(0, endSec - startSec) : 0,
+      3
+    ),
+    confidence: roundNumber(Number(segment?.confidence) || 0, 4),
+  };
+}
+
+function summarizeSegmentFilterAdjustments(adjustments = []) {
+  const source = Array.isArray(adjustments) ? adjustments : [];
+  const counts = {};
+  const keepProbabilities = [];
+  const notable = [];
+
+  for (const adjustment of source) {
+    const action = String(adjustment?.action || 'unknown');
+    counts[action] = (counts[action] || 0) + 1;
+    if (Number.isFinite(Number(adjustment?.keepProbability))) {
+      keepProbabilities.push(Number(adjustment.keepProbability));
+    }
+    if (
+      notable.length < 20
+      && (action === 'drop' || action === 'trim' || action === 'keep-live-protected')
+    ) {
+      notable.push({
+        index: Number.isInteger(adjustment.index) ? adjustment.index : null,
+        action,
+        keepProbability: Number.isFinite(Number(adjustment.keepProbability))
+          ? roundNumber(Number(adjustment.keepProbability), 4)
+          : null,
+        original: adjustment.original ? summarizeDiagnosticSegment(adjustment.original) : null,
+        segment: adjustment.segment ? summarizeDiagnosticSegment(adjustment.segment) : null,
+        evidence: adjustment.evidence || null,
+      });
+    }
+  }
+
+  const probabilityMean = keepProbabilities.length
+    ? keepProbabilities.reduce((sum, value) => sum + value, 0) / keepProbabilities.length
+    : null;
+  return {
+    total: source.length,
+    counts,
+    keepProbabilityMean: probabilityMean === null ? null : roundNumber(probabilityMean, 4),
+    notable,
+  };
+}
+
+function buildLiveFinalizationDiagnostics(session, options = {}) {
+  const finalSegments = Array.isArray(options.finalSegments) ? options.finalSegments : [];
+  const provisionalSegments = Array.isArray(options.provisionalSegments) ? options.provisionalSegments : [];
+  const state = ensureLiveFinalizationState(session);
+  const runtimeInfo = options.segmentFilterRuntimeInfo || session.segmentFilterRuntimeInfo || null;
+  const completedRangesSummary = summarizeCompletedAnalysisRanges(session);
+  return {
+    generatedAt: new Date().toISOString(),
+    currentTimeSec: roundNumber(Number(options.currentTimeSec) || 0, 3),
+    liveAnalysisMethod: session.liveAnalysisMethod || DEFAULT_LIVE_ANALYSIS_METHOD,
+    smoothingProfile: segmentFilterProfileForLiveAnalysisMethod(session.liveAnalysisMethod),
+    finalSegmentCount: finalSegments.length,
+    provisionalSegmentCount: provisionalSegments.length,
+    finalSegments: finalSegments.slice(0, 40).map(summarizeDiagnosticSegment),
+    finalizationState: {
+      sourceRangeCount: Array.isArray(state.sourceRanges) ? state.sourceRanges.length : 0,
+      maxSourceEndSec: Number.isFinite(Number(state.maxSourceEndSec))
+        ? roundNumber(Number(state.maxSourceEndSec), 3)
+        : null,
+      filterApplied: Boolean(state.filterApplied),
+    },
+    segmentFilter: {
+      runtimeInfo,
+      adjustmentSummary: summarizeSegmentFilterAdjustments(options.segmentFilterAdjustments),
+    },
+    completedAnalysisRanges: completedRangesSummary,
+    playbackDiagnostics: summarizePlaybackDiagnostics(session),
+    captureSuspensionStats: buildCaptureSuspensionStats(session),
+  };
+}
+
+function getPlaybackSuspensionReason(snapshot = {}) {
+  if (snapshot?.estimated) {
+    return snapshot.snapshotUnavailable ? 'snapshot-unavailable' : null;
+  }
+  if (snapshot.ended === true) return 'ended';
+  if (snapshot.paused === true) return 'paused';
+  if (snapshot.seeking === true) return 'seeking';
+  const readyState = Number(snapshot.readyState);
+  if (Number.isFinite(readyState) && readyState < PLAYBACK_READY_STATE_HAVE_CURRENT_DATA) {
+    return 'buffering';
+  }
+  return null;
+}
+
 function isContinuousPlaybackJump(session, delta, snapshot = {}) {
   if (snapshot?.estimated) return true;
 
@@ -1734,8 +2433,50 @@ function isContinuousPlaybackJump(session, delta, snapshot = {}) {
 async function reconcilePlaybackClock(session, currentTimeSec, snapshot = {}) {
   const current = toSeconds(currentTimeSec);
   const last = Number(session.lastPlaybackTimeSec);
+  const suspensionReason = getPlaybackSuspensionReason(snapshot);
+  const previousSuspensionReason = session.audioCaptureSuspendedReason || null;
+  let resumedAfterSnapshotUnavailable = false;
+
+  if (
+    session.pendingAnalysisResumeAfterDiscontinuity
+    && !snapshot?.estimated
+    && suspensionReason !== 'snapshot-unavailable'
+  ) {
+    session.pendingAnalysisResumeAfterDiscontinuity = false;
+    resetIntegerStartGate(session, current);
+    resumedAfterSnapshotUnavailable = true;
+  }
+
+  if (suspensionReason) {
+    session.playbackStallCount = 0;
+    let forcedTransition = resumedAfterSnapshotUnavailable;
+    setAudioCaptureSuspended(session, true, suspensionReason);
+    if (suspensionReason === 'snapshot-unavailable' && previousSuspensionReason !== 'snapshot-unavailable') {
+      forcedTransition = await closeActiveAnalysisRangeForDiscontinuity(session, current, 'snapshot-unavailable');
+    }
+    recordPlaybackDiagnosticEvent(session, 'playback-not-analyzable', {
+      reason: suspensionReason,
+      currentTimeSec: roundNumber(current, 3),
+      readyState: Number.isFinite(Number(snapshot.readyState)) ? Number(snapshot.readyState) : null,
+      paused: typeof snapshot.paused === 'boolean' ? snapshot.paused : null,
+      seeking: typeof snapshot.seeking === 'boolean' ? snapshot.seeking : null,
+    });
+    markPlaybackClock(session, current);
+    return { shouldAnalyze: false, forcedTransition };
+  }
+
+  if (previousSuspensionReason === 'snapshot-unavailable' || resumedAfterSnapshotUnavailable) {
+    session.playbackStallCount = 0;
+    setAudioCaptureSuspended(session, false);
+    if (!resumedAfterSnapshotUnavailable) {
+      resetIntegerStartGate(session, current);
+    }
+    markPlaybackClock(session, current);
+    return { shouldAnalyze: false, forcedTransition: true };
+  }
 
   if (!Number.isFinite(last)) {
+    setAudioCaptureSuspended(session, false);
     markPlaybackClock(session, current);
     return { shouldAnalyze: true, forcedTransition: false };
   }
@@ -1744,6 +2485,15 @@ async function reconcilePlaybackClock(session, currentTimeSec, snapshot = {}) {
   const looksLikeSeek = delta < -2
     || (delta > PLAYBACK_CLOCK_SEEK_JUMP_SEC && !isContinuousPlaybackJump(session, delta, snapshot));
   if (looksLikeSeek) {
+    const diagnostics = ensurePlaybackDiagnostics(session);
+    diagnostics.seekCount += 1;
+    recordPlaybackDiagnosticEvent(session, 'playback-seek', {
+      direction: delta < 0 ? 'backward' : 'forward',
+      deltaSec: roundNumber(delta, 3),
+      previousTimeSec: roundNumber(Number.isFinite(last) ? last : 0, 3),
+      currentTimeSec: roundNumber(current, 3),
+      estimatedSnapshot: Boolean(snapshot?.estimated),
+    });
     const forcedTransition = session.segmentTracker
       ? session.segmentTracker.finalizeAt(Math.max(0, last))
       : false;
@@ -1761,16 +2511,31 @@ async function reconcilePlaybackClock(session, currentTimeSec, snapshot = {}) {
     if (typeof session.segmentTracker?.reset === 'function') {
       session.segmentTracker.reset();
     }
+    session.playbackStallCount = 0;
+    setAudioCaptureSuspended(session, true, delta < 0 ? 'seek-backward' : 'seek-forward');
     resetIntegerStartGate(session, current);
     markPlaybackClock(session, current);
     return { shouldAnalyze: false, forcedTransition };
   }
 
   if (delta < 0.05) {
+    session.playbackStallCount = (Number(session.playbackStallCount) || 0) + 1;
+    if (session.playbackStallCount >= 2) {
+      if (!session.audioCaptureSuspended || session.audioCaptureSuspendedReason !== 'stalled') {
+        recordPlaybackDiagnosticEvent(session, 'playback-stalled', {
+          currentTimeSec: roundNumber(current, 3),
+          stallCount: session.playbackStallCount,
+          estimatedSnapshot: Boolean(snapshot?.estimated),
+        });
+      }
+      setAudioCaptureSuspended(session, true, 'stalled');
+    }
     markPlaybackClock(session, current);
     return { shouldAnalyze: false, forcedTransition: false };
   }
 
+  session.playbackStallCount = 0;
+  setAudioCaptureSuspended(session, false);
   markPlaybackClock(session, current);
   return { shouldAnalyze: true, forcedTransition: false };
 }
@@ -1788,20 +2553,23 @@ function createHeuristicDetector(session, warning = null) {
   };
 }
 
-async function createDetectorForSession(session, requestedMode) {
+async function createDetectorForSession(session, requestedMode, requestedLiveAnalysisMethod = DEFAULT_LIVE_ANALYSIS_METHOD) {
   const normalizedMode = normalizeDetectorMode(requestedMode, DEFAULT_DETECTOR_MODE);
 
   if (normalizedMode === DETECTOR_MODES.FIRERED_AED) {
     try {
+      const liveConfig = resolveLiveFrameBuilderConfig(requestedLiveAnalysisMethod);
       const detector = new FireRedAedSongDetector({
         sourceSampleRate: session.audioContext.sampleRate,
-        chunkSec: LIVE_PCM_ROLLOVER_SEC,
-        overlapSec: LIVE_PCM_OVERLAP_SEC,
+        chunkSec: liveConfig.chunkSec,
+        overlapSec: liveConfig.overlapSec,
+        liveAnalysisMethod: liveConfig.liveAnalysisMethod,
       });
       await detector.initialize();
       return {
         detector,
         detectorMode: DETECTOR_MODES.FIRERED_AED,
+        liveAnalysisMethod: liveConfig.liveAnalysisMethod,
         detectorVersion: detector.getDetectorVersion ? detector.getDetectorVersion() : FIRERED_AED_DETECTOR_VERSION,
         warning: null,
         songThreshold: detector.getSongThreshold ? detector.getSongThreshold() : null,
@@ -1875,6 +2643,15 @@ async function analyzeSession(tabId) {
 
     session.videoId = playbackSnapshot.videoId || session.videoId || null;
     const currentTimeSec = toSeconds(playbackSnapshot.currentTime);
+    if (playbackSnapshot.ended === true) {
+      await notifyStatus(session, 'PostProcessing');
+      await stopSession(tabId, {
+        emitStopped: true,
+        skipWaitForAnalysisIdle: true,
+        stopReason: 'videoEnded',
+      });
+      return;
+    }
 
     if (isWaitingForIntegerStart(session, currentTimeSec)) {
       markPlaybackClock(session, currentTimeSec);
@@ -1995,7 +2772,15 @@ function buildTrackerConfig(session) {
   };
 }
 
-async function startSession({ tabId, streamId, videoId, detectorMode, minSegmentDurationSec, startupDebugTrace }) {
+async function startSession({
+  tabId,
+  streamId,
+  videoId,
+  detectorMode,
+  liveAnalysisMethod,
+  minSegmentDurationSec,
+  startupDebugTrace,
+}) {
   const debugTrace = Array.isArray(startupDebugTrace) ? startupDebugTrace.slice() : [];
   await stopSession(tabId, { emitStopped: false, skipFinalReport: true });
 
@@ -2056,6 +2841,7 @@ async function startSession({ tabId, streamId, videoId, detectorMode, minSegment
     captureSinkGain: null,
     detector: null,
     detectorMode: DEFAULT_DETECTOR_MODE,
+    liveAnalysisMethod: normalizeLiveAnalysisMethod(liveAnalysisMethod),
     detectorVersion: FIRERED_AED_DETECTOR_VERSION,
     segmentTracker: null,
     analysisTimer: null,
@@ -2088,9 +2874,18 @@ async function startSession({ tabId, streamId, videoId, detectorMode, minSegment
     lastPlaybackAudioClockSec: null,
     lastAnalysisAudioClockSec: null,
     lastAudioChunkAudioClockSec: null,
+    audioCaptureSuspended: false,
+    audioCaptureSuspendedReason: null,
+    audioCaptureSuspensionCount: 0,
+    suspendedAudioSec: 0,
+    suspendedAudioChunkCount: 0,
+    suspendedAudioReasons: {},
+    playbackStallCount: 0,
     playbackClockCalibration: null,
     playbackSnapshotFailureCount: 0,
     nextPlaybackSnapshotRetryAt: null,
+    lastRealPlaybackSnapshotAt: null,
+    playbackDiagnostics: createPlaybackDiagnostics(),
     integerStartPending: true,
     startAnalysisAtSec: null,
     analysisStartOriginSec: null,
@@ -2103,6 +2898,7 @@ async function startSession({ tabId, streamId, videoId, detectorMode, minSegment
   const initialPlaybackSnapshot = await requestPlaybackSnapshot(tabId);
   if (initialPlaybackSnapshot && typeof initialPlaybackSnapshot.currentTime === 'number') {
     session.videoId = initialPlaybackSnapshot.videoId || session.videoId || null;
+    session.lastRealPlaybackSnapshotAt = Date.now();
     calibratePlaybackClock(session, initialPlaybackSnapshot);
     markPlaybackClock(session, initialPlaybackSnapshot.currentTime);
     session.startAnalysisAtSec = computeNextIntegerSecond(initialPlaybackSnapshot.currentTime);
@@ -2112,6 +2908,10 @@ async function startSession({ tabId, streamId, videoId, detectorMode, minSegment
     const liveSession = sessions.get(tabId);
     if (!liveSession || liveSession.stopping || !liveSession.detector) return;
     if (isAnalysisGateClosed(liveSession)) return;
+    if (liveSession.audioCaptureSuspended) {
+      recordSuspendedAudioChunk(liveSession, monoChunk);
+      return;
+    }
     if (typeof liveSession.detector.pushAudioChunk !== 'function') return;
     liveSession.detector.pushAudioChunk(monoChunk);
     const audioClockSec = Number(liveSession.audioContext?.currentTime);
@@ -2125,9 +2925,10 @@ async function startSession({ tabId, streamId, videoId, detectorMode, minSegment
   session.captureNodeType = captureNodes.captureNodeType;
   session.captureSinkGain = captureNodes.captureSinkGain;
 
-  const resolvedDetector = await createDetectorForSession(session, detectorMode);
+  const resolvedDetector = await createDetectorForSession(session, detectorMode, session.liveAnalysisMethod);
   session.detector = resolvedDetector.detector;
   session.detectorMode = resolvedDetector.detectorMode;
+  session.liveAnalysisMethod = resolvedDetector.liveAnalysisMethod || session.liveAnalysisMethod;
   session.detectorVersion = resolvedDetector.detectorVersion;
   session.warning = resolvedDetector.warning;
   session.songThreshold = resolvedDetector.songThreshold;
@@ -2149,18 +2950,19 @@ async function startSession({ tabId, streamId, videoId, detectorMode, minSegment
 
   await notifyStatus(session, 'Listening', {
     detectorMode: session.detectorMode,
+    liveAnalysisMethod: session.liveAnalysisMethod,
     detectorVersion: session.detectorVersion,
     warning: session.warning,
     runtimeInfo: session.runtimeInfo,
     minSegmentDurationSec: session.minSegmentDurationSec,
   });
 
-  await maybeReport(session, 0, { force: true });
   scheduleAnalyzeSession(tabId, { force: true });
 
   return {
     status: 'Listening',
     detectorMode: session.detectorMode,
+    liveAnalysisMethod: session.liveAnalysisMethod,
     detectorVersion: session.detectorVersion,
     warning: session.warning,
     runtimeInfo: session.runtimeInfo,
@@ -2230,6 +3032,7 @@ async function stopSession(tabId, options = {}) {
         status: 'Stopped',
         reason: stopReason || session.videoBoundaryReason || null,
         detectorMode: session.detectorMode,
+        liveAnalysisMethod: session.liveAnalysisMethod || DEFAULT_LIVE_ANALYSIS_METHOD,
         detectorVersion: session.detectorVersion,
       });
     } catch (error) {
@@ -2318,7 +3121,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   (async () => {
     try {
       if (request.action === 'offscreenStartSongDetection') {
-        const { tabId, streamId, videoId, detectorMode, minSegmentDurationSec } = request;
+        const {
+          tabId,
+          streamId,
+          videoId,
+          detectorMode,
+          liveAnalysisMethod,
+          minSegmentDurationSec,
+        } = request;
         if (typeof tabId !== 'number' || !streamId) {
           sendResponse({ success: false, message: 'Invalid offscreen start payload.' });
           return;
@@ -2329,6 +3139,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           streamId,
           videoId,
           detectorMode,
+          liveAnalysisMethod,
           minSegmentDurationSec,
           startupDebugTrace: request.debugTrace,
         });
@@ -2336,6 +3147,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           success: true,
           status: startResult.status,
           detectorMode: startResult.detectorMode,
+          liveAnalysisMethod: startResult.liveAnalysisMethod,
           detectorVersion: startResult.detectorVersion,
           warning: startResult.warning,
           runtimeInfo: startResult.runtimeInfo,
