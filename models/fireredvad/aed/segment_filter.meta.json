@@ -84,22 +84,21 @@
   "split": "by-video",
   "valGroups": [
     "video_013",
-    "video_015",
     "video_051"
   ],
-  "exampleCount": 801,
+  "exampleCount": 798,
   "positiveCount": 498,
-  "negativeCount": 303,
+  "negativeCount": 300,
   "sourceCounts": {
     "final": {
-      "total": 286,
+      "total": 285,
       "positive": 285,
-      "negative": 1
+      "negative": 0
     },
     "model-run": {
-      "total": 225,
+      "total": 223,
       "positive": 213,
-      "negative": 12
+      "negative": 10
     },
     "manual-post-end-negative": {
       "total": 288,
@@ -117,39 +116,62 @@
       0.5,
       14.0
     ],
-    "manualPostEndMinDurationSec": 2.0
+    "manualPostEndMinDurationSec": 2.0,
+    "hardNegativeAnnotations": "tools\\segment_filter_hard_negatives.csv",
+    "hardNegativeMinDurationSec": 5.0,
+    "hardNegativeOverlapSkipSec": 0.5,
+    "ambiguousUnmatchedSkip": {
+      "total": 3,
+      "byVideo": {
+        "video_013": 2,
+        "video_015": 1
+      },
+      "bySource": {
+        "final": 1,
+        "model-run": 2
+      },
+      "policy": {
+        "enabled": true,
+        "minDurationSec": 45.0,
+        "temporalMean": 0.78,
+        "musicMean": 0.82,
+        "singingMean": 0.45,
+        "singingP90": 0.88,
+        "speechMeanMax": 0.3
+      }
+    }
   },
   "modelType": "firered-segment-filter",
   "outputName": "keep_probability",
-  "keepThreshold": 0.75,
+  "keepThreshold": 0.7,
   "minSegmentDurationSec": 90.0,
-  "bestEpoch": 225,
+  "bestEpoch": 175,
   "trainMetrics": {
-    "bestThreshold": 0.5,
+    "bestThreshold": 0.65,
     "metrics": {
       "precision": 1.0,
       "recall": 1.0,
       "f1": 1.0,
-      "tp": 458,
+      "tp": 463,
       "fp": 0,
       "fn": 0,
-      "tn": 268
+      "tn": 273
     }
   },
   "validationMetrics": {
-    "bestThreshold": 0.75,
+    "bestThreshold": 0.7,
     "metrics": {
-      "precision": 0.9090909090909091,
+      "precision": 1.0,
       "recall": 1.0,
-      "f1": 0.9523809523809523,
-      "tp": 40,
-      "fp": 4,
+      "f1": 1.0,
+      "tp": 35,
+      "fp": 0,
       "fn": 0,
-      "tn": 31
+      "tn": 27
     }
   },
   "labelPolicy": {
     "keep": "Predicted segment overlaps manual song segment enough to preserve and optionally trim.",
-    "drop": "False positive, low overlap, long extra non-song/BGM-only candidate, or manual post-end negative."
+    "drop": "False positive, low overlap, long extra non-song/BGM-only candidate, manual post-end negative, or explicit hard negative."
   }
 }

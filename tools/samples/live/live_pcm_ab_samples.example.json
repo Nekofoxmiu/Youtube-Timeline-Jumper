@@ -1,0 +1,27 @@
+[
+  {
+    "id": "video_013",
+    "audio": "tools/data/audio/video_013.wav",
+    "manual": "tools/data/manual/video_013_manual.txt",
+    "end": "3600",
+    "ignoreRanges": [
+      {
+        "startSec": 1992.5,
+        "endSec": 2239,
+        "reason": "manual omitted an incomplete/ambiguous song-like performance"
+      }
+    ]
+  },
+  {
+    "id": "video_014",
+    "audio": "tools/data/audio/video_014.wav",
+    "manual": "tools/data/manual/video_014_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_015",
+    "audio": "tools/data/audio/video_015.wav",
+    "manual": "tools/data/manual/video_015_manual.txt",
+    "end": "2100"
+  }
+]

@@ -1,5 +1,6 @@
 {
   "segmentFilterVersion": "segment-filter-v2",
+  "trainingProfile": "offline-final",
   "inputName": "segment_features",
   "inputDim": 77,
   "featureNames": [
@@ -164,5 +165,11 @@
   },
   "labelPolicy": {
     "trimTargets": "manual_best_start/end minus predicted start/end, clamped to trimClampSec. Trained on keep=1 examples only."
-  }
+  },
+  "assetProfile": "offline-final",
+  "assetProfileSuffix": "offline_final",
+  "intendedRuntime": "Offline Workbench final smoothing with full-audio context.",
+  "recommendedEvaluation": "Use tools/evaluate_smoothing_batch.py with --segment-filter --segment-filter-profile offline-final.",
+  "profileAssetCopiedFrom": "edge_trim_advisor",
+  "profileAssetCopyReason": "Pin the verified offline edge advisor to this runtime profile so future live assets do not silently change offline behavior."
 }

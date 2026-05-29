@@ -1,0 +1,40 @@
+[
+  {
+    "id": "video_013_intro_no_song",
+    "audio": "tools/data/audio/video_013.wav",
+    "expectedNoSong": true,
+    "start": 0,
+    "end": 360,
+    "maxPredictedSongSec": 10
+  },
+  {
+    "id": "video_014_intro_no_song",
+    "audio": "tools/data/audio/video_014.wav",
+    "expectedNoSong": true,
+    "start": 0,
+    "end": 900,
+    "maxPredictedSongSec": 10
+  },
+  {
+    "id": "video_015_intro_no_song",
+    "audio": "tools/data/audio/video_015.wav",
+    "expectedNoSong": true,
+    "start": 0,
+    "end": 300,
+    "maxPredictedSongSec": 10
+  },
+  {
+    "id": "live_7B5UzrC_eJk_no_song_gated_stalls",
+    "audio": "tools/data/audio/live_ab_7B5UzrC_eJk.m4a",
+    "expectedNoSong": true,
+    "start": 0,
+    "end": 1800,
+    "stallInsertions": [
+      { "atSec": 420, "durationSec": 12 },
+      { "atSec": 900, "durationSec": 20 },
+      { "atSec": 1320, "durationSec": 15 }
+    ],
+    "gateStalls": true,
+    "maxPredictedSongSec": 30
+  }
+]

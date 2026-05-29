@@ -7,12 +7,14 @@ globalSmoothing.js against manually edited multi-song livestream playlists.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
@@ -29,6 +31,12 @@ from segment_filter_features import (
 VIDEO_RE = re.compile(r"video_(\d+)")
 SONG_LABELS = {"song", "auto-song", "1", "positive"}
 AUDIO_SUFFIX_PRIORITY = [".m4a", ".mp4", ".wav", ".mp3", ".webm", ".aac", ".flac", ".opus", ".ogg", ".mkv"]
+PROFILE_ASSET_SUFFIX = {
+    "default": "",
+    "offline-final": "offline_final",
+    "live-pcm30": "live_pcm30",
+    "live-realtime-aed60": "live_aed60",
+}
 
 
 @dataclass(frozen=True)
@@ -38,6 +46,7 @@ class Sample:
     manual_path: Optional[Path]
     audio_path: Optional[Path]
     stats_cache_path: Optional[Path]
+    ignore_ranges: Sequence[Dict[str, object]]
     skip_reason: Optional[str] = None
 
 
@@ -52,16 +61,48 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-sec", type=float, default=120.0)
     parser.add_argument("--min-song-count", type=int, default=2)
     parser.add_argument("--ids", nargs="*", default=None, help="Optional video numbers/keys to evaluate, e.g. 053 video_061.")
+    parser.add_argument(
+        "--ignore-ranges-samples",
+        nargs="*",
+        type=Path,
+        default=[Path("tools/samples/live/live_pcm_full_regression_samples.example.json")],
+        help="Optional sample JSON files to reuse ignoreRanges/evaluationIgnoreRanges in offline evaluation.",
+    )
     parser.add_argument("--rebuild-diagnostics", action="store_true")
+    parser.add_argument(
+        "--smoothing-profile",
+        choices=sorted(PROFILE_ASSET_SUFFIX.keys()),
+        default="offline-final",
+        help="Mode-specific smoothing profile to pass to run_global_smoothing.mjs.",
+    )
     parser.add_argument("--segment-filter", action="store_true", help="Apply experimental segment_filter.onnx and report before/after metrics.")
     parser.add_argument("--segment-filter-model-dir", type=Path, default=Path("models/fireredvad/aed"))
+    parser.add_argument(
+        "--segment-filter-profile",
+        choices=sorted(PROFILE_ASSET_SUFFIX.keys()),
+        default="offline-final",
+        help="Profile-specific asset filenames to prefer before falling back to segment_filter.*.",
+    )
     parser.add_argument("--segment-filter-threshold", type=float, default=None)
     parser.add_argument("--segment-filter-trim-threshold", type=float, default=None)
+    parser.add_argument(
+        "--require-profile-assets",
+        action="store_true",
+        help="Fail instead of falling back to default segment_filter/edge_trim_advisor assets when a profile is requested.",
+    )
     parser.add_argument("--disable-edge-trim-advisor", action="store_true")
+    parser.add_argument("--disable-start-edge-trim", action="store_true", help="Keep smoothing start times while still allowing end trim.")
     parser.add_argument("--boundary-candidates", action="store_true", help="Emit debug-only intra-segment boundary candidates; never changes output segments.")
     parser.add_argument("--simulate-live", action="store_true")
     parser.add_argument("--live-lookahead-sec", nargs="*", type=float, default=[20.0, 30.0, 60.0, 90.0, 120.0])
     parser.add_argument("--live-step-sec", type=float, default=30.0)
+    parser.add_argument("--jobs", "--parallel", dest="jobs", type=int, default=1, help="Number of samples to evaluate concurrently.")
+    parser.add_argument(
+        "--command-timeout-sec",
+        type=float,
+        default=0.0,
+        help="Optional timeout for each external diagnose/smoothing/live command. 0 disables timeout.",
+    )
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--node", default="node")
     return parser.parse_args()
@@ -75,6 +116,128 @@ def normalize_video_key(value: str) -> Optional[str]:
     if not match:
         return None
     return f"video_{int(match.group(1)):03d}"
+
+
+def parse_time_sec(value: object) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    parts = [part.strip() for part in text.split(":")]
+    try:
+        if len(parts) == 3:
+            return max(0.0, (float(parts[0]) * 3600.0) + (float(parts[1]) * 60.0) + float(parts[2]))
+        if len(parts) == 2:
+            return max(0.0, (float(parts[0]) * 60.0) + float(parts[1]))
+        return max(0.0, float(text))
+    except ValueError:
+        return 0.0
+
+
+def normalize_ignore_range(raw: object) -> Optional[Dict[str, object]]:
+    if isinstance(raw, dict):
+        start = parse_time_sec(
+            raw.get("startSec")
+            or raw.get("start_sec")
+            or raw.get("start")
+            or raw.get("from")
+        )
+        end = parse_time_sec(
+            raw.get("endSec")
+            or raw.get("end_sec")
+            or raw.get("end")
+            or raw.get("to")
+        )
+        reason = str(raw.get("reason") or raw.get("title") or raw.get("label") or "").strip()
+    elif isinstance(raw, (list, tuple)) and len(raw) >= 2:
+        start = parse_time_sec(raw[0])
+        end = parse_time_sec(raw[1])
+        reason = str(raw[2] if len(raw) >= 3 else "").strip()
+    else:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        parts = None
+        for separator in ("~", " to ", "-"):
+            if separator in text:
+                left, right = text.split(separator, 1)
+                parts = [left, right]
+                break
+        if parts is None and text.count(":") == 1:
+            left, right = text.split(":", 1)
+            parts = [left, right]
+        if not parts:
+            return None
+        start = parse_time_sec(parts[0])
+        end = parse_time_sec(parts[1])
+        reason = ""
+    if end <= start:
+        return None
+    return {"startSec": start, "endSec": end, "reason": reason}
+
+
+def dedupe_ignore_ranges(ranges: Iterable[Dict[str, object]]) -> List[Dict[str, object]]:
+    output: List[Dict[str, object]] = []
+    seen = set()
+    for item in ranges:
+        normalized = normalize_ignore_range(item)
+        if not normalized:
+            continue
+        key = (round(float(normalized["startSec"]), 3), round(float(normalized["endSec"]), 3))
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(normalized)
+    return sorted(output, key=lambda item: float(item.get("startSec", 0.0)))
+
+
+def collect_ignore_ranges_from_payload(payload: Dict[str, object], extra: Optional[Sequence[Dict[str, object]]] = None) -> List[Dict[str, object]]:
+    params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+    raw_groups = [
+        payload.get("ignoreRanges"),
+        payload.get("ignore"),
+        payload.get("evaluationIgnoreRanges"),
+        params.get("ignoreRanges"),
+        params.get("ignore"),
+        params.get("evaluationIgnoreRanges"),
+        extra,
+    ]
+    ranges: List[Dict[str, object]] = []
+    for raw_group in raw_groups:
+        if raw_group is None:
+            continue
+        ranges.extend(raw_group if isinstance(raw_group, list) else [raw_group])
+    return dedupe_ignore_ranges(ranges)
+
+
+def load_ignore_ranges_from_sample_files(paths: Sequence[Path]) -> Dict[str, List[Dict[str, object]]]:
+    ranges_by_video: Dict[str, List[Dict[str, object]]] = {}
+    for path in paths:
+        if not path.exists():
+            continue
+        payload = load_json(path)
+        if isinstance(payload, dict):
+            raw_samples = payload.get("samples") or payload.get("items") or payload.get("videos") or []
+        elif isinstance(payload, list):
+            raw_samples = payload
+        else:
+            raw_samples = []
+        for sample in raw_samples:
+            if not isinstance(sample, dict):
+                continue
+            video_key = (
+                normalize_video_key(str(sample.get("id") or ""))
+                or normalize_video_key(str(sample.get("video") or ""))
+                or normalize_video_key(str(sample.get("videoId") or ""))
+                or normalize_video_key(str(sample.get("audio") or ""))
+                or normalize_video_key(str(sample.get("manual") or ""))
+            )
+            if not video_key:
+                continue
+            ranges = collect_ignore_ranges_from_payload(sample)
+            if not ranges:
+                continue
+            ranges_by_video[video_key] = dedupe_ignore_ranges([*ranges_by_video.get(video_key, []), *ranges])
+    return ranges_by_video
 
 
 def count_manual_segments(path: Path) -> int:
@@ -130,6 +293,7 @@ def find_stats_cache(cache_dir: Path, video_key: str, audio_path: Optional[Path]
 
 def build_samples(args: argparse.Namespace) -> List[Sample]:
     annotation_counts = annotation_song_counts(args.annotations)
+    ignore_ranges_by_video = load_ignore_ranges_from_sample_files(args.ignore_ranges_samples)
     manual_counts: Dict[str, int] = {}
     manual_paths: Dict[str, Path] = {}
     if args.manual_dir.exists():
@@ -163,23 +327,39 @@ def build_samples(args: argparse.Namespace) -> List[Sample]:
             skip_reason = "missing-audio"
         elif stats_cache_path is None:
             skip_reason = "missing-stats-cache"
-        samples.append(Sample(video_key, song_count, manual_path, audio_path, stats_cache_path, skip_reason))
+        samples.append(Sample(
+            video_key=video_key,
+            song_count=song_count,
+            manual_path=manual_path,
+            audio_path=audio_path,
+            stats_cache_path=stats_cache_path,
+            ignore_ranges=ignore_ranges_by_video.get(video_key, []),
+            skip_reason=skip_reason,
+        ))
     return samples
 
 
-def run_command(command: List[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+def run_command(command: List[str], cwd: Path, timeout_sec: float = 0.0) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
-    return subprocess.run(
-        command,
-        cwd=str(cwd),
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env,
-    )
+    timeout = timeout_sec if timeout_sec and timeout_sec > 0 else None
+    try:
+        return subprocess.run(
+            command,
+            cwd=str(cwd),
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout if isinstance(error.stdout, str) else (error.stdout or b"").decode("utf-8", errors="replace")
+        stderr = error.stderr if isinstance(error.stderr, str) else (error.stderr or b"").decode("utf-8", errors="replace")
+        timeout_message = f"\nCommand timed out after {timeout_sec:.1f}s: {' '.join(command)}"
+        return subprocess.CompletedProcess(command, 124, stdout, f"{stderr}{timeout_message}")
 
 
 def tail_text(value: str, max_lines: int = 80) -> str:
@@ -191,8 +371,42 @@ def load_json(path: Path) -> object:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def profile_asset_name(stem: str, suffix: str, extension: str) -> str:
+    return f"{stem}_{suffix}{extension}" if suffix else f"{stem}{extension}"
+
+
+def resolve_profile_asset_pair(model_dir: Path, stem: str, profile: str) -> tuple[Path, Path, str]:
+    suffix = PROFILE_ASSET_SUFFIX.get(profile, "")
+    if suffix:
+        profile_model = model_dir / profile_asset_name(stem, suffix, ".onnx")
+        profile_meta = model_dir / profile_asset_name(stem, suffix, ".meta.json")
+        if profile_model.exists() and profile_meta.exists():
+            return profile_model, profile_meta, profile
+    return model_dir / f"{stem}.onnx", model_dir / f"{stem}.meta.json", "default"
+
+
+def assert_profile_asset_used(kind: str, requested_profile: str, used_profile: str) -> None:
+    if requested_profile == "default" or used_profile == requested_profile:
+        return
+    raise RuntimeError(
+        f"Required {kind} profile assets were not loaded for {requested_profile!r}; "
+        f"resolved profile was {used_profile!r}. Check --segment-filter-model-dir or disable --require-profile-assets."
+    )
+
+
 def overlap_seconds(left: Dict[str, float], right: Dict[str, float]) -> float:
     return max(0.0, min(float(left["endSec"]), float(right["endSec"])) - max(float(left["startSec"]), float(right["startSec"])))
+
+
+def overlap_with_ignore_ranges(segment: Dict[str, float], ignore_ranges: Sequence[Dict[str, object]]) -> float:
+    overlap = 0.0
+    for ignore_range in ignore_ranges:
+        try:
+            overlap += overlap_seconds(segment, ignore_range)  # type: ignore[arg-type]
+        except (KeyError, TypeError, ValueError):
+            continue
+    duration = max(0.0, float(segment.get("endSec", 0.0)) - float(segment.get("startSec", 0.0)))
+    return min(duration, overlap)
 
 
 def classify_match_outlier(video_key: str, match: Dict[str, object]) -> List[Dict[str, object]]:
@@ -224,17 +438,20 @@ def classify_match_outlier(video_key: str, match: Dict[str, object]) -> List[Dic
 def classify_prediction_outliers(video_key: str, summary: Dict[str, object]) -> List[Dict[str, object]]:
     outliers: List[Dict[str, object]] = []
     manual_segments = [match.get("manual") for match in summary.get("matches", []) if isinstance(match.get("manual"), dict)]
+    ignore_ranges = collect_ignore_ranges_from_payload(summary)
     for segment in summary.get("segments", []):
         if not isinstance(segment, dict):
             continue
         duration = float(segment.get("endSec") or 0) - float(segment.get("startSec") or 0)
-        overlap = sum(overlap_seconds(segment, manual) for manual in manual_segments)
-        extra = duration - overlap
+        manual_overlap = sum(overlap_seconds(segment, manual) for manual in manual_segments)
+        ignored_overlap = overlap_with_ignore_ranges(segment, ignore_ranges)
+        extra = duration - manual_overlap - ignored_overlap
         if extra > 60:
             outliers.append({
                 "type": "false-positive-long",
                 "video": video_key,
                 "extraSec": extra,
+                "ignoredOverlapSec": ignored_overlap,
                 "segment": segment,
             })
     return outliers
@@ -330,16 +547,23 @@ class SegmentFilterRuntime:
     def __init__(
         self,
         model_dir: Path,
+        asset_profile: str = "offline-final",
         keep_threshold: Optional[float] = None,
         trim_threshold: Optional[float] = None,
         enable_edge_trim: bool = True,
+        require_profile_assets: bool = False,
     ) -> None:
         try:
             import onnxruntime as ort
         except Exception as error:  # pragma: no cover - exercised in local tooling only.
             raise RuntimeError(f"onnxruntime is required for --segment-filter: {error}") from error
-        self.model_path = model_dir / "segment_filter.onnx"
-        self.meta_path = model_dir / "segment_filter.meta.json"
+        self.model_path, self.meta_path, self.asset_profile_used = resolve_profile_asset_pair(
+            model_dir,
+            "segment_filter",
+            asset_profile,
+        )
+        if require_profile_assets:
+            assert_profile_asset_used("segment_filter", asset_profile, self.asset_profile_used)
         if not self.model_path.exists() or not self.meta_path.exists():
             raise RuntimeError(f"segment filter assets not found in {model_dir}")
         self.meta = load_json(self.meta_path)
@@ -350,8 +574,13 @@ class SegmentFilterRuntime:
         self.trim_clamp_sec = float(self.meta.get("trimClampSec", DEFAULT_FILTER_POLICY["trim_clamp_sec"]))
         self.trim_scale = float(self.meta.get("trimScale", DEFAULT_FILTER_POLICY["trim_scale"]))
         self.min_segment_duration_sec = float(self.meta.get("minSegmentDurationSec", DEFAULT_FILTER_POLICY["min_segment_duration_sec"]))
-        self.edge_model_path = model_dir / "edge_trim_advisor.onnx"
-        self.edge_meta_path = model_dir / "edge_trim_advisor.meta.json"
+        self.edge_model_path, self.edge_meta_path, self.edge_asset_profile_used = resolve_profile_asset_pair(
+            model_dir,
+            "edge_trim_advisor",
+            asset_profile,
+        )
+        if enable_edge_trim and require_profile_assets:
+            assert_profile_asset_used("edge_trim_advisor", asset_profile, self.edge_asset_profile_used)
         self.edge_meta = None
         self.edge_session = None
         self.edge_input_name = None
@@ -544,6 +773,7 @@ def apply_segment_filter_to_summary(
     filtered_segments, adjustments = apply_segment_filter_predictions(
         summary.get("segments") or [],
         predictions,
+        frames=frames,
         start_sec=0.0,
         end_sec=float(summary.get("endSec") or frames_payload.get("durationSec") or 0),
         keep_threshold=runtime.keep_threshold,
@@ -551,13 +781,29 @@ def apply_segment_filter_to_summary(
         trim_clamp_sec=runtime.trim_clamp_sec,
         trim_scale=runtime.trim_scale,
         min_segment_duration_sec=runtime.min_segment_duration_sec,
+        allow_start_trim=not args.disable_start_edge_trim,
     )
     times = [float(frame.get("timeSec") or 0) for frame in frames]
+    ignore_ranges = collect_ignore_ranges_from_payload(summary, sample.ignore_ranges)
+    evaluation_mask = [
+        not any(float(ignore_range.get("startSec", 0.0)) <= time_sec < float(ignore_range.get("endSec", 0.0)) for ignore_range in ignore_ranges)
+        for time_sec in times
+    ]
+    ignored_frame_count = sum(1 for keep in evaluation_mask if not keep)
+
+    def filter_by_evaluation_mask(values: Sequence[int]) -> List[int]:
+        return [value for value, keep in zip(values, evaluation_mask) if keep]
+
+    predicted_labels = labels_from_segments(times, filtered_segments)
+    manual_labels = labels_from_segments(times, manual_segments)
     filtered_summary = {
         **summary,
         "method": f"{summary.get('method', 'unknown')}+segment-filter",
         "segments": filtered_segments,
-        "metrics": frame_metrics(labels_from_segments(times, filtered_segments), labels_from_segments(times, manual_segments)),
+        "ignoreRanges": ignore_ranges,
+        "evaluationIgnoredFrameCount": ignored_frame_count,
+        "evaluationIgnoredSec": ignored_frame_count * float(frames_payload.get("hopSec") or summary.get("hopSec") or 0.5),
+        "metrics": frame_metrics(filter_by_evaluation_mask(predicted_labels), filter_by_evaluation_mask(manual_labels)),
         "matches": segment_matches(filtered_segments, manual_segments),
         "boundaryCandidates": boundary_candidates_for_segments(filtered_segments, frames) if args.boundary_candidates else [],
         "segmentFilter": {
@@ -568,6 +814,7 @@ def apply_segment_filter_to_summary(
             "edgeMetaPath": str(runtime.edge_meta_path) if runtime.edge_session is not None else None,
             "keepThreshold": runtime.keep_threshold,
             "trimConfidenceThreshold": runtime.trim_threshold,
+            "startEdgeTrimEnabled": not args.disable_start_edge_trim,
             "trimScale": runtime.trim_scale,
             "predictions": predictions,
             "adjustments": adjustments,
@@ -588,7 +835,7 @@ def run_live_simulation(args: argparse.Namespace, sample: Sample, frames_path: P
     live_path = args.out_dir / f"{sample.video_key}.live_simulation.json"
     cmd = [
         args.node,
-        "tools/simulate_live_smoothing.mjs",
+        "tools/live/simulate_live_smoothing.mjs",
         "--frames",
         str(frames_path),
         "--manual",
@@ -599,8 +846,15 @@ def run_live_simulation(args: argparse.Namespace, sample: Sample, frames_path: P
         *[str(value) for value in args.live_lookahead_sec],
         "--step-sec",
         str(args.live_step_sec),
+        "--smoothing-profile",
+        args.smoothing_profile,
     ]
-    result = run_command(cmd, repo_root)
+    if sample.ignore_ranges:
+        cmd.extend([
+            "--ignore-ranges",
+            ",".join(f"{float(item['startSec']):.3f}:{float(item['endSec']):.3f}" for item in sample.ignore_ranges),
+        ])
+    result = run_command(cmd, repo_root, args.command_timeout_sec)
     if result.returncode != 0:
         raise RuntimeError(f"live simulation failed for {sample.video_key}\n{tail_text(result.stdout)}\n{tail_text(result.stderr)}")
     payload = load_json(live_path)
@@ -634,7 +888,7 @@ def evaluate_sample(args: argparse.Namespace, sample: Sample, repo_root: Path, s
         ]
         if args.rebuild_diagnostics:
             diagnose_cmd.append("--rebuild")
-        diagnose = run_command(diagnose_cmd, repo_root)
+        diagnose = run_command(diagnose_cmd, repo_root, args.command_timeout_sec)
         if diagnose.returncode != 0:
             raise RuntimeError(f"diagnose failed for {sample.video_key}\n{tail_text(diagnose.stdout)}\n{tail_text(diagnose.stderr)}")
 
@@ -647,9 +901,16 @@ def evaluate_sample(args: argparse.Namespace, sample: Sample, repo_root: Path, s
         str(sample.manual_path),
         "--out",
         str(smoothing_path),
+        "--smoothing-profile",
+        args.smoothing_profile,
     ]
-    if args.rebuild_diagnostics or not smoothing_path.exists():
-        smoothing = run_command(smoothing_cmd, repo_root)
+    if sample.ignore_ranges:
+        smoothing_cmd.extend([
+            "--ignore-ranges",
+            ",".join(f"{float(item['startSec']):.3f}:{float(item['endSec']):.3f}" for item in sample.ignore_ranges),
+        ])
+    if args.rebuild_diagnostics or not smoothing_path.exists() or sample.ignore_ranges:
+        smoothing = run_command(smoothing_cmd, repo_root, args.command_timeout_sec)
         if smoothing.returncode != 0:
             raise RuntimeError(f"smoothing failed for {sample.video_key}\n{tail_text(smoothing.stdout)}\n{tail_text(smoothing.stderr)}")
 
@@ -676,6 +937,8 @@ def evaluate_sample(args: argparse.Namespace, sample: Sample, repo_root: Path, s
         "audioPath": str(sample.audio_path),
         "manualPath": str(sample.manual_path),
         "statsCachePath": str(sample.stats_cache_path),
+        "ignoreRanges": list(sample.ignore_ranges),
+        "evaluationIgnoredSec": active_summary.get("evaluationIgnoredSec") or summary.get("evaluationIgnoredSec") or 0,
         "framesPath": str(frames_path),
         "summaryPath": str(smoothing_path),
         "segmentFilterSummaryPath": segment_filter_summary_path,
@@ -686,6 +949,7 @@ def evaluate_sample(args: argparse.Namespace, sample: Sample, repo_root: Path, s
         "rawModelMetrics": summary.get("rawModelMetrics") or {},
         "method": active_summary.get("method"),
         "baselineMethod": summary.get("method"),
+        "smoothingProfile": active_summary.get("smoothingProfile") or summary.get("smoothingProfile"),
         "smoothingVersion": summary.get("smoothingVersion"),
         "segmentCount": len(active_summary.get("segments") or []),
         "baselineSegmentCount": len(summary.get("segments") or []),
@@ -695,6 +959,85 @@ def evaluate_sample(args: argparse.Namespace, sample: Sample, repo_root: Path, s
         "baselineSevereOutliers": baseline_severe_outliers,
         "segmentFilterSevereOutliers": segment_filter_outliers,
     }
+
+
+_WORKER_ARGS: Optional[argparse.Namespace] = None
+_WORKER_REPO_ROOT: Optional[Path] = None
+_WORKER_SEGMENT_FILTER_RUNTIME: Optional[SegmentFilterRuntime] = None
+
+
+def initialize_evaluate_worker(args: argparse.Namespace, repo_root: str) -> None:
+    global _WORKER_ARGS, _WORKER_REPO_ROOT, _WORKER_SEGMENT_FILTER_RUNTIME
+    _WORKER_ARGS = args
+    _WORKER_REPO_ROOT = Path(repo_root)
+    _WORKER_SEGMENT_FILTER_RUNTIME = None
+    if getattr(args, "_segment_filter_available", False):
+        _WORKER_SEGMENT_FILTER_RUNTIME = SegmentFilterRuntime(
+            args.segment_filter_model_dir,
+            asset_profile=args.segment_filter_profile,
+            keep_threshold=args.segment_filter_threshold,
+            trim_threshold=args.segment_filter_trim_threshold,
+            enable_edge_trim=not args.disable_edge_trim_advisor,
+            require_profile_assets=args.require_profile_assets,
+        )
+
+
+def evaluate_sample_worker(sample: Sample) -> Dict[str, object]:
+    if _WORKER_ARGS is None or _WORKER_REPO_ROOT is None:
+        raise RuntimeError("parallel worker was not initialized")
+    return evaluate_sample(_WORKER_ARGS, sample, _WORKER_REPO_ROOT, _WORKER_SEGMENT_FILTER_RUNTIME)
+
+
+def evaluate_samples_parallel(
+    args: argparse.Namespace,
+    runnable: Sequence[Sample],
+    repo_root: Path,
+    segment_filter_runtime: Optional[SegmentFilterRuntime],
+) -> tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+    args._segment_filter_available = segment_filter_runtime is not None
+    jobs = max(1, min(int(args.jobs or 1), len(runnable)))
+    evaluated_by_video: Dict[str, Dict[str, object]] = {}
+    failures_by_video: Dict[str, Dict[str, object]] = {}
+    print(f"[batch] parallel jobs={jobs}", flush=True)
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=jobs,
+        initializer=initialize_evaluate_worker,
+        initargs=(args, str(repo_root)),
+    ) as executor:
+        future_map = {}
+        started_at = {}
+        for index, sample in enumerate(runnable, 1):
+            print(f"[batch] queued {index}/{len(runnable)} {sample.video_key} songs={sample.song_count}", flush=True)
+            future = executor.submit(evaluate_sample_worker, sample)
+            future_map[future] = (index, sample)
+            started_at[future] = time.time()
+        for future in concurrent.futures.as_completed(future_map):
+            index, sample = future_map[future]
+            elapsed_sec = time.time() - started_at[future]
+            try:
+                result = future.result()
+                evaluated_by_video[sample.video_key] = result
+                metrics = result["metrics"]
+                print(
+                    f"[batch] done {index}/{len(runnable)} {sample.video_key} "
+                    f"elapsed={elapsed_sec:.1f}s "
+                    f"f1={float(metrics.get('f1') or 0):.4f} "
+                    f"p={float(metrics.get('precision') or 0):.4f} "
+                    f"r={float(metrics.get('recall') or 0):.4f} "
+                    f"outliers={len(result['severeOutliers'])}",
+                    flush=True,
+                )
+            except Exception as error:
+                failures_by_video[sample.video_key] = {"video": sample.video_key, "error": str(error)}
+                print(
+                    f"[batch] failed {index}/{len(runnable)} {sample.video_key} "
+                    f"elapsed={elapsed_sec:.1f}s: {error}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+    evaluated = [evaluated_by_video[sample.video_key] for sample in runnable if sample.video_key in evaluated_by_video]
+    failures = [failures_by_video[sample.video_key] for sample in runnable if sample.video_key in failures_by_video]
+    return evaluated, failures
 
 
 def main() -> None:
@@ -709,13 +1052,17 @@ def main() -> None:
         try:
             segment_filter_runtime = SegmentFilterRuntime(
                 args.segment_filter_model_dir,
+                asset_profile=args.segment_filter_profile,
                 keep_threshold=args.segment_filter_threshold,
                 trim_threshold=args.segment_filter_trim_threshold,
                 enable_edge_trim=not args.disable_edge_trim_advisor,
+                require_profile_assets=args.require_profile_assets,
             )
         except Exception as error:
             segment_filter_warning = str(error)
             print(f"[batch] segment filter unavailable; fallback to baseline heuristic: {error}", file=sys.stderr)
+            if args.require_profile_assets:
+                raise SystemExit(1) from error
 
     samples = build_samples(args)
     skipped = [
@@ -726,29 +1073,40 @@ def main() -> None:
             "manualPath": str(sample.manual_path) if sample.manual_path else None,
             "audioPath": str(sample.audio_path) if sample.audio_path else None,
             "statsCachePath": str(sample.stats_cache_path) if sample.stats_cache_path else None,
+            "ignoreRanges": list(sample.ignore_ranges),
         }
         for sample in samples
         if sample.skip_reason
     ]
 
-    evaluated = []
-    failures = []
     runnable = [sample for sample in samples if not sample.skip_reason]
-    print(f"[batch] samples={len(samples)} runnable={len(runnable)} skipped={len(skipped)} out={args.out_dir}")
-    for index, sample in enumerate(runnable, 1):
-        print(f"[batch] {index}/{len(runnable)} {sample.video_key} songs={sample.song_count}")
-        try:
-            result = evaluate_sample(args, sample, repo_root, segment_filter_runtime)
-            evaluated.append(result)
-            metrics = result["metrics"]
-            print(
-                f"[batch] {sample.video_key} f1={float(metrics.get('f1') or 0):.4f} "
-                f"p={float(metrics.get('precision') or 0):.4f} r={float(metrics.get('recall') or 0):.4f} "
-                f"outliers={len(result['severeOutliers'])}"
-            )
-        except Exception as error:
-            failures.append({"video": sample.video_key, "error": str(error)})
-            print(f"[batch] {sample.video_key} failed: {error}", file=sys.stderr)
+    args.jobs = max(1, int(args.jobs or 1))
+    args.command_timeout_sec = max(0.0, float(args.command_timeout_sec or 0.0))
+    print(
+        f"[batch] samples={len(samples)} runnable={len(runnable)} skipped={len(skipped)} "
+        f"jobs={min(args.jobs, max(1, len(runnable)))} out={args.out_dir}"
+    )
+    if args.jobs > 1 and len(runnable) > 1:
+        evaluated, failures = evaluate_samples_parallel(args, runnable, repo_root, segment_filter_runtime)
+    else:
+        evaluated = []
+        failures = []
+        for index, sample in enumerate(runnable, 1):
+            print(f"[batch] {index}/{len(runnable)} {sample.video_key} songs={sample.song_count}")
+            started_at = time.time()
+            try:
+                result = evaluate_sample(args, sample, repo_root, segment_filter_runtime)
+                evaluated.append(result)
+                metrics = result["metrics"]
+                print(
+                    f"[batch] {sample.video_key} elapsed={time.time() - started_at:.1f}s "
+                    f"f1={float(metrics.get('f1') or 0):.4f} "
+                    f"p={float(metrics.get('precision') or 0):.4f} r={float(metrics.get('recall') or 0):.4f} "
+                    f"outliers={len(result['severeOutliers'])}"
+                )
+            except Exception as error:
+                failures.append({"video": sample.video_key, "error": str(error)})
+                print(f"[batch] {sample.video_key} failed: {error}", file=sys.stderr)
 
     severe_outliers = []
     for item in evaluated:
@@ -758,6 +1116,13 @@ def main() -> None:
         "outDir": str(args.out_dir),
         "segmentFilterEnabled": bool(segment_filter_runtime),
         "segmentFilterWarning": segment_filter_warning,
+        "segmentFilterModelDir": str(args.segment_filter_model_dir),
+        "smoothingProfile": args.smoothing_profile,
+        "segmentFilterRequestedProfile": args.segment_filter_profile,
+        "segmentFilterAssetProfileUsed": segment_filter_runtime.asset_profile_used if segment_filter_runtime else None,
+        "edgeTrimAdvisorAssetProfileUsed": segment_filter_runtime.edge_asset_profile_used if segment_filter_runtime else None,
+        "jobs": min(args.jobs, max(1, len(runnable))),
+        "commandTimeoutSec": args.command_timeout_sec,
         "evaluatedCount": len(evaluated),
         "skippedCount": len(skipped),
         "failureCount": len(failures),

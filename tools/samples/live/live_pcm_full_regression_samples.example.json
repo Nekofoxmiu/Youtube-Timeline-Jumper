@@ -1,0 +1,141 @@
+[
+  {
+    "id": "video_013",
+    "audio": "tools/data/audio/video_013.wav",
+    "manual": "tools/data/manual/video_013_manual.txt",
+    "end": "3600",
+    "ignoreRanges": [
+      {
+        "startSec": 1992.5,
+        "endSec": 2239,
+        "reason": "manual omitted an incomplete/ambiguous song-like performance"
+      }
+    ]
+  },
+  {
+    "id": "video_014",
+    "audio": "tools/data/audio/video_014.wav",
+    "manual": "tools/data/manual/video_014_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_015",
+    "audio": "tools/data/audio/video_015.wav",
+    "manual": "tools/data/manual/video_015_manual.txt",
+    "end": "2100"
+  },
+  {
+    "id": "video_051_first_hour",
+    "audio": "tools/data/audio/video_051.m4a",
+    "manual": "tools/data/manual/video_051_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_053_first_hour",
+    "audio": "tools/data/audio/video_053.m4a",
+    "manual": "tools/data/manual/video_053_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_054_first_hour",
+    "audio": "tools/data/audio/video_054.m4a",
+    "manual": "tools/data/manual/video_054_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_055_first_hour",
+    "audio": "tools/data/audio/video_055.m4a",
+    "manual": "tools/data/manual/video_055_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_056_first_hour",
+    "audio": "tools/data/audio/video_056.m4a",
+    "manual": "tools/data/manual/video_056_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_057_first_hour",
+    "audio": "tools/data/audio/video_057.m4a",
+    "manual": "tools/data/manual/video_057_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_058_first_hour",
+    "audio": "tools/data/audio/video_058.m4a",
+    "manual": "tools/data/manual/video_058_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_059_first_hour",
+    "audio": "tools/data/audio/video_059.m4a",
+    "manual": "tools/data/manual/video_059_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_060_first_hour",
+    "audio": "tools/data/audio/video_060.m4a",
+    "manual": "tools/data/manual/video_060_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_061_first_hour",
+    "audio": "tools/data/audio/video_061.m4a",
+    "manual": "tools/data/manual/video_061_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_062_first_hour",
+    "audio": "tools/data/audio/video_062.m4a",
+    "manual": "tools/data/manual/video_062_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_063_first_hour",
+    "audio": "tools/data/audio/video_063.m4a",
+    "manual": "tools/data/manual/video_063_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_064_first_hour",
+    "audio": "tools/data/audio/video_064.m4a",
+    "manual": "tools/data/manual/video_064_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_065_first_hour",
+    "audio": "tools/data/audio/video_065.m4a",
+    "manual": "tools/data/manual/video_065_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_066_first_hour",
+    "audio": "tools/data/audio/video_066.m4a",
+    "manual": "tools/data/manual/video_066_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_067_first_hour",
+    "audio": "tools/data/audio/video_067.m4a",
+    "manual": "tools/data/manual/video_067_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_068_first_hour",
+    "audio": "tools/data/audio/video_068.m4a",
+    "manual": "tools/data/manual/video_068_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_069_first_hour",
+    "audio": "tools/data/audio/video_069.m4a",
+    "manual": "tools/data/manual/video_069_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_070_known_bgm_tail_2h",
+    "audio": "tools/data/audio/video_070.m4a",
+    "manual": "tools/data/manual/video_070_manual.txt",
+    "end": "7200"
+  }
+]

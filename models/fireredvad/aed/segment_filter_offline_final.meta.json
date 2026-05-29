@@ -1,5 +1,6 @@
 {
   "segmentFilterVersion": "segment-filter-v2",
+  "trainingProfile": "offline-final",
   "inputName": "segment_features",
   "inputDim": 77,
   "featureNames": [
@@ -141,28 +142,43 @@
       }
     }
   },
-  "modelType": "firered-edge-trim-advisor",
-  "outputName": "edge_trim_delta_sec",
-  "trimConfidenceThreshold": 0.7,
-  "trimClampSec": 60.0,
-  "trimScale": 0.75,
-  "enableLiveEndTrimEvidenceGuard": true,
-  "enableLiveEndTrimEvidenceGuardReason": "Reject live edge trims when the proposed trimmed tail still has strong song evidence. This protects against annotation-polluted end-trim targets.",
+  "modelType": "firered-segment-filter",
+  "outputName": "keep_probability",
+  "keepThreshold": 0.7,
   "minSegmentDurationSec": 90.0,
-  "bestEpoch": 725,
+  "bestEpoch": 175,
   "trainMetrics": {
-    "deltaMae": {
-      "start": 0.9305701938017269,
-      "end": 0.8765473875858807
+    "bestThreshold": 0.65,
+    "metrics": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 463,
+      "fp": 0,
+      "fn": 0,
+      "tn": 273
     }
   },
   "validationMetrics": {
-    "deltaMae": {
-      "start": 7.349933534807392,
-      "end": 6.830484880719866
+    "bestThreshold": 0.7,
+    "metrics": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 35,
+      "fp": 0,
+      "fn": 0,
+      "tn": 27
     }
   },
   "labelPolicy": {
-    "trimTargets": "manual_best_start/end minus predicted start/end, clamped to trimClampSec. Trained on keep=1 examples only."
-  }
+    "keep": "Predicted segment overlaps manual song segment enough to preserve and optionally trim.",
+    "drop": "False positive, low overlap, long extra non-song/BGM-only candidate, manual post-end negative, or explicit hard negative."
+  },
+  "assetProfile": "offline-final",
+  "assetProfileSuffix": "offline_final",
+  "intendedRuntime": "Offline Workbench final smoothing with full-audio context.",
+  "recommendedEvaluation": "Use tools/evaluate_smoothing_batch.py with --segment-filter --segment-filter-profile offline-final.",
+  "profileAssetCopiedFrom": "segment_filter",
+  "profileAssetCopyReason": "Pin the verified offline finalization model to this runtime profile so future live assets do not silently change offline behavior."
 }

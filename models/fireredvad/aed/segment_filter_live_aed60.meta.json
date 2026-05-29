@@ -1,0 +1,347 @@
+{
+  "segmentFilterVersion": "segment-filter-v2",
+  "trainingProfile": "live-realtime-aed60",
+  "assetProfile": "live-realtime-aed60",
+  "assetProfileSuffix": "live_aed60",
+  "intendedRuntime": "Realtime 60-second AED cache finalization candidates.",
+  "recommendedEvaluation": "Use tools/live/run_live_pcm_ab_samples.mjs with aed60-current and aed60-candidate-model.",
+  "summaryGlobs": [
+    "*_aed60_filter_off.json"
+  ],
+  "inputName": "segment_features",
+  "inputDim": 77,
+  "featureNames": [
+    "duration_sec",
+    "confidence",
+    "temporal_mean",
+    "temporal_p10",
+    "temporal_p50",
+    "temporal_p90",
+    "temporal_std",
+    "temporal_above_threshold_ratio",
+    "singing_mean",
+    "singing_p50",
+    "singing_p90",
+    "singing_ratio_mean",
+    "singing_ratio_p90",
+    "music_mean",
+    "music_p50",
+    "music_p90",
+    "music_ratio_mean",
+    "music_ratio_p90",
+    "speech_mean",
+    "speech_p50",
+    "speech_p90",
+    "speech_ratio_mean",
+    "speech_ratio_p90",
+    "audio_rms_mean",
+    "audio_rms_p50",
+    "audio_rms_p90",
+    "audio_peak_mean",
+    "audio_peak_p90",
+    "spectral_flatness_mean",
+    "spectral_flatness_p50",
+    "spectral_flatness_p90",
+    "spectral_flux_mean",
+    "spectral_flux_p50",
+    "spectral_flux_p90",
+    "mid_energy_ratio_mean",
+    "mid_energy_ratio_p50",
+    "mid_energy_ratio_p90",
+    "low_energy_ratio_mean",
+    "low_energy_ratio_p90",
+    "start_reset_ratio",
+    "start_speech_reset_ratio",
+    "start_low_energy_ratio",
+    "start_music_mean",
+    "start_singing_mean",
+    "start_speech_mean",
+    "end_reset_ratio",
+    "end_speech_reset_ratio",
+    "end_low_energy_ratio",
+    "end_music_mean",
+    "end_singing_mean",
+    "end_speech_mean",
+    "model_only_fallback",
+    "tracker_segment",
+    "fallback_segment",
+    "selected_model_fallback_segment",
+    "music_only_extra_score",
+    "frame_count",
+    "relative_start",
+    "relative_end",
+    "baseline_frame_count",
+    "baseline_temporal_mean",
+    "baseline_temporal_p90",
+    "baseline_singing_mean",
+    "baseline_singing_p90",
+    "baseline_music_mean",
+    "baseline_music_p90",
+    "baseline_speech_mean",
+    "baseline_speech_p90",
+    "baseline_audio_rms_mean",
+    "baseline_audio_rms_p90",
+    "baseline_spectral_flatness_mean",
+    "baseline_spectral_flux_mean",
+    "segment_temporal_vs_baseline",
+    "segment_singing_vs_baseline",
+    "segment_music_vs_baseline",
+    "segment_speech_vs_baseline",
+    "segment_rms_vs_baseline"
+  ],
+  "split": "by-video",
+  "valGroups": [
+    "video_013",
+    "video_015"
+  ],
+  "exampleCount": 302,
+  "positiveCount": 194,
+  "negativeCount": 108,
+  "sourceCounts": {
+    "final": {
+      "total": 113,
+      "positive": 112,
+      "negative": 1
+    },
+    "model-run": {
+      "total": 82,
+      "positive": 79,
+      "negative": 3
+    },
+    "manual-post-end-negative": {
+      "total": 100,
+      "positive": 0,
+      "negative": 100
+    },
+    "explicit-hard-negative-window": {
+      "total": 4,
+      "positive": 0,
+      "negative": 4
+    },
+    "tracker": {
+      "total": 3,
+      "positive": 3,
+      "negative": 0
+    }
+  },
+  "negativeMining": {
+    "manualPostEndWindowSec": [
+      0.5,
+      14.0
+    ],
+    "manualPostEndMinDurationSec": 2.0,
+    "hardNegativeAnnotations": "tools\\segment_filter_hard_negatives.csv",
+    "hardNegativeMinDurationSec": 5.0,
+    "hardNegativeOverlapSkipSec": 0.5,
+    "hardNegativeSubwindowSec": 60.0,
+    "hardNegativeSubwindowHopSec": 30.0,
+    "ambiguousUnmatchedSkip": {
+      "total": 4,
+      "byVideo": {
+        "video_051_first_hour": 4
+      },
+      "bySource": {
+        "explicit-hard-negative-window": 4
+      },
+      "policy": {
+        "enabled": true,
+        "minDurationSec": 45.0,
+        "temporalMean": 0.78,
+        "musicMean": 0.82,
+        "singingMean": 0.45,
+        "singingP90": 0.88,
+        "speechMeanMax": 0.3
+      }
+    },
+    "tailSongTargetGuard": {
+      "enabled": true,
+      "total": 38,
+      "adjusted": 8,
+      "byVideo": {
+        "video_053_first_hour": 1,
+        "video_055_first_hour": 1,
+        "video_056_first_hour": 1,
+        "video_057_first_hour": 1,
+        "video_058_first_hour": 1,
+        "video_060_first_hour": 1,
+        "video_062_first_hour": 1,
+        "video_067_first_hour": 1
+      },
+      "policy": {
+        "minTrimSec": 8.0,
+        "maxProtectedTrimSec": 12.0,
+        "temporalMean": 0.5,
+        "temporalP90": 0.72,
+        "singingMean": 0.3,
+        "singingP90": 0.7,
+        "speechMean": 0.58,
+        "lowEnergyMean": 0.72
+      }
+    },
+    "postEndNegativeSongEvidenceSkip": {
+      "enabled": true,
+      "total": 3,
+      "byVideo": {
+        "video_051_first_hour": 1,
+        "video_058_first_hour": 1,
+        "video_062_first_hour": 1
+      },
+      "examples": [
+        {
+          "video": "video_051_first_hour",
+          "manualIndex": 0,
+          "startSec": 916.5,
+          "endSec": 930.0,
+          "stats": {
+            "frameCount": 28,
+            "strongSongTail": true,
+            "clearNonSongTail": false,
+            "temporalMean": 0.6205389244215829,
+            "temporalP90": 0.8350986003875732,
+            "singingMean": 0.7166189093674932,
+            "singingP90": 0.9871724247932434,
+            "speechMean": 0.5103623441287449,
+            "lowEnergyMean": 0.09223419707580303,
+            "postEndNegativeSkipped": true,
+            "postEndNegativeSkipReason": "tail-still-looks-song-like"
+          }
+        },
+        {
+          "video": "video_058_first_hour",
+          "manualIndex": 5,
+          "startSec": 3441.5,
+          "endSec": 3455.0,
+          "stats": {
+            "frameCount": 28,
+            "strongSongTail": true,
+            "clearNonSongTail": false,
+            "temporalMean": 0.6060059985944203,
+            "temporalP90": 0.7827814936637878,
+            "singingMean": 0.22790038479225977,
+            "singingP90": 0.9424889087677002,
+            "speechMean": 0.11893253347703389,
+            "lowEnergyMean": 0.4040825778668347,
+            "postEndNegativeSkipped": true,
+            "postEndNegativeSkipReason": "tail-still-looks-song-like"
+          }
+        },
+        {
+          "video": "video_062_first_hour",
+          "manualIndex": 7,
+          "startSec": 3486.5,
+          "endSec": 3500.0,
+          "stats": {
+            "frameCount": 28,
+            "strongSongTail": true,
+            "clearNonSongTail": false,
+            "temporalMean": 0.6273004817111152,
+            "temporalP90": 0.9283430933952331,
+            "singingMean": 0.4065521774547441,
+            "singingP90": 0.9880605280399323,
+            "speechMean": 0.30311122430222376,
+            "lowEnergyMean": 0.36181939439016525,
+            "postEndNegativeSkipped": true,
+            "postEndNegativeSkipReason": "tail-still-looks-song-like"
+          }
+        }
+      ],
+      "policy": {
+        "requiresTemporalSongEvidence": true,
+        "requiresSingingEvidence": true,
+        "rejectsClearNonSongTail": true,
+        "temporalMean": 0.5,
+        "temporalP90": 0.72,
+        "singingMean": 0.3,
+        "singingP90": 0.7,
+        "speechMean": 0.58,
+        "lowEnergyMean": 0.72
+      }
+    },
+    "ignoreRangeSkip": {
+      "total": 2,
+      "byVideo": {
+        "video_013": 2
+      },
+      "bySource": {
+        "final": 1,
+        "model-run": 1
+      },
+      "rangesByVideo": {
+        "video_013": [
+          {
+            "startSec": 1992.5,
+            "endSec": 2239.0,
+            "reason": ""
+          }
+        ]
+      },
+      "examples": [
+        {
+          "video": "video_013",
+          "source": "final",
+          "segmentStartSec": 1992.5,
+          "segmentEndSec": 2253.5,
+          "ignoredOverlapSec": 246.5,
+          "ignoreRange": {
+            "startSec": 1992.5,
+            "endSec": 2239.0,
+            "reason": ""
+          }
+        },
+        {
+          "video": "video_013",
+          "source": "model-run",
+          "segmentStartSec": 1991.5,
+          "segmentEndSec": 2249.3,
+          "ignoredOverlapSec": 246.5,
+          "ignoreRange": {
+            "startSec": 1992.5,
+            "endSec": 2239.0,
+            "reason": ""
+          }
+        }
+      ],
+      "policy": {
+        "overlapSkipSec": 0.5
+      }
+    }
+  },
+  "modelType": "firered-segment-filter",
+  "outputName": "keep_probability",
+  "keepThreshold": 0.2,
+  "minSegmentDurationSec": 90.0,
+  "bestEpoch": 25,
+  "trainMetrics": {
+    "bestThreshold": 0.42500000000000004,
+    "metrics": {
+      "precision": 0.9943502824858758,
+      "recall": 1.0,
+      "f1": 0.9971671388101983,
+      "tp": 176,
+      "fp": 1,
+      "fn": 0,
+      "tn": 97
+    }
+  },
+  "validationMetrics": {
+    "bestThreshold": 0.2,
+    "metrics": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "tp": 18,
+      "fp": 0,
+      "fn": 0,
+      "tn": 10
+    }
+  },
+  "labelPolicy": {
+    "keep": "Predicted segment overlaps manual song segment enough to preserve and optionally trim.",
+    "drop": "False positive, low overlap, long extra non-song/BGM-only candidate, manual post-end negative, or explicit hard negative."
+  },
+  "liveFinalKeepThreshold": 0.5,
+  "runtimePolicy": {
+    "liveFinalKeepThreshold": "Use this threshold for live finalization candidates generated by the same profile. If this was overridden during training, A/B must compare it against current live assets.",
+    "liveFinalKeepThresholdSource": "manual-gate-threshold-0.5"
+  }
+}

@@ -1,0 +1,20 @@
+[
+  {
+    "id": "video_051_first_hour",
+    "audio": "tools/data/audio/video_051.m4a",
+    "manual": "tools/data/manual/video_051_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_053_first_hour",
+    "audio": "tools/data/audio/video_053.m4a",
+    "manual": "tools/data/manual/video_053_manual.txt",
+    "end": "3600"
+  },
+  {
+    "id": "video_054_first_hour",
+    "audio": "tools/data/audio/video_054.m4a",
+    "manual": "tools/data/manual/video_054_manual.txt",
+    "end": "3600"
+  }
+]

@@ -1,0 +1,42 @@
+[
+  {
+    "id": "video_013_snapshot_unavailable",
+    "audio": "tools/data/audio/video_013.wav",
+    "manual": "tools/data/manual/video_013_manual.txt",
+    "end": "3600",
+    "ignoreRanges": [
+      {
+        "startSec": 1992.5,
+        "endSec": 2239,
+        "reason": "manual omitted an incomplete/ambiguous song-like performance"
+      }
+    ],
+    "snapshotUnavailableInsertions": [
+      { "atSec": 660, "durationSec": 15 },
+      { "atSec": 1200, "durationSec": 15 },
+      { "atSec": 2520, "durationSec": 15 }
+    ]
+  },
+  {
+    "id": "video_014_snapshot_unavailable",
+    "audio": "tools/data/audio/video_014.wav",
+    "manual": "tools/data/manual/video_014_manual.txt",
+    "end": "3600",
+    "snapshotUnavailableInsertions": [
+      { "atSec": 600, "durationSec": 15 },
+      { "atSec": 1350, "durationSec": 15 },
+      { "atSec": 1860, "durationSec": 15 }
+    ]
+  },
+  {
+    "id": "video_015_snapshot_unavailable",
+    "audio": "tools/data/audio/video_015.wav",
+    "manual": "tools/data/manual/video_015_manual.txt",
+    "end": "2100",
+    "snapshotUnavailableInsertions": [
+      { "atSec": 420, "durationSec": 12 },
+      { "atSec": 870, "durationSec": 12 },
+      { "atSec": 1200, "durationSec": 12 }
+    ]
+  }
+]

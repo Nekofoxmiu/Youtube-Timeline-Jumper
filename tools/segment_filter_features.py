@@ -95,6 +95,13 @@ DEFAULT_FEATURE_OPTIONS = {
     "speech_reset_threshold": 0.58,
     "speech_reset_singing_ceiling": 0.38,
     "speech_reset_music_ceiling": 0.72,
+    "hard_trim_min_silence_sec": 1.0,
+    "hard_trim_speech_mean_threshold": 0.58,
+    "hard_trim_speech_p90_threshold": 0.72,
+    "hard_trim_speech_singing_ceiling": 0.38,
+    "hard_trim_music_change_threshold": 0.28,
+    "hard_trim_music_change_min_song_mean": 0.55,
+    "hard_trim_music_change_max_edge_song_mean": 0.48,
     "baseline_min_duration_sec": 600.0,
     "baseline_short_window_sec": 300.0,
     "baseline_long_window_sec": 600.0,
@@ -217,6 +224,13 @@ def low_energy(frame: Dict[str, float], options: Dict[str, float]) -> bool:
     )
 
 
+def strict_silent(frame: Dict[str, float], options: Dict[str, float]) -> bool:
+    return (
+        frame["audioRms"] <= options["low_energy_rms_threshold"]
+        and frame["audioPeak"] <= options["low_energy_peak_threshold"]
+    )
+
+
 def speech_reset(frame: Dict[str, float], options: Dict[str, float]) -> bool:
     return (
         frame["speechProbability"] >= options["speech_reset_threshold"]
@@ -234,6 +248,84 @@ def edge_stats(frames: Sequence[Dict[str, float]], edge_sec: float, options: Dic
         "musicMean": mean(values(edge_frames, "musicProbability")),
         "singingMean": mean(values(edge_frames, "singingProbability")),
         "speechMean": mean(values(edge_frames, "speechProbability")),
+    }
+
+
+def max_run_duration_sec(frames: Sequence[Dict[str, float]], predicate, hop_sec: float = 0.5) -> float:
+    current = 0.0
+    best = 0.0
+    for frame in frames:
+        if predicate(frame):
+            current += hop_sec
+            best = max(best, current)
+        else:
+            current = 0.0
+    return best
+
+
+def hard_trim_evidence(
+    edge_frames: Sequence[Dict[str, float]],
+    song_side_frames: Sequence[Dict[str, float]],
+    options: Dict[str, float],
+) -> Dict[str, object]:
+    speech_mean = mean(values(edge_frames, "speechProbability"))
+    speech_p90 = quantile(values(edge_frames, "speechProbability"), 0.9)
+    singing_mean = mean(values(edge_frames, "singingProbability"))
+    music_mean = mean(values(edge_frames, "musicProbability"))
+    temporal_mean = mean(values(edge_frames, "songProbability"))
+    silence_run_sec = max_run_duration_sec(edge_frames, lambda frame: strict_silent(frame, options))
+    clear_speech = (
+        (speech_mean >= options["hard_trim_speech_mean_threshold"] or speech_p90 >= options["hard_trim_speech_p90_threshold"])
+        and singing_mean <= options["hard_trim_speech_singing_ceiling"]
+    )
+    sustained_silence = silence_run_sec >= options["hard_trim_min_silence_sec"]
+    song_music_mean = mean(values(song_side_frames, "musicProbability"))
+    song_temporal_mean = mean(values(song_side_frames, "songProbability"))
+    song_singing_mean = mean(values(song_side_frames, "singingProbability"))
+    song_rms_mean = mean(values(song_side_frames, "audioRms"))
+    edge_rms_mean = mean(values(edge_frames, "audioRms"))
+    song_flux_mean = mean(values(song_side_frames, "spectralFlux"))
+    edge_flux_mean = mean(values(edge_frames, "spectralFlux"))
+    song_flatness_mean = mean(values(song_side_frames, "spectralFlatness"))
+    edge_flatness_mean = mean(values(edge_frames, "spectralFlatness"))
+    song_side_strong = (
+        song_music_mean >= options["hard_trim_music_change_min_song_mean"]
+        or song_temporal_mean >= options["hard_trim_music_change_min_song_mean"]
+        or song_singing_mean >= options["hard_trim_music_change_min_song_mean"]
+    )
+    probability_change = max(
+        abs(song_music_mean - music_mean),
+        abs(song_temporal_mean - temporal_mean),
+        abs(song_singing_mean - singing_mean),
+    )
+    spectral_change = max(abs(song_flux_mean - edge_flux_mean), abs(song_flatness_mean - edge_flatness_mean))
+    energy_change = abs(song_rms_mean - edge_rms_mean) / max(0.01, song_rms_mean, edge_rms_mean)
+    edge_looks_weak = (
+        music_mean <= options["hard_trim_music_change_max_edge_song_mean"]
+        and temporal_mean <= options["hard_trim_music_change_max_edge_song_mean"]
+    )
+    music_change = (
+        song_side_strong
+        and edge_looks_weak
+        and max(probability_change, spectral_change, energy_change * 0.5) >= options["hard_trim_music_change_threshold"]
+    )
+    reason = "ambiguous-edge"
+    if clear_speech:
+        reason = "clear-speech"
+    elif sustained_silence:
+        reason = "sustained-silence"
+    elif music_change:
+        reason = "music-property-change"
+    return {
+        "pass": bool(clear_speech or sustained_silence or music_change),
+        "reason": reason,
+        "clearSpeech": bool(clear_speech),
+        "sustainedSilence": bool(sustained_silence),
+        "musicChange": bool(music_change),
+        "silenceRunSec": round(silence_run_sec, 3),
+        "probabilityChange": round(probability_change, 4),
+        "spectralChange": round(spectral_change, 4),
+        "energyChange": round(energy_change, 4),
     }
 
 
@@ -432,6 +524,7 @@ def apply_segment_filter_predictions(
     segments: Sequence[Dict[str, object]],
     predictions: Sequence[Dict[str, float]],
     *,
+    frames: Optional[Sequence[Dict[str, object]]] = None,
     start_sec: float = 0.0,
     end_sec: Optional[float] = None,
     keep_threshold: float = DEFAULT_FILTER_POLICY["keep_threshold"],
@@ -439,7 +532,11 @@ def apply_segment_filter_predictions(
     trim_clamp_sec: float = DEFAULT_FILTER_POLICY["trim_clamp_sec"],
     trim_scale: float = DEFAULT_FILTER_POLICY["trim_scale"],
     min_segment_duration_sec: float = DEFAULT_FILTER_POLICY["min_segment_duration_sec"],
+    allow_start_trim: bool = True,
+    allow_end_trim: bool = True,
 ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+    normalized_frames = normalize_frames(frames or [])
+    feature_options = dict(DEFAULT_FEATURE_OPTIONS)
     sorted_items = sorted(
         [(index, dict(segment), predictions[index] if index < len(predictions) else {}) for index, segment in enumerate(segments)],
         key=lambda item: finite(item[1].get("startSec")),
@@ -459,6 +556,86 @@ def apply_segment_filter_predictions(
         keep_probability = clamp(prediction.get("keepProbability", prediction.get("keep_probability", prediction.get("keep", 1.0))), 0.0, 1.0)
         start_delta = clamp(prediction.get("startTrimDeltaSec", prediction.get("start_delta_sec", 0.0)), -trim_clamp_sec, trim_clamp_sec) * trim_scale
         end_delta = clamp(prediction.get("endTrimDeltaSec", prediction.get("end_delta_sec", 0.0)), -trim_clamp_sec, trim_clamp_sec) * trim_scale
+        start_trim_evidence = None
+        end_trim_evidence = None
+        if normalized_frames and end_delta < 0:
+            proposed_end = original["endSec"] + end_delta
+            edge_frames = frames_in_range(normalized_frames, proposed_end, original["endSec"])
+            if len(edge_frames) >= 4:
+                song_side_window = max(feature_options["edge_window_sec"], original["endSec"] - proposed_end)
+                song_side_frames = frames_in_range(normalized_frames, proposed_end - song_side_window, proposed_end)
+                end_trim_evidence = hard_trim_evidence(edge_frames, song_side_frames, feature_options)
+                music = values(edge_frames, "musicProbability")
+                singing = values(edge_frames, "singingProbability")
+                speech = values(edge_frames, "speechProbability")
+                temporal = values(edge_frames, "songProbability")
+                low_energy_values = values(edge_frames, "lowEnergyRatio")
+                trim_duration_sec = max(0.0, original["endSec"] - proposed_end)
+                music_mean = mean(music)
+                music_p90 = quantile(music, 0.9)
+                singing_mean = mean(singing)
+                singing_p90 = quantile(singing, 0.9)
+                speech_mean = mean(speech)
+                temporal_mean = mean(temporal)
+                temporal_p90 = quantile(temporal, 0.9)
+                low_energy_mean = mean(low_energy_values)
+                strong_song_tail = (
+                    temporal_mean >= 0.5
+                    or temporal_p90 >= 0.72
+                    or singing_mean >= 0.35
+                    or singing_p90 >= 0.75
+                )
+                music_backed_vocal_tail = music_mean >= 0.88 and (singing_mean >= 0.24 or singing_p90 >= 0.6)
+                protected_song_tail = strong_song_tail or music_backed_vocal_tail
+                clear_speech_tail = (
+                    (speech_mean >= 0.5 or bool(end_trim_evidence.get("clearSpeech")))
+                    and not music_backed_vocal_tail
+                )
+                sustained_silence_tail = bool(end_trim_evidence.get("sustainedSilence")) or (low_energy_mean >= 0.7 and temporal_p90 <= 0.5)
+                weak_non_song_tail = music_mean <= 0.35 and temporal_mean <= 0.35 and singing_p90 <= 0.58
+                low_confidence_speech_reset = speech_mean >= 0.38 and singing_mean <= 0.32 and music_p90 <= 0.58
+                long_ambiguous_music_change_trim = (
+                    trim_duration_sec > 25.0
+                    and bool(end_trim_evidence.get("musicChange"))
+                    and not clear_speech_tail
+                    and not sustained_silence_tail
+                    and not low_confidence_speech_reset
+                )
+                clear_non_song_tail = (
+                    clear_speech_tail
+                    or sustained_silence_tail
+                    or (
+                        weak_non_song_tail
+                        and not long_ambiguous_music_change_trim
+                        and (bool(end_trim_evidence.get("musicChange")) or low_confidence_speech_reset or low_energy_mean >= 0.45)
+                    )
+                )
+                end_trim_pass = (
+                    (not protected_song_tail)
+                    or clear_speech_tail
+                    or low_confidence_speech_reset
+                    or (clear_non_song_tail and temporal_p90 <= 0.55 and singing_p90 <= 0.62)
+                )
+                end_trim_evidence.update({
+                    "pass": bool(end_trim_pass),
+                    "clearNonSongTail": bool(clear_non_song_tail),
+                    "lowConfidenceSpeechReset": bool(low_confidence_speech_reset),
+                    "weakNonSongTail": bool(weak_non_song_tail),
+                    "strongSongTail": bool(strong_song_tail),
+                    "musicBackedVocalTail": bool(music_backed_vocal_tail),
+                    "longAmbiguousMusicChangeTrim": bool(long_ambiguous_music_change_trim),
+                    "musicMean": round(music_mean, 4),
+                    "musicP90": round(music_p90, 4),
+                    "singingMean": round(singing_mean, 4),
+                    "singingP90": round(singing_p90, 4),
+                    "speechMean": round(speech_mean, 4),
+                    "temporalMean": round(temporal_mean, 4),
+                    "temporalP90": round(temporal_p90, 4),
+                    "lowEnergyMean": round(low_energy_mean, 4),
+                    "trimDurationSec": round(trim_duration_sec, 3),
+                })
+                if not end_trim_pass:
+                    end_delta = 0.0
         if keep_probability < keep_threshold:
             adjustments.append({"index": original_index, "action": "drop", "keepProbability": round(keep_probability, 4), "original": original})
             continue
@@ -467,8 +644,10 @@ def apply_segment_filter_predictions(
         if keep_probability >= trim_confidence_threshold:
             previous_end = finite(kept[-1].get("endSec"), start_sec) if kept else start_sec
             next_start = finite(sorted_items[sorted_index + 1][1].get("startSec"), effective_end) if sorted_index + 1 < len(sorted_items) else effective_end
-            proposed_start = clamp(original["startSec"] + start_delta, previous_end, max(previous_end, next_start - min_segment_duration_sec))
-            proposed_end = clamp(original["endSec"] + end_delta, proposed_start + min_segment_duration_sec, next_start)
+            proposed_start = original["startSec"] + start_delta if allow_start_trim else original["startSec"]
+            proposed_end = original["endSec"] + end_delta if allow_end_trim else original["endSec"]
+            proposed_start = clamp(proposed_start, previous_end, max(previous_end, next_start - min_segment_duration_sec))
+            proposed_end = clamp(proposed_end, proposed_start + min_segment_duration_sec, next_start)
             if proposed_end - proposed_start >= min_segment_duration_sec:
                 next_segment["startSec"] = round(proposed_start, 3)
                 next_segment["endSec"] = round(proposed_end, 3)
@@ -479,6 +658,10 @@ def apply_segment_filter_predictions(
             "keepProbability": round(keep_probability, 4),
             "startTrimDeltaSec": round(start_delta, 3),
             "endTrimDeltaSec": round(end_delta, 3),
+            "startTrimApplied": allow_start_trim,
+            "endTrimApplied": allow_end_trim,
+            "startTrimEvidence": start_trim_evidence,
+            "endTrimEvidence": end_trim_evidence,
             "original": original,
             "segment": next_segment,
         })
