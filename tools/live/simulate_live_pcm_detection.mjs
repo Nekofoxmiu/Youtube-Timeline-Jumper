@@ -5,7 +5,10 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 
 import { FireRedAedSongDetector } from '../../lib/songDetection/fireredAedDetector.js';
-import { summarizeAnalysisFrameDistribution } from '../../lib/songDetection/frameDiagnostics.js';
+import {
+  summarizeAnalysisFrameDistribution,
+  summarizeSegmentDiagnosticFeatures,
+} from '../../lib/songDetection/frameDiagnostics.js';
 import { smoothFireRedAnalyses } from '../../lib/songDetection/globalSmoothing.js';
 import {
   DEFAULT_SEGMENT_FILTER_OPTIONS,
@@ -25,9 +28,9 @@ const DEFAULT_REPORT_STEP_SEC = 5;
 const DEFAULT_MIN_SEGMENT_DURATION_SEC = 90;
 const LIVE_SEGMENT_FILTER_KEEP_THRESHOLD = 0.35;
 const LIVE_FINAL_SEGMENT_FILTER_KEEP_THRESHOLD = 0.9;
-const LIVE_START_EDGE_TRIM_ENABLED = false;
-const LIVE_START_EDGE_TRIM_SCALE = 0.5;
-const LIVE_START_EDGE_TRIM_MIN_ABS_SEC = 2;
+const DEFAULT_LIVE_START_EDGE_TRIM_ENABLED = true;
+const DEFAULT_LIVE_START_EDGE_TRIM_SCALE = 0.75;
+const DEFAULT_LIVE_START_EDGE_TRIM_MIN_ABS_SEC = 2;
 const LIVE_LARGE_END_TRIM_THRESHOLD_SEC = 30;
 const LIVE_LARGE_END_TRIM_SCALE = 1.6;
 const LIVE_ANALYSIS_METHODS = Object.freeze({
@@ -212,27 +215,135 @@ function segmentMatches(predicted, manual) {
   });
 }
 
-function classifyMatchOutlier(match) {
+function summarizeRangeFeatures(frames, startSec, endSec) {
+  return summarizeSegmentDiagnosticFeatures(frames, { startSec, endSec });
+}
+
+function overlappingManualSegments(segment, manualSegments) {
+  return (Array.isArray(manualSegments) ? manualSegments : [])
+    .map((manual) => ({
+      manual,
+      overlapSec: overlapSeconds(segment, manual),
+      gapBeforeSec: Number(manual.startSec) - Number(segment.endSec),
+      gapAfterSec: Number(segment.startSec) - Number(manual.endSec),
+    }))
+    .filter((item) => item.overlapSec > 0);
+}
+
+function classifyMatchOutlier(match, { frames, manualSegments, minSegmentDurationSec }) {
   const outliers = [];
   const manual = match?.manual || {};
   const best = match?.best || null;
   const title = manual.title || manual.name || '';
   if (!best || !best.overlapSec) {
-    outliers.push({ type: 'missed-song', manual, title });
+    const manualFeatures = summarizeSegmentDiagnosticFeatures(frames, manual);
+    outliers.push({
+      type: manualFeatures.acapellaCandidate ? 'acapella-risk' : 'missed-song',
+      manual,
+      title,
+      manualFeatures,
+    });
     return outliers;
   }
   const recall = Number(best.recallRatio) || 0;
+  const precision = Number(best.predictedPrecisionRatio) || 0;
   const startDeltaSec = Number(best.startDeltaSec) || 0;
   const endDeltaSec = Number(best.endDeltaSec) || 0;
-  if (recall < 0.75) outliers.push({ type: 'low-recall', recall, manual, predicted: best.predicted, title });
-  if (startDeltaSec < -30) outliers.push({ type: 'early-start', deltaSec: roundNumber(startDeltaSec, 3), manual, predicted: best.predicted, title });
-  if (startDeltaSec > 30) outliers.push({ type: 'late-start', deltaSec: roundNumber(startDeltaSec, 3), manual, predicted: best.predicted, title });
-  if (endDeltaSec < -45) outliers.push({ type: 'early-end', deltaSec: roundNumber(endDeltaSec, 3), manual, predicted: best.predicted, title });
-  if (endDeltaSec > 45) outliers.push({ type: 'late-end', deltaSec: roundNumber(endDeltaSec, 3), manual, predicted: best.predicted, title });
+  const predicted = best.predicted || {};
+  const manualFeatures = summarizeSegmentDiagnosticFeatures(frames, manual);
+  const predictedFeatures = summarizeSegmentDiagnosticFeatures(frames, predicted);
+  const base = {
+    manual,
+    predicted,
+    title,
+    recall: roundNumber(recall, 4),
+    precision: roundNumber(precision, 4),
+    manualFeatures,
+    predictedFeatures,
+  };
+
+  if (recall < 0.75) {
+    outliers.push({
+      ...base,
+      type: manualFeatures.acapellaCandidate ? 'acapella-risk' : 'low-recall',
+    });
+  }
+
+  if (precision < 0.85) {
+    const overlaps = overlappingManualSegments(predicted, manualSegments);
+    const closeSongMerge = overlaps.length >= 2
+      && overlaps.some((left, index) => overlaps.slice(index + 1).some((right) => {
+        const gapSec = Math.max(0, Math.max(left.manual.startSec, right.manual.startSec) - Math.min(left.manual.endSec, right.manual.endSec));
+        return gapSec <= 45;
+      }));
+    if (closeSongMerge) {
+      outliers.push({
+        ...base,
+        type: 'merged-close-songs',
+        overlapCount: overlaps.length,
+      });
+    }
+  }
+
+  if (startDeltaSec < -30) {
+    const extensionFeatures = summarizeRangeFeatures(frames, predicted.startSec, manual.startSec);
+    // This is only a weak burst/rebound diagnostic. It is not music-fragment
+    // repetition detection; that needs an embedding/model feature.
+    const type = (
+      extensionFeatures.postResetRebound >= 0.35
+      || extensionFeatures.musicOnlyScore >= 0.35
+    )
+      ? 'early-start-rehearsal'
+      : 'early-start';
+    outliers.push({
+      ...base,
+      type,
+      deltaSec: roundNumber(startDeltaSec, 3),
+      extensionFeatures,
+    });
+  }
+  if (startDeltaSec > 30) {
+    outliers.push({
+      ...base,
+      type: 'late-start',
+      deltaSec: roundNumber(startDeltaSec, 3),
+    });
+  }
+  if (endDeltaSec < -45) {
+    const missingTailFeatures = summarizeRangeFeatures(frames, predicted.endSec, manual.endSec);
+    const type = (
+      missingTailFeatures.tailSpeechWithMusic >= 0.12
+      || (missingTailFeatures.stats?.speech?.mean >= 0.4 && missingTailFeatures.stats?.music?.mean >= 0.65)
+    )
+      ? 'early-end-speech-like'
+      : 'early-end';
+    outliers.push({
+      ...base,
+      type,
+      deltaSec: roundNumber(endDeltaSec, 3),
+      missingTailFeatures,
+    });
+  }
+  if (endDeltaSec > 45) {
+    const extensionFeatures = summarizeRangeFeatures(frames, manual.endSec, predicted.endSec);
+    const type = (
+      extensionFeatures.musicOnlyScore >= 0.35
+      || extensionFeatures.tailSpeechWithMusic >= 0.12
+      || extensionFeatures.postResetRebound >= 0.35
+    )
+      ? 'late-end-bgm'
+      : 'late-end';
+    outliers.push({
+      ...base,
+      type,
+      deltaSec: roundNumber(endDeltaSec, 3),
+      extensionFeatures,
+    });
+  }
   return outliers;
 }
 
-function classifyPredictionOutliers(predicted, manual) {
+function classifyPredictionOutliers(predicted, manual, frames) {
   const outliers = [];
   for (const segment of Array.isArray(predicted) ? predicted : []) {
     let bestOverlapSec = 0;
@@ -242,16 +353,32 @@ function classifyPredictionOutliers(predicted, manual) {
     const durationSec = Math.max(0, Number(segment.endSec) - Number(segment.startSec));
     const extraSec = Math.max(0, durationSec - bestOverlapSec);
     if ((bestOverlapSec <= 0 && durationSec >= 60) || extraSec > 60) {
+      const segmentFeatures = summarizeSegmentDiagnosticFeatures(frames, segment);
+      const type = segmentFeatures.repetitionScore >= 0.66
+        ? 'false-positive-repetitive-bgm'
+        : (segmentFeatures.musicOnlyScore >= 0.35 ? 'false-positive-bgm' : 'long-false-positive');
       outliers.push({
-        type: 'long-false-positive',
+        type,
         segment,
         durationSec: roundNumber(durationSec, 3),
         overlapSec: roundNumber(bestOverlapSec, 3),
         extraSec: roundNumber(extraSec, 3),
+        segmentFeatures,
       });
     }
   }
   return outliers;
+}
+
+function classifySkippedShortManualSegments(segments, minSegmentDurationSec, frames) {
+  return (Array.isArray(segments) ? segments : []).map((manual) => ({
+    type: 'missed-short-song',
+    manual,
+    title: manual.title || manual.name || '',
+    durationSec: roundNumber(Number(manual.durationSec) || (Number(manual.endSec) - Number(manual.startSec)), 3),
+    minSegmentDurationSec,
+    manualFeatures: summarizeSegmentDiagnosticFeatures(frames, manual),
+  }));
 }
 
 function modelCoverageForManual(frames, manual) {
@@ -682,10 +809,10 @@ async function applyFinalizer(runtimes, segments, frames, smoothing, {
       ? Number(previousFinalEndSec)
       : (Number.isFinite(Number(firstFrame?.timeSec)) ? Number(firstFrame.timeSec) : 0),
     endSec: finalCutoffSec,
-    allowStartTrim: LIVE_START_EDGE_TRIM_ENABLED,
+    allowStartTrim: liveStartEdgeTrimEnabled,
     startTrimMode: 'extend-only',
-    startTrimScale: LIVE_START_EDGE_TRIM_SCALE,
-    startTrimMinAbsSec: LIVE_START_EDGE_TRIM_MIN_ABS_SEC,
+    startTrimScale: liveStartEdgeTrimScale,
+    startTrimMinAbsSec: liveStartEdgeTrimMinAbsSec,
     startTrimEvidenceFrames: frames,
     startTrimEvidenceMinFrames: 3,
     endTrimEvidenceFrames: endTrimEvidenceGuardEnabled ? frames : [],
@@ -717,9 +844,9 @@ async function applyFinalizer(runtimes, segments, frames, smoothing, {
       liveEndTrimEvidenceGuardEnabled: endTrimEvidenceGuardEnabled,
       keepThreshold: options.keepThreshold,
       liveFinalKeepThreshold: finalizeAll ? options.keepThreshold : null,
-      startEdgeTrimEnabled: LIVE_START_EDGE_TRIM_ENABLED,
-      startEdgeTrimScale: LIVE_START_EDGE_TRIM_SCALE,
-      startEdgeTrimMinAbsSec: LIVE_START_EDGE_TRIM_MIN_ABS_SEC,
+      startEdgeTrimEnabled: liveStartEdgeTrimEnabled,
+      startEdgeTrimScale: liveStartEdgeTrimScale,
+      startEdgeTrimMinAbsSec: liveStartEdgeTrimMinAbsSec,
       startEdgeTrimEvidenceGuard: true,
       speechResetEndRefinementEnabled: finalizeAll && speechResetEndRefinement,
       speechResetEndRefinementChanged: Boolean(speechResetRefined.changed),
@@ -778,7 +905,7 @@ async function streamFfmpegPcm({
 
 const args = parseArgs(process.argv);
 if (!args.audio || !args.out) {
-  throw new Error('Usage: node tools/live/simulate_live_pcm_detection.mjs --audio <audio.m4a/mp4> --out <summary.json> [--manual <manual.txt>] [--live-method aed-cache-60s|pcm-rollover-30min] [--segment-filter-model-dir models/fireredvad/aed] [--segment-filter-profile default|live-pcm30|live-realtime-aed60] [--require-profile-assets] [--start-sec 0] [--end-sec 600] [--ffmpeg ffmpeg] [--sample-rate 48000] [--chunk-frames 2048] [--report-step-sec 5] [--lookahead-sec 180] [--min-segment-duration-sec 90] [--stall-insertions atSec:durationSec,...] [--gate-stalls] [--snapshot-unavailable-insertions atSec:durationSec,...] [--ignore-ranges startSec:endSec,...] [--no-segment-filter] [--disable-speech-reset-end-refinement] [--include-frames] [--include-checkpoints]');
+  throw new Error('Usage: node tools/live/simulate_live_pcm_detection.mjs --audio <audio.m4a/mp4> --out <summary.json> [--manual <manual.txt>] [--live-method aed-cache-60s|pcm-rollover-30min] [--segment-filter-model-dir models/fireredvad/aed] [--segment-filter-profile default|live-pcm30|live-realtime-aed60] [--require-profile-assets] [--start-sec 0] [--end-sec 600] [--ffmpeg ffmpeg] [--sample-rate 48000] [--chunk-frames 2048] [--report-step-sec 5] [--lookahead-sec 180] [--min-segment-duration-sec 90] [--stall-insertions atSec:durationSec,...] [--gate-stalls] [--snapshot-unavailable-insertions atSec:durationSec,...] [--ignore-ranges startSec:endSec,...] [--no-segment-filter] [--enable-start-edge-trim] [--disable-start-edge-trim] [--start-edge-trim-scale 1] [--start-edge-trim-min-abs-sec 2] [--disable-speech-reset-end-refinement] [--include-frames] [--include-checkpoints]');
 }
 
 const audio = String(args.audio);
@@ -795,6 +922,11 @@ const minSegmentDurationSec = Math.max(15, Number(args['min-segment-duration-sec
 const includeFrames = Boolean(args['include-frames']);
 const includeCheckpoints = Boolean(args['include-checkpoints']);
 const segmentFilterEnabled = !Boolean(args['no-segment-filter']);
+const liveStartEdgeTrimEnabled = Boolean(args['disable-start-edge-trim'])
+  ? false
+  : (Boolean(args['enable-start-edge-trim']) || DEFAULT_LIVE_START_EDGE_TRIM_ENABLED);
+const liveStartEdgeTrimScale = Math.max(0, Number(args['start-edge-trim-scale']) || DEFAULT_LIVE_START_EDGE_TRIM_SCALE);
+const liveStartEdgeTrimMinAbsSec = Math.max(0, Number(args['start-edge-trim-min-abs-sec']) || DEFAULT_LIVE_START_EDGE_TRIM_MIN_ABS_SEC);
 const speechResetEndRefinement = !Boolean(args['disable-speech-reset-end-refinement']);
 const segmentFilterModelDir = String(args['segment-filter-model-dir'] || 'models/fireredvad/aed');
 const liveFrameBuilderConfig = resolveLiveFrameBuilderConfig(args['live-method']);
@@ -1258,9 +1390,15 @@ const evaluationMask = frameTimes.map((timeSec) => (
 const filterByEvaluationMask = (values) => values.filter((_, index) => evaluationMask[index]);
 const ignoredEvaluationFrameCount = evaluationMask.reduce((total, keep) => total + (keep ? 0 : 1), 0);
 const matches = evaluationManual.length ? segmentMatches(finalSegments, evaluationManual) : [];
+const matchOutlierContext = {
+  frames,
+  manualSegments: clippedEvaluationManual,
+  minSegmentDurationSec,
+};
 const severeOutliers = [
-  ...matches.flatMap(classifyMatchOutlier),
-  ...classifyPredictionOutliers(finalSegments, evaluationManual),
+  ...matches.flatMap((match) => classifyMatchOutlier(match, matchOutlierContext)),
+  ...classifySkippedShortManualSegments(evaluationSkippedShortManualSegments, minSegmentDurationSec, frames),
+  ...classifyPredictionOutliers(finalSegments, evaluationManual, frames),
   ...classifyModelDropOutliers(matches, frames),
 ];
 

@@ -20,6 +20,19 @@ const VARIANTS = Object.freeze({
     segmentFilter: true,
     disableSpeechResetEndRefinement: true,
   },
+  'pcm-current-start-trim': {
+    suffix: 'pcm_filter_on_start_trim',
+    liveMethod: 'pcm-rollover-30min',
+    segmentFilter: true,
+    enableStartEdgeTrim: true,
+    startEdgeTrimScale: 0.75,
+  },
+  'pcm-current-no-start-trim': {
+    suffix: 'pcm_filter_on_no_start_trim',
+    liveMethod: 'pcm-rollover-30min',
+    segmentFilter: true,
+    disableStartEdgeTrim: true,
+  },
   'pcm-no-filter': {
     suffix: 'pcm_filter_off',
     liveMethod: 'pcm-rollover-30min',
@@ -29,6 +42,12 @@ const VARIANTS = Object.freeze({
     suffix: 'aed60_overlap60',
     liveMethod: 'aed-cache-60s',
     segmentFilter: true,
+  },
+  'aed60-current-no-start-trim': {
+    suffix: 'aed60_overlap60_no_start_trim',
+    liveMethod: 'aed-cache-60s',
+    segmentFilter: true,
+    disableStartEdgeTrim: true,
   },
   'aed60-current-no-speech-reset': {
     suffix: 'aed60_overlap60_no_speech_reset',
@@ -349,6 +368,13 @@ async function runVariant({ cwd, sample, variantName, variant, outDir, options }
   if (!variant.segmentFilter) args.push('--no-segment-filter');
   if (options.requireProfileAssets && variant.segmentFilter) args.push('--require-profile-assets');
   if (variant.disableSpeechResetEndRefinement) args.push('--disable-speech-reset-end-refinement');
+  if (variant.enableStartEdgeTrim) {
+    args.push('--enable-start-edge-trim');
+    if (Number.isFinite(Number(variant.startEdgeTrimScale))) {
+      args.push('--start-edge-trim-scale', String(variant.startEdgeTrimScale));
+    }
+  }
+  if (variant.disableStartEdgeTrim) args.push('--disable-start-edge-trim');
   if (options.includeFrames) args.push('--include-frames');
 
   const label = `${sample.id} ${variantName}`;
@@ -482,6 +508,14 @@ function summarizeExpectedNoSong(sample, summary) {
 
 function classifyPerSongDeviations(sample, variantName, summary, options) {
   const matches = Array.isArray(summary?.matches) ? summary.matches : [];
+  const classifiedOutliers = Array.isArray(summary?.severeOutliers) ? summary.severeOutliers : [];
+  const outlierTypesForManual = (manual) => classifiedOutliers
+    .filter((outlier) => (
+      Math.abs(finite(outlier?.manual?.startSec, -999999) - finite(manual?.startSec, 999999)) <= 0.01
+      && Math.abs(finite(outlier?.manual?.endSec, -999999) - finite(manual?.endSec, 999999)) <= 0.01
+    ))
+    .map((outlier) => String(outlier.type || '').trim())
+    .filter(Boolean);
   const issues = [];
   matches.forEach((match, index) => {
     const manual = match?.manual && typeof match.manual === 'object' ? match.manual : {};
@@ -496,6 +530,7 @@ function classifyPerSongDeviations(sample, variantName, summary, options) {
       manualEndSec: roundNumber(manual.endSec, 3),
       manualStart: formatTime(manual.startSec),
       manualEnd: formatTime(manual.endSec),
+      classifiedTypes: outlierTypesForManual(manual),
     };
     if (!best || !Number(best.overlapSec)) {
       issues.push({
@@ -841,12 +876,13 @@ async function main() {
   ];
   await writeFile(resolve(outDir, 'live_pcm_ab_summary.csv'), `${csvLines.join('\n')}\n`, 'utf8');
   const perSongCsvLines = [
-    'sample,variant,manualIndex,type,title,manualStart,manualEnd,predictedStart,predictedEnd,recall,precision,startDeltaSec,endDeltaSec,overlapSec,threshold,thresholdSec',
+    'sample,variant,manualIndex,type,classifiedTypes,title,manualStart,manualEnd,predictedStart,predictedEnd,recall,precision,startDeltaSec,endDeltaSec,overlapSec,threshold,thresholdSec',
     ...perSongDeviationIssues.map((issue) => [
       issue.sampleId,
       issue.variant,
       issue.manualIndex,
       issue.type,
+      Array.isArray(issue.classifiedTypes) ? issue.classifiedTypes.join('|') : '',
       issue.title,
       issue.manualStart,
       issue.manualEnd,

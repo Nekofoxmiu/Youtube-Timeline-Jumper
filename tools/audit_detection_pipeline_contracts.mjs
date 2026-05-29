@@ -106,7 +106,13 @@ async function validateLiveRuntimeContract(repoRoot) {
   assert(/const LIVE_PCM_ROLLOVER_SEC = 30 \* 60;/u.test(offscreenSource), 'PCM rollover chunk size must remain 30min.');
   assert(/const LIVE_PCM_OVERLAP_SEC = 120;/u.test(offscreenSource), 'PCM rollover overlap must remain 120s.');
   assert(/const LIVE_EDGE_TRIM_DURING_STREAM = false;/u.test(offscreenSource), 'Live edge trim must stay disabled during provisional streaming.');
-  assert(/const LIVE_START_EDGE_TRIM_ENABLED = false;/u.test(offscreenSource), 'Live start edge trim must stay disabled unless explicitly re-gated.');
+  assert(/const LIVE_START_EDGE_TRIM_ENABLED = true;/u.test(offscreenSource), 'Live start edge trim should be enabled only after guarded start-trim A/B gate.');
+  assert(/const LIVE_START_EDGE_TRIM_SCALE = 0\.75;/u.test(offscreenSource), 'Live start edge trim must stay conservative at 0.75 scale.');
+  const segmentFilterSource = await readFile(resolve(repoRoot, 'lib/songDetection/segmentFilter.js'), 'utf8');
+  assert(
+    /const vocalIntroSupport = musicMean >= 0\.45 && speechMean >= 0\.58 && singingMean >= 0\.32;/u.test(segmentFilterSource),
+    'Live start edge trim must require guarded speech-backed vocal intro evidence.'
+  );
   assert(
     /return normalizeLiveAnalysisMethod\(method\) === LIVE_ANALYSIS_METHODS\.PCM_ROLLOVER_30MIN[\s\S]*\? 'live-pcm30'[\s\S]*: 'live-realtime-aed60';/u.test(offscreenSource),
     'Live analysis methods must map to distinct segment-filter profiles.'
@@ -139,6 +145,8 @@ async function validateLiveRuntimeContract(repoRoot) {
     provisionalFilterDisabled: true,
     videoBoundaryHardStop: true,
     integerStartGate: true,
+    liveStartEdgeTrimEnabled: true,
+    liveStartEdgeTrimScale: 0.75,
   };
 }
 

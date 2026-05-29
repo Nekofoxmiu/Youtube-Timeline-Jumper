@@ -409,33 +409,223 @@ def overlap_with_ignore_ranges(segment: Dict[str, float], ignore_ranges: Sequenc
     return min(duration, overlap)
 
 
-def classify_match_outlier(video_key: str, match: Dict[str, object]) -> List[Dict[str, object]]:
+def estimate_music_repetition(frames: Sequence[Dict[str, object]], start_sec: float, end_sec: float) -> Dict[str, object]:
+    window_sec = 8.0
+    hop_sec = 4.0
+    min_separation_sec = 24.0
+    similarity_threshold = 0.9
+    safe_frames = frames_between(frames, start_sec, end_sec)
+    if not safe_frames or end_sec - start_sec < window_sec:
+        return {
+            "version": "music-repetition-feature-fingerprint-v1",
+            "status": "insufficient-frames",
+            "score": 0.0,
+            "bestSimilarity": 0.0,
+            "windowCount": 0,
+            "musicOnlyWindowCount": 0,
+            "matchedWindowCount": 0,
+            "matchCount": 0,
+            "repeatedWindowRatio": 0.0,
+            "musicOnlyWindowRatio": 0.0,
+            "vocalWindowRatio": 0.0,
+        }
+
+    def frame_value(frame: Dict[str, object], primary: str, secondary: str | None = None) -> float:
+        value = frame.get(primary)
+        if value is None and secondary:
+            value = frame.get(secondary)
+        return max(0.0, min(1.0, finite_float(value)))
+
+    def window_summary(window_start: float) -> Dict[str, object] | None:
+        window = [frame for frame in safe_frames if window_start <= finite_float(frame.get("timeSec")) < window_start + window_sec]
+        if len(window) < int(window_sec):
+            return None
+        music = np.asarray([frame_value(frame, "musicProbability", "musicMean") for frame in window], dtype=np.float32)
+        singing = np.asarray([frame_value(frame, "singingProbability", "singingMean") for frame in window], dtype=np.float32)
+        speech = np.asarray([frame_value(frame, "speechProbability", "speechMean") for frame in window], dtype=np.float32)
+        temporal = np.asarray([frame_value(frame, "temporalHeadProbability", "songProbability") for frame in window], dtype=np.float32)
+        rms = np.asarray([
+            min(1.0, np.log1p(max(0.0, finite_float(frame.get("audioRms"))) * 60.0) / np.log1p(60.0))
+            for frame in window
+        ], dtype=np.float32)
+        flatness = np.asarray([frame_value(frame, "spectralFlatness") for frame in window], dtype=np.float32)
+        flux = np.asarray([frame_value(frame, "spectralFlux") for frame in window], dtype=np.float32)
+        centroid = np.asarray([frame_value(frame, "spectralCentroid") for frame in window], dtype=np.float32)
+        mid = np.asarray([frame_value(frame, "midEnergyRatio") for frame in window], dtype=np.float32)
+        high = np.asarray([frame_value(frame, "highEnergyRatio") for frame in window], dtype=np.float32)
+        music_mean = float(music.mean())
+        singing_mean = float(singing.mean())
+        speech_mean = float(speech.mean())
+        temporal_mean = float(temporal.mean())
+        vector = np.asarray([
+            music_mean,
+            singing_mean,
+            speech_mean,
+            temporal_mean,
+            float(rms.mean()),
+            float(rms.std()),
+            float(flatness.mean()),
+            float(flux.mean()),
+            float(centroid.mean()),
+            float(mid.mean()),
+            float(high.mean()),
+        ], dtype=np.float32)
+        return {
+            "startSec": window_start,
+            "vector": vector,
+            "musicOnlyLike": music_mean >= 0.58 and singing_mean <= 0.28 and speech_mean <= 0.42 and temporal_mean <= 0.42,
+            "vocalLike": singing_mean >= 0.4 or temporal_mean >= 0.55,
+        }
+
+    windows: List[Dict[str, object]] = []
+    cursor = start_sec
+    while cursor + window_sec <= end_sec + 0.001:
+        summary = window_summary(cursor)
+        if summary:
+            windows.append(summary)
+        cursor += hop_sec
+    music_windows = [window for window in windows if bool(window.get("musicOnlyLike"))]
+    weights = np.asarray([0.9, 1.15, 0.7, 1.05, 1.0, 0.65, 1.0, 0.8, 1.0, 1.0, 0.75], dtype=np.float32)
+    weight_total = float(weights.sum())
+    matched_indexes: set[int] = set()
+    match_count = 0
+    best_similarity = 0.0
+    for left_index, left in enumerate(music_windows):
+        for right_index in range(left_index + 1, len(music_windows)):
+            right = music_windows[right_index]
+            if finite_float(right.get("startSec")) - finite_float(left.get("startSec")) < min_separation_sec:
+                continue
+            distance = float(np.abs(np.asarray(left["vector"]) - np.asarray(right["vector"])).dot(weights))
+            similarity = max(0.0, min(1.0, 1.0 - (distance / max(0.001, weight_total * 0.42))))
+            best_similarity = max(best_similarity, similarity)
+            if similarity >= similarity_threshold:
+                matched_indexes.add(left_index)
+                matched_indexes.add(right_index)
+                match_count += 1
+    repeated_ratio = len(matched_indexes) / max(1, len(music_windows))
+    music_only_ratio = len(music_windows) / max(1, len(windows))
+    vocal_ratio = len([window for window in windows if bool(window.get("vocalLike"))]) / max(1, len(windows))
+    support_enough = len(music_windows) >= 4 and len(matched_indexes) >= 3
+    raw_score = (
+        ((max(0.0, best_similarity - 0.82) / 0.18) * 0.38)
+        + (repeated_ratio * 0.44)
+        + (music_only_ratio * 0.18)
+    ) if support_enough else 0.0
+    score = max(0.0, min(1.0, raw_score - (max(0.0, vocal_ratio - 0.18) * 0.75)))
+    return {
+        "version": "music-repetition-feature-fingerprint-v1",
+        "status": "feature-fingerprint-v1",
+        "score": round(score, 4),
+        "bestSimilarity": round(best_similarity, 4),
+        "windowCount": len(windows),
+        "musicOnlyWindowCount": len(music_windows),
+        "matchedWindowCount": len(matched_indexes),
+        "matchCount": match_count,
+        "repeatedWindowRatio": round(repeated_ratio, 4),
+        "musicOnlyWindowRatio": round(music_only_ratio, 4),
+        "vocalWindowRatio": round(vocal_ratio, 4),
+    }
+
+
+def diagnostic_features(frames: Sequence[Dict[str, object]], start_sec: float, end_sec: float) -> Dict[str, object]:
+    window = frames_between(frames, start_sec, end_sec)
+    stats = basic_frame_stats(window)
+    singing = stats["singingMean"]
+    music = stats["musicMean"]
+    speech = stats["speechMean"]
+    temporal = stats["temporalMean"]
+    duration = max(0.0, end_sec - start_sec)
+    music_only_score = max(0.0, min(1.0, (music - (singing * 1.7) - (speech * 1.15) + (0.12 if duration >= 180 else 0.0)) / 0.75))
+    vocal_dominance = max(-1.0, min(1.0, singing - max(speech, music_only_score * 0.5)))
+    tail_speech_with_music = max(0.0, min(1.0, music * speech * (1.0 - min(1.0, singing))))
+    acapella_candidate = singing >= 0.55 and music <= 0.45 and speech <= 0.35 and temporal >= 0.45
+    repetition = estimate_music_repetition(frames, start_sec, end_sec)
+    return {
+        **stats,
+        "durationSec": duration,
+        "vocalDominance": vocal_dominance,
+        "musicOnlyScore": music_only_score,
+        "tailSpeechWithMusic": tail_speech_with_music,
+        "acapellaCandidate": acapella_candidate,
+        "repetitionScore": repetition["score"],
+        "repetitionScoreStatus": repetition["status"],
+        "repetition": repetition,
+    }
+
+
+def classify_match_outlier(
+    video_key: str,
+    match: Dict[str, object],
+    frames: Sequence[Dict[str, object]] = (),
+    manual_segments: Sequence[Dict[str, object]] = (),
+) -> List[Dict[str, object]]:
     outliers: List[Dict[str, object]] = []
     manual = match.get("manual") or {}
     best = match.get("best") or {}
     predicted = best.get("predicted") if isinstance(best, dict) else None
     title = manual.get("title", "")
+    manual_features = diagnostic_features(frames, finite_float(manual.get("startSec")), finite_float(manual.get("endSec")))
     if not predicted or float(best.get("overlapSec") or 0) <= 0:
-        outliers.append({"type": "missed-segment", "video": video_key, "manual": manual, "title": title})
+        outliers.append({
+            "type": "acapella-risk" if manual_features["acapellaCandidate"] else "missed-segment",
+            "video": video_key,
+            "manual": manual,
+            "title": title,
+            "manualFeatures": manual_features,
+        })
         return outliers
 
     recall = float(best.get("recallRatio") or 0)
+    precision = float(best.get("predictedPrecisionRatio") or 0)
     start_delta = float(best.get("startDeltaSec") or 0)
     end_delta = float(best.get("endDeltaSec") or 0)
+    predicted_features = diagnostic_features(frames, finite_float(predicted.get("startSec")), finite_float(predicted.get("endSec")))
+    base = {
+        "video": video_key,
+        "manual": manual,
+        "predicted": predicted,
+        "title": title,
+        "recall": recall,
+        "precision": precision,
+        "manualFeatures": manual_features,
+        "predictedFeatures": predicted_features,
+    }
     if recall < 0.75:
-        outliers.append({"type": "low-recall", "video": video_key, "recall": recall, "manual": manual, "predicted": predicted, "title": title})
+        outliers.append({**base, "type": "acapella-risk" if manual_features["acapellaCandidate"] else "low-recall"})
+    if precision < 0.85:
+        overlap_count = sum(1 for item in manual_segments if overlap_seconds(predicted, item) > 0)
+        if overlap_count >= 2:
+            outliers.append({**base, "type": "merged-close-songs", "overlapCount": overlap_count})
     if start_delta < -30:
-        outliers.append({"type": "early-start", "video": video_key, "deltaSec": start_delta, "manual": manual, "predicted": predicted, "title": title})
+        extension = diagnostic_features(frames, finite_float(predicted.get("startSec")), finite_float(manual.get("startSec")))
+        outliers.append({
+            **base,
+            "type": "early-start-rehearsal" if extension["musicOnlyScore"] >= 0.35 else "early-start",
+            "deltaSec": start_delta,
+            "extensionFeatures": extension,
+        })
     elif start_delta > 30:
-        outliers.append({"type": "late-start", "video": video_key, "deltaSec": start_delta, "manual": manual, "predicted": predicted, "title": title})
+        outliers.append({**base, "type": "late-start", "deltaSec": start_delta})
     if end_delta < -45:
-        outliers.append({"type": "early-end", "video": video_key, "deltaSec": end_delta, "manual": manual, "predicted": predicted, "title": title})
+        missing_tail = diagnostic_features(frames, finite_float(predicted.get("endSec")), finite_float(manual.get("endSec")))
+        outliers.append({
+            **base,
+            "type": "early-end-speech-like" if missing_tail["tailSpeechWithMusic"] >= 0.12 else "early-end",
+            "deltaSec": end_delta,
+            "missingTailFeatures": missing_tail,
+        })
     elif end_delta > 45:
-        outliers.append({"type": "late-end", "video": video_key, "deltaSec": end_delta, "manual": manual, "predicted": predicted, "title": title})
+        extension = diagnostic_features(frames, finite_float(manual.get("endSec")), finite_float(predicted.get("endSec")))
+        outliers.append({
+            **base,
+            "type": "late-end-bgm" if extension["musicOnlyScore"] >= 0.35 or extension["tailSpeechWithMusic"] >= 0.12 else "late-end",
+            "deltaSec": end_delta,
+            "extensionFeatures": extension,
+        })
     return outliers
 
 
-def classify_prediction_outliers(video_key: str, summary: Dict[str, object]) -> List[Dict[str, object]]:
+def classify_prediction_outliers(video_key: str, summary: Dict[str, object], frames: Sequence[Dict[str, object]] = ()) -> List[Dict[str, object]]:
     outliers: List[Dict[str, object]] = []
     manual_segments = [match.get("manual") for match in summary.get("matches", []) if isinstance(match.get("manual"), dict)]
     ignore_ranges = collect_ignore_ranges_from_payload(summary)
@@ -447,12 +637,17 @@ def classify_prediction_outliers(video_key: str, summary: Dict[str, object]) -> 
         ignored_overlap = overlap_with_ignore_ranges(segment, ignore_ranges)
         extra = duration - manual_overlap - ignored_overlap
         if extra > 60:
+            segment_features = diagnostic_features(frames, finite_float(segment.get("startSec")), finite_float(segment.get("endSec")))
+            outlier_type = "false-positive-repetitive-bgm" if float(segment_features["repetitionScore"] or 0.0) >= 0.66 else (
+                "false-positive-bgm" if segment_features["musicOnlyScore"] >= 0.35 else "false-positive-long"
+            )
             outliers.append({
-                "type": "false-positive-long",
+                "type": outlier_type,
                 "video": video_key,
                 "extraSec": extra,
                 "ignoredOverlapSec": ignored_overlap,
                 "segment": segment,
+                "segmentFeatures": segment_features,
             })
     return outliers
 
@@ -623,15 +818,16 @@ class SegmentFilterRuntime:
         return predictions
 
 
-def severe_outliers_for_summary(video_key: str, summary: Dict[str, object]) -> List[Dict[str, object]]:
+def severe_outliers_for_summary(video_key: str, summary: Dict[str, object], frames: Sequence[Dict[str, object]] = ()) -> List[Dict[str, object]]:
     severe_outliers: List[Dict[str, object]] = []
     metrics = summary.get("metrics") or {}
+    manual_segments = [match.get("manual") for match in summary.get("matches", []) if isinstance(match.get("manual"), dict)]
     if float(metrics.get("f1") or 0) < 0.94:
         severe_outliers.append({"type": "low-video-f1", "video": video_key, "metrics": metrics})
     for match in summary.get("matches", []):
         if isinstance(match, dict):
-            severe_outliers.extend(classify_match_outlier(video_key, match))
-    severe_outliers.extend(classify_prediction_outliers(video_key, summary))
+            severe_outliers.extend(classify_match_outlier(video_key, match, frames, manual_segments))
+    severe_outliers.extend(classify_prediction_outliers(video_key, summary, frames))
     return severe_outliers
 
 
@@ -820,7 +1016,7 @@ def apply_segment_filter_to_summary(
             "adjustments": adjustments,
         },
     }
-    filtered_summary["severeOutliers"] = severe_outliers_for_summary(sample.video_key, filtered_summary)
+    filtered_summary["severeOutliers"] = severe_outliers_for_summary(sample.video_key, filtered_summary, frames)
     filtered_summary["outlierReplay"] = build_outlier_replay(sample.video_key, filtered_summary, frames)
     out_path = args.out_dir / f"{sample.video_key}.segment_filter_summary.json"
     replay_path = args.out_dir / f"{sample.video_key}.outlier_replay.json"
@@ -915,14 +1111,16 @@ def evaluate_sample(args: argparse.Namespace, sample: Sample, repo_root: Path, s
             raise RuntimeError(f"smoothing failed for {sample.video_key}\n{tail_text(smoothing.stdout)}\n{tail_text(smoothing.stderr)}")
 
     summary = load_json(smoothing_path)
+    frames_payload_for_outliers = load_json(frames_path)
+    frames_for_outliers = frames_payload_for_outliers.get("frames", []) if isinstance(frames_payload_for_outliers, dict) else []
     baseline_metrics = summary.get("metrics") or {}
-    baseline_severe_outliers = severe_outliers_for_summary(sample.video_key, summary)
+    baseline_severe_outliers = severe_outliers_for_summary(sample.video_key, summary, frames_for_outliers)
     active_summary = summary
     segment_filter_summary_path = None
     segment_filter_metrics = None
     segment_filter_outliers = None
     if segment_filter_runtime is not None:
-        frames_payload = load_json(frames_path)
+        frames_payload = frames_payload_for_outliers
         if not isinstance(frames_payload, dict):
             raise RuntimeError(f"invalid frames payload for {sample.video_key}: {frames_path}")
         active_summary = apply_segment_filter_to_summary(args, sample, summary, frames_payload, segment_filter_runtime)
