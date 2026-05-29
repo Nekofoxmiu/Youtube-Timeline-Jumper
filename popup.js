@@ -2,6 +2,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     const DETECTION_CONFIG_KEY = 'songDetectionConfig';
     const APP_PREFERENCES_KEY = 'ytjUserPreferences';
     const DEFAULT_MIN_SEGMENT_DURATION_SEC = 90;
+    const LIVE_ANALYSIS_METHODS = {
+        AED_CACHE_60S: 'aed-cache-60s',
+        PCM_ROLLOVER_30MIN: 'pcm-rollover-30min',
+    };
+    const DEFAULT_LIVE_ANALYSIS_METHOD = LIVE_ANALYSIS_METHODS.AED_CACHE_60S;
     const FEATURE_NOTICE_ID = 'release-3.0.2-update-and-onboarding';
     const FEATURE_NOTICE_STORAGE_KEY = 'popupFeatureNoticeState';
     const FEATURE_NOTICE_CONTEXT_KEY = 'popupFeatureNoticeContext';
@@ -35,6 +40,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             start_detect: 'Start Detect',
             stop_detect: 'Stop Detect',
             min_segment_seconds: 'Min segment seconds',
+            live_method_label: 'Live method',
+            live_method_aed_cache_60s: '60s AED cache',
+            live_method_pcm_rollover: '30min PCM cache',
             playlist_studio: 'Playlist Studio',
             feature_update_title: `What's new in ${FEATURE_NOTICE_TO_VERSION}`,
             feature_update_intro: `Compared with the previous $1 release, this version adds:`,
@@ -78,6 +86,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             runtime_wasm_fallback: 'Runtime: WASM fallback',
             runtime_finalizer_loaded: 'Finalizer: ONNX loaded',
             runtime_finalizer_fallback: 'Finalizer: fallback',
+            runtime_live_method: 'Live method: $1',
+            runtime_pcm_buffer: 'PCM chunk: $1 / $2 sec, analyzed $3 sec',
+            runtime_capture_suspended: 'Capture paused: $1',
+            runtime_capture_skipped: 'Skipped capture: $1 sec',
+            runtime_snapshot_failures: 'Snapshot failures: $1',
+            runtime_frame_distribution: 'AED 10m: model $1%, vocal $2%, music-only $3%',
             runtime_thread_reason_forced_single: 'single-thread mode',
             runtime_thread_reason_no_isolation: 'cross-origin isolation disabled for tabCapture compatibility',
             runtime_thread_reason_no_sab: 'SharedArrayBuffer unavailable',
@@ -113,6 +127,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             start_detect: '開始偵測',
             stop_detect: '停止偵測',
             min_segment_seconds: '最短片段秒數',
+            live_method_label: 'Live 方法',
+            live_method_aed_cache_60s: '60 秒 AED cache',
+            live_method_pcm_rollover: '30 分鐘 PCM cache',
             playlist_studio: '播放清單工作台',
             feature_update_title: `${FEATURE_NOTICE_TO_VERSION} 主要更新`,
             feature_update_intro: `相較於上一個 $1 發行版，這次新增：`,
@@ -156,6 +173,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             runtime_wasm_fallback: '執行後端：WASM fallback',
             runtime_finalizer_loaded: '後處理模型：ONNX 已載入',
             runtime_finalizer_fallback: '後處理模型：fallback',
+            runtime_live_method: 'Live 方法：$1',
+            runtime_pcm_buffer: 'PCM 區塊：$1 / $2 秒，已分析 $3 秒',
+            runtime_capture_suspended: '擷取暫停：$1',
+            runtime_capture_skipped: '已略過擷取：$1 秒',
+            runtime_snapshot_failures: 'snapshot 失敗：$1 次',
+            runtime_frame_distribution: 'AED 10 分鐘：模型 $1%，人聲 $2%，純音樂 $3%',
             runtime_thread_reason_forced_single: '固定單執行緒模式',
             runtime_thread_reason_no_isolation: '為了相容 tabCapture 已停用 cross-origin isolation',
             runtime_thread_reason_no_sab: 'SharedArrayBuffer 不可用',
@@ -297,6 +320,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const authorizeStartBtn = document.getElementById('authorizeStartBtn');
     const stopDetectBtn = document.getElementById('stopDetectBtn');
     const minSegmentSecInput = document.getElementById('minSegmentSecInput');
+    const liveMethodButtons = Array.from(document.querySelectorAll('[data-live-method]'));
     const detectStatusText = document.getElementById('detectStatusText');
     const detectHint = document.getElementById('detectHint');
     const featureNotice = document.getElementById('featureNotice');
@@ -368,6 +392,35 @@ document.addEventListener('DOMContentLoaded', async () => {
         return Math.max(15, Math.min(600, Math.round(num)));
     }
 
+    function normalizeLiveAnalysisMethod(value, fallback = DEFAULT_LIVE_ANALYSIS_METHOD) {
+        const key = String(value || '').trim().toLowerCase();
+        if (key === LIVE_ANALYSIS_METHODS.AED_CACHE_60S) return LIVE_ANALYSIS_METHODS.AED_CACHE_60S;
+        if (key === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN) return LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN;
+        return fallback;
+    }
+
+    function liveAnalysisMethodLabel(value) {
+        const method = normalizeLiveAnalysisMethod(value);
+        return method === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN
+            ? t('live_method_pcm_rollover')
+            : t('live_method_aed_cache_60s');
+    }
+
+    function getSelectedLiveAnalysisMethod() {
+        const selected = liveMethodButtons.find((button) => button.classList.contains('active'));
+        return normalizeLiveAnalysisMethod(selected?.dataset.liveMethod);
+    }
+
+    function setSelectedLiveAnalysisMethod(value) {
+        const method = normalizeLiveAnalysisMethod(value);
+        liveMethodButtons.forEach((button) => {
+            const active = normalizeLiveAnalysisMethod(button.dataset.liveMethod) === method;
+            button.classList.toggle('active', active);
+            button.setAttribute('aria-pressed', active ? 'true' : 'false');
+        });
+        return method;
+    }
+
     async function loadSongDetectionConfig() {
         try {
             const result = await chrome.runtime.sendMessage({ action: 'getSongDetectionConfig' });
@@ -390,6 +443,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         const next = {
             ...current,
             mode: 'firered-aed',
+            liveAnalysisMethod: normalizeLiveAnalysisMethod(
+                patch.liveAnalysisMethod,
+                current.liveAnalysisMethod || DEFAULT_LIVE_ANALYSIS_METHOD
+            ),
             minSegmentDurationSec: normalizeMinSegmentDurationSec(
                 patch.minSegmentDurationSec,
                 current.minSegmentDurationSec
@@ -403,6 +460,41 @@ document.addEventListener('DOMContentLoaded', async () => {
     function formatRuntimeHint(runtimeInfo) {
         if (!runtimeInfo) return '';
         const hints = [];
+        if (runtimeInfo.liveFrameBuilder?.mode) {
+            hints.push(t('runtime_live_method', [liveAnalysisMethodLabel(runtimeInfo.liveFrameBuilder.mode)]));
+        }
+        if (runtimeInfo.liveFrameBuilder?.captureSuspended) {
+            hints.push(t('runtime_capture_suspended', [runtimeInfo.liveFrameBuilder.captureSuspendedReason || 'playback']));
+        }
+        const captureStats = runtimeInfo.liveFrameBuilder?.captureSuspensionStats || null;
+        if (captureStats && Number(captureStats.skippedAudioSec) > 0) {
+            hints.push(t('runtime_capture_skipped', [Math.floor(Number(captureStats.skippedAudioSec))]));
+        }
+        if (captureStats && Number(captureStats.snapshotFailureCount) > 0) {
+            hints.push(t('runtime_snapshot_failures', [Math.floor(Number(captureStats.snapshotFailureCount))]));
+        }
+        const bufferedPcm = runtimeInfo.liveFrameBuilder?.bufferedPcm || null;
+        if (bufferedPcm && Number.isFinite(Number(bufferedPcm.bufferedSec))) {
+            const bufferedSec = Math.max(0, Math.floor(Number(
+                bufferedPcm.chunkProgressSec
+                ?? bufferedPcm.bufferedSec
+            )));
+            const chunkSec = Math.max(1, Math.floor(Number(bufferedPcm.chunkSec || runtimeInfo.liveFrameBuilder?.chunkSec) || 1));
+            const analyzedSec = Math.max(0, Math.floor(Number(
+                bufferedPcm.totalAnalyzedSec
+                ?? 0
+            )));
+            hints.push(t('runtime_pcm_buffer', [bufferedSec, chunkSec, analyzedSec]));
+        }
+        const frameDistribution = runtimeInfo.liveFrameBuilder?.frameDistribution || null;
+        if (frameDistribution && Number(frameDistribution.frameCount) > 0) {
+            const percent = (value) => Math.round(Math.max(0, Math.min(1, Number(value) || 0)) * 100);
+            hints.push(t('runtime_frame_distribution', [
+                percent(frameDistribution.modelHighRatio),
+                percent(frameDistribution.singingHighRatio),
+                percent(frameDistribution.musicOnlyLowVocalRatio)
+            ]));
+        }
         const finalizerInfo = runtimeInfo.segmentFilterRuntimeInfo || null;
         if (finalizerInfo) {
             hints.push(finalizerInfo.segmentFilterLoaded
@@ -483,14 +575,20 @@ document.addEventListener('DOMContentLoaded', async () => {
         const normalized = String(status || 'Idle');
         const warning = options.warning || '';
         const error = options.error || '';
+        const liveAnalysisMethod = normalizeLiveAnalysisMethod(
+            options.liveAnalysisMethod || options.runtimeInfo?.liveFrameBuilder?.mode || getSelectedLiveAnalysisMethod()
+        );
         const runtimeHint = formatRuntimeHint(options.runtimeInfo);
         const debugHint = formatDetectionDebugTrace(options.debugTrace);
 
-        detectStatusText.textContent = `${t('status_label')}: ${statusLabel(normalized)} (FireRed AED)`;
+        detectStatusText.textContent = `${t('status_label')}: ${statusLabel(normalized)} (FireRed AED / ${liveAnalysisMethodLabel(liveAnalysisMethod)})`;
         const isRunning = normalized === 'Listening' || normalized === 'Detecting';
         const isPostProcessing = normalized === 'PostProcessing';
         authorizeStartBtn.disabled = isRunning || isPostProcessing;
         stopDetectBtn.disabled = !isRunning;
+        liveMethodButtons.forEach((button) => {
+            button.disabled = isRunning || isPostProcessing;
+        });
 
         const hints = [];
         if (runtimeHint) hints.push(runtimeHint);
@@ -572,6 +670,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 if (minSegmentSecInput.value !== String(minSegment)) {
                     minSegmentSecInput.value = String(minSegment);
                 }
+                setSelectedLiveAnalysisMethod(configResult.liveAnalysisMethod);
             }
 
             const invokedTab = await getInvokedYouTubeTab();
@@ -598,6 +697,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 setDetectionStatus(statusResult.status, {
                     warning: statusResult.warning || '',
                     error: statusResult.error || '',
+                    liveAnalysisMethod: statusResult.liveAnalysisMethod || configResult?.liveAnalysisMethod,
                     runtimeInfo: statusResult.runtimeInfo || null,
                     debugTrace: statusResult.debugTrace || null
                 });
@@ -632,6 +732,22 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     });
 
+    liveMethodButtons.forEach((button) => {
+        button.addEventListener('click', async () => {
+            const method = setSelectedLiveAnalysisMethod(button.dataset.liveMethod);
+            try {
+                const result = await saveSongDetectionConfig({ liveAnalysisMethod: method });
+                if (!result || !result.success) {
+                    showToast(t('set_min_failed'));
+                    return;
+                }
+                await refreshDetectionPanel();
+            } catch (error) {
+                showToast(t('error_prefix', [error?.message || String(error)]));
+            }
+        });
+    });
+
     authorizeStartBtn.addEventListener('click', async () => {
         try {
             const targetTab = await getInvokedYouTubeTab();
@@ -642,17 +758,19 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
 
             const minSegmentDurationSec = normalizeMinSegmentDurationSec(minSegmentSecInput.value);
+            const liveAnalysisMethod = getSelectedLiveAnalysisMethod();
             minSegmentSecInput.value = String(minSegmentDurationSec);
-            await saveSongDetectionConfig({ minSegmentDurationSec });
+            await saveSongDetectionConfig({ minSegmentDurationSec, liveAnalysisMethod });
 
             invalidateDetectionPanelRefresh();
-            setDetectionStatus('Listening');
+            setDetectionStatus('Listening', { liveAnalysisMethod });
 
             const result = await chrome.runtime.sendMessage({
                 action: 'startSongDetectionForActiveTab',
                 tabId: targetTab.id,
                 videoId: getVideoIdFromUrl(targetTab.url),
-                detectorMode: 'firered-aed'
+                detectorMode: 'firered-aed',
+                liveAnalysisMethod
             });
 
             if (!result || !result.success) {
@@ -673,6 +791,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             invalidateDetectionPanelRefresh();
             setDetectionStatus(result.status || 'Listening', {
+                liveAnalysisMethod: result.liveAnalysisMethod || liveAnalysisMethod,
                 warning: result.warning || '',
                 runtimeInfo: result.runtimeInfo || null
             });
@@ -1336,8 +1455,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         try {
             const config = await loadSongDetectionConfig();
             minSegmentSecInput.value = String(normalizeMinSegmentDurationSec(config.minSegmentDurationSec));
+            setSelectedLiveAnalysisMethod(config.liveAnalysisMethod);
         } catch (error) {
             minSegmentSecInput.value = String(DEFAULT_MIN_SEGMENT_DURATION_SEC);
+            setSelectedLiveAnalysisMethod(DEFAULT_LIVE_ANALYSIS_METHOD);
         }
         await maybeShowFeatureNotice();
         refreshView();

@@ -228,6 +228,10 @@
             <button id="offlineSaveBtn" type="button" disabled data-ui-key="save_segments">Save Segments</button>
             <button id="offlineSaveAllBtn" type="button" disabled data-ui-key="save_all_segments">Save All</button>
           </div>
+          <label class="check-field compact offline-save-option">
+            <input id="offlineOverwriteAutoSongsToggle" type="checkbox" checked>
+            <span data-ui-key="offline_overwrite_auto_songs">Overwrite existing offline auto-song segments when saving (uncheck to append)</span>
+          </label>
 
           <div class="progress-shell">
             <div id="offlineProgressBar" class="progress-bar"></div>
@@ -355,6 +359,11 @@
             <label class="field">
               <span data-ui-key="settings_advanced_preload_seconds">跨影片預開緩衝秒數</span>
               <input id="settingsAdvancedPreloadLookaheadSec" type="number" min="5" max="120" step="1" placeholder="20">
+            </label>
+
+            <label class="check-field settings-check">
+              <input id="settingsHideLiveChatDefault" type="checkbox" checked>
+              <span data-ui-key="settings_hide_live_chat">Studio 播放時預設收起直播聊天室</span>
             </label>
           </div>
 

@@ -1,6 +1,12 @@
 import { FIRERED_AED_DETECTOR_VERSION } from './lib/songDetection/fireredAedDetector.js';
 import { splitSongSegmentsByBoundaries } from './lib/songDetection/boundaryDetector.js';
 import { smoothFireRedAnalyses } from './lib/songDetection/globalSmoothing.js';
+import {
+  applySegmentFilterPredictions,
+  loadEdgeTrimAdvisorModel,
+  loadSegmentFilterModel,
+  runSegmentFilterPipeline,
+} from './lib/songDetection/segmentFilter.js';
 import { AUTO_SONG_TYPE, buildPlaylistMeta, formatSeconds, normalizePlaylist, normalizePlaylistItem, parseTimeToken, serializePlaylist } from './lib/playlistCore.js';
 import { decodeM4aFileWithWebCodecs, decodeM4aWithWebCodecs, loadM4aAudioSourceFromFile } from './lib/audio/mp4AacWebCodecsDecoder.js';
 
@@ -18,7 +24,8 @@ const PLAYBACK_POLL_MS = 250;
 const OFFLINE_ANALYSIS_CHUNK_SEC = 20;
 const OFFLINE_LONG_AUDIO_THRESHOLD_SEC = 60 * 60;
 const OFFLINE_LONG_AUDIO_CHUNK_SEC = 60 * 60;
-const OFFLINE_LONG_AUDIO_OVERLAP_SEC = 90;
+const OFFLINE_LONG_AUDIO_OVERLAP_SEC = 120;
+const OFFLINE_SEGMENT_FILTER_PROFILE = 'offline-final';
 const OFFLINE_UI_PROGRESS_THROTTLE_MS = 250;
 const OFFLINE_WORKER_SAMPLE_RATE = 16000;
 const OFFLINE_TRANSFER_COPY_CHUNK_FRAMES = OFFLINE_WORKER_SAMPLE_RATE * 20;
@@ -107,6 +114,7 @@ const UI_TEXT = Object.freeze({
     settings_high_resolution_visuals: 'Enable high-resolution spectrogram by default for offline analysis',
     settings_advanced_preload: 'Enable cross-video preload by default for playback queue',
     settings_advanced_preload_seconds: 'Cross-video preload seconds',
+    settings_hide_live_chat: 'Hide live chat by default for Studio playback',
     settings_save: 'Save settings',
     settings_saved: 'Settings saved.',
     settings_save_failed: 'Failed to save settings: $1',
@@ -152,6 +160,7 @@ const UI_TEXT = Object.freeze({
     run_medley_split: 'Run Medley Split',
     save_segments: 'Save Segments',
     save_all_segments: 'Save All',
+    offline_overwrite_auto_songs: 'Overwrite existing offline auto-song segments when saving (uncheck to append)',
     offline_batch_queue: 'Batch Queue',
     offline_batch_empty: 'Select one or more audio files to create batch jobs.',
     offline_batch_selected: 'Selected',
@@ -280,6 +289,7 @@ const UI_TEXT = Object.freeze({
     settings_high_resolution_visuals: '離線分析預設啟用高解析頻譜圖',
     settings_advanced_preload: '播放序列預設啟用跨影片預開緩衝',
     settings_advanced_preload_seconds: '跨影片預開緩衝秒數',
+    settings_hide_live_chat: 'Studio 播放時預設收起直播聊天室',
     settings_save: '儲存設定',
     settings_saved: '設定已儲存。',
     settings_save_failed: '儲存設定失敗：$1',
@@ -325,6 +335,7 @@ const UI_TEXT = Object.freeze({
     run_medley_split: '執行串燒切分',
     save_segments: '儲存片段',
     save_all_segments: '全部儲存',
+    offline_overwrite_auto_songs: '儲存時覆蓋既有離線 auto-song 片段（取消勾選則追加）',
     offline_batch_queue: '批次佇列',
     offline_batch_empty: '選擇一個或多個音訊檔以建立批次工作。',
     offline_batch_selected: '已選取',
@@ -457,6 +468,7 @@ const offlineSaveAllBtn = $('offlineSaveAllBtn');
 const offlineSplitMedleyToggle = $('offlineSplitMedleyToggle');
 const offlineVisualEditorToggle = $('offlineVisualEditorToggle');
 const offlineHighResolutionToggle = $('offlineHighResolutionToggle');
+const offlineOverwriteAutoSongsToggle = $('offlineOverwriteAutoSongsToggle');
 const offlineMultiFileStaging = $('offlineMultiFileStaging');
 const offlineMultiFileStatus = $('offlineMultiFileStatus');
 const offlineMultiFileTabs = $('offlineMultiFileTabs');
@@ -534,6 +546,7 @@ const settingsVisualEditorDefault = $('settingsVisualEditorDefault');
 const settingsHighResolutionDefault = $('settingsHighResolutionDefault');
 const settingsAdvancedPreloadDefault = $('settingsAdvancedPreloadDefault');
 const settingsAdvancedPreloadLookaheadSec = $('settingsAdvancedPreloadLookaheadSec');
+const settingsHideLiveChatDefault = $('settingsHideLiveChatDefault');
 const saveSettingsBtn = $('saveSettingsBtn');
 const settingsStatus = $('settingsStatus');
 
@@ -580,8 +593,10 @@ let userPreferences = {
   offlineSplitMedleyDefault: false,
   offlineVisualEditorDefault: true,
   offlineHighResolutionDefault: false,
+  offlineOverwriteAutoSongsDefault: true,
   advancedPreloadDefault: false,
   advancedPreloadLookaheadSec: DEFAULT_PRELOAD_LOOKAHEAD_SEC,
+  hideLiveChatForStudioPlayback: true,
 };
 
 function createIdlePlaybackState() { return { runId: 0, playing: false, paused: false, activeIndex: -1, requestedIndex: null, activeQueueId: null, activeHandle: null, activeVideoId: null, preloadHandles: new Map(), pausedPolls: 0 }; }
@@ -690,8 +705,10 @@ function normalizeUserPreferences(raw = {}) {
     offlineSplitMedleyDefault: Boolean(raw.offlineSplitMedleyDefault),
     offlineVisualEditorDefault: raw.offlineVisualEditorDefault !== false,
     offlineHighResolutionDefault: Boolean(raw.offlineHighResolutionDefault),
+    offlineOverwriteAutoSongsDefault: raw.offlineOverwriteAutoSongsDefault !== false,
     advancedPreloadDefault: Boolean(raw.advancedPreloadDefault),
     advancedPreloadLookaheadSec: normalizePreloadLookaheadSec(raw.advancedPreloadLookaheadSec),
+    hideLiveChatForStudioPlayback: raw.hideLiveChatForStudioPlayback !== false,
   };
 }
 async function loadUserPreferences() {
@@ -704,7 +721,9 @@ async function loadUserPreferences() {
       offlineSplitMedleyDefault: false,
       offlineVisualEditorDefault: true,
       offlineHighResolutionDefault: false,
+      offlineOverwriteAutoSongsDefault: true,
       advancedPreloadDefault: false,
+      hideLiveChatForStudioPlayback: true,
       appPreferencesDefaultsVersion: APP_PREFERENCES_DEFAULTS_VERSION,
       updatedAt: new Date().toISOString(),
     });
@@ -845,11 +864,17 @@ function renderSettingsForm(detectionConfig = {}) {
     settingsHighResolutionDefault.checked = Boolean(userPreferences.offlineHighResolutionDefault);
     settingsHighResolutionDefault.disabled = settingsVisualEditorDefault ? !settingsVisualEditorDefault.checked : false;
   }
+  if (offlineOverwriteAutoSongsToggle) {
+    offlineOverwriteAutoSongsToggle.checked = userPreferences.offlineOverwriteAutoSongsDefault !== false;
+  }
   if (settingsAdvancedPreloadDefault) {
     settingsAdvancedPreloadDefault.checked = Boolean(userPreferences.advancedPreloadDefault);
   }
   if (settingsAdvancedPreloadLookaheadSec) {
     settingsAdvancedPreloadLookaheadSec.value = String(normalizePreloadLookaheadSec(userPreferences.advancedPreloadLookaheadSec));
+  }
+  if (settingsHideLiveChatDefault) {
+    settingsHideLiveChatDefault.checked = userPreferences.hideLiveChatForStudioPlayback !== false;
   }
   updateAdvancedPreloadLabel();
   syncOfflineVisualOptionState();
@@ -873,11 +898,13 @@ async function saveSettingsFromForm() {
     offlineHighResolutionDefault: Boolean(settingsVisualEditorDefault?.checked !== false && settingsHighResolutionDefault?.checked),
     advancedPreloadDefault: Boolean(settingsAdvancedPreloadDefault?.checked),
     advancedPreloadLookaheadSec,
+    hideLiveChatForStudioPlayback: settingsHideLiveChatDefault?.checked !== false,
   });
 
   if (offlineSplitMedleyToggle) offlineSplitMedleyToggle.checked = Boolean(userPreferences.offlineSplitMedleyDefault);
   if (offlineVisualEditorToggle) offlineVisualEditorToggle.checked = userPreferences.offlineVisualEditorDefault !== false;
   if (offlineHighResolutionToggle) offlineHighResolutionToggle.checked = Boolean(userPreferences.offlineHighResolutionDefault);
+  if (offlineOverwriteAutoSongsToggle) offlineOverwriteAutoSongsToggle.checked = userPreferences.offlineOverwriteAutoSongsDefault !== false;
   syncOfflineVisualOptionState();
   if (advancedPreloadToggle) advancedPreloadToggle.checked = Boolean(userPreferences.advancedPreloadDefault);
   updateAdvancedPreloadLabel();
@@ -3514,6 +3541,124 @@ function mergeAnalysisFrames(frames) {
   return [...byTime.values()].sort((a, b) => a.timeSec - b.timeSec);
 }
 
+let offlineSegmentFilterRuntimesPromise = null;
+
+async function loadOptionalOfflineSegmentFilterRuntime(label, loader) {
+  try {
+    return await loader();
+  } catch (error) {
+    console.warn(`[YTJ] ${label} unavailable for offline finalization.`, error);
+    return null;
+  }
+}
+
+async function getOfflineSegmentFilterRuntimes() {
+  if (offlineSegmentFilterRuntimesPromise) return offlineSegmentFilterRuntimesPromise;
+
+  offlineSegmentFilterRuntimesPromise = (async () => {
+    const ort = globalThis.ort;
+    if (!ort?.InferenceSession || !ort?.Tensor) return null;
+
+    const [segmentFilter, edgeTrimAdvisor] = await Promise.all([
+      loadOptionalOfflineSegmentFilterRuntime('Offline segment filter', () => loadSegmentFilterModel({
+        ort,
+        assetProfile: OFFLINE_SEGMENT_FILTER_PROFILE,
+        requireAssetProfile: true,
+        executionProviders: ['wasm'],
+      })),
+      loadOptionalOfflineSegmentFilterRuntime('Offline edge trim advisor', () => loadEdgeTrimAdvisorModel({
+        ort,
+        assetProfile: OFFLINE_SEGMENT_FILTER_PROFILE,
+        requireAssetProfile: true,
+        executionProviders: ['wasm'],
+      })),
+    ]);
+
+    if (!segmentFilter) return null;
+    return { segmentFilter, edgeTrimAdvisor };
+  })();
+
+  return offlineSegmentFilterRuntimesPromise;
+}
+
+function segmentFilterMetaNumber(runtime, key, fallback = null) {
+  const value = Number(runtime?.meta?.[key]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+async function applyOfflineFinalSegmentFilter(baseSegments, analyses, {
+  startSec,
+  endSec,
+  minSegmentDurationSec,
+} = {}) {
+  const inputSegments = Array.isArray(baseSegments) ? baseSegments : [];
+  if (!inputSegments.length) {
+    return {
+      segments: [],
+      adjustments: [],
+      runtimeInfo: null,
+      warning: null,
+    };
+  }
+
+  try {
+    const runtimes = await getOfflineSegmentFilterRuntimes();
+    if (!runtimes?.segmentFilter) {
+      return {
+        segments: inputSegments.slice(),
+        adjustments: [],
+        runtimeInfo: { applied: false, assetProfile: OFFLINE_SEGMENT_FILTER_PROFILE },
+        warning: 'offline segment filter unavailable',
+      };
+    }
+
+    const predictions = await runSegmentFilterPipeline(runtimes, inputSegments, analyses, {
+      startSec,
+      endSec,
+      mode: OFFLINE_SEGMENT_FILTER_PROFILE,
+    }, {
+      minSegmentDurationSec,
+    });
+    const filterOptions = {
+      startSec,
+      endSec,
+      minSegmentDurationSec,
+      startTrimEvidenceFrames: analyses,
+      endTrimEvidenceFrames: analyses,
+    };
+    const keepThreshold = segmentFilterMetaNumber(runtimes.segmentFilter, 'keepThreshold', null);
+    const trimConfidenceThreshold = segmentFilterMetaNumber(runtimes.segmentFilter, 'trimConfidenceThreshold', null);
+    if (keepThreshold !== null) filterOptions.keepThreshold = keepThreshold;
+    if (trimConfidenceThreshold !== null) filterOptions.trimConfidenceThreshold = trimConfidenceThreshold;
+    const filtered = applySegmentFilterPredictions(inputSegments, predictions, filterOptions);
+
+    return {
+      segments: filtered.segments,
+      adjustments: filtered.adjustments || [],
+      runtimeInfo: {
+        applied: true,
+        requestedAssetProfile: OFFLINE_SEGMENT_FILTER_PROFILE,
+        segmentFilterAssetProfileUsed: runtimes.segmentFilter.assetProfile || null,
+        edgeTrimAdvisorAssetProfileUsed: runtimes.edgeTrimAdvisor?.assetProfile || null,
+        segmentFilterFallbackUsed: Boolean(runtimes.segmentFilter.assetProfileFallbackUsed),
+        edgeTrimAdvisorFallbackUsed: Boolean(runtimes.edgeTrimAdvisor?.assetProfileFallbackUsed),
+      },
+      warning: null,
+    };
+  } catch (error) {
+    console.warn('[YTJ] Offline segment filter failed; using heuristic smoothing output.', error);
+    return {
+      segments: inputSegments.slice(),
+      adjustments: [],
+      runtimeInfo: {
+        applied: false,
+        error: error?.message || String(error),
+      },
+      warning: error?.message || String(error),
+    };
+  }
+}
+
 function cropSeries(series, startIndex, endIndex) {
   const source = numericSeries(series);
   const from = Math.max(0, Math.min(source.length, Math.floor(startIndex)));
@@ -3844,6 +3989,111 @@ function runOfflineVisualWorker(payload, transfer, callbacks = {}) {
   });
 }
 
+async function renderChunkedOfflineJobVisuals(job, previousStatusMessage = '') {
+  const startSec = Math.max(0, Number(job?.startSec) || 0);
+  const endSec = Math.max(startSec, Number(job?.endSec) || startSec);
+  const chunks = buildOfflineAnalysisChunks(startSec, endSec);
+  if (!chunks.length) {
+    throw new Error('Selected range has no decodable audio samples for visual rendering.');
+  }
+  if (!isMp4AacLikeFile(job.file)) {
+    throw new Error('Chunked visual rendering requires an m4a/mp4 source.');
+  }
+
+  const waveformChunks = [];
+  const spectrogramChunks = [];
+  let visualError = null;
+  let visualChunkCount = 0;
+  let audioContext = null;
+
+  try {
+    audioContext = new AudioContext();
+    const audioSource = await loadM4aAudioSourceFromFile(job.file);
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (job.deleted) throw createOfflineAbortError();
+      if (job.visualsStatus !== 'running') throw createOfflineAbortError();
+
+      const chunk = chunks[index];
+      const chunkLabel = `${index + 1}/${chunks.length}`;
+      const decodeLabel = `${formatSeconds(chunk.decodeStartSec)} - ${formatSeconds(chunk.decodeEndSec)}`;
+      job.statusMessage = `Rendering visuals chunk ${chunkLabel} (${decodeLabel})...`;
+      renderOfflineBatchList();
+      if (job.id === selectedOfflineJobId) {
+        setStatus(offlineStatus, job.statusMessage);
+        renderOfflineWaveform(job);
+      }
+      await nextAnimationFrame();
+
+      let decodedAudio = await decodeM4aFileWithWebCodecs(job.file, audioSource, {
+        audioContext,
+        startSec: chunk.decodeStartSec,
+        endSec: chunk.decodeEndSec,
+        allowFullFileFallback: false,
+      });
+      let audioBuffer = decodedAudio.audioBuffer;
+      const decodedStartSec = decodedAudio.decodedStartSec ?? chunk.decodeStartSec;
+      const sampleRate = Math.max(8000, Number(audioBuffer.sampleRate) || Number(audioSource.sampleRate) || OFFLINE_WORKER_SAMPLE_RATE);
+      const startFrame = Math.max(0, Math.floor((chunk.decodeStartSec - decodedStartSec) * sampleRate));
+      const endFrame = Math.min(audioBuffer.length, Math.ceil((chunk.decodeEndSec - decodedStartSec) * sampleRate));
+      if (endFrame <= startFrame) {
+        decodedAudio.audioBuffer = null;
+        decodedAudio = null;
+        audioBuffer = null;
+        throw new Error(`Visual chunk ${chunkLabel} has no decodable audio samples.`);
+      }
+
+      const { audio, transfer } = await sliceAudioBufferForWorker(audioBuffer, startFrame, endFrame);
+      decodedAudio.audioBuffer = null;
+      decodedAudio = null;
+      audioBuffer = null;
+      await nextAnimationFrame();
+
+      const visualResult = await runOfflineVisualWorker({
+        audio,
+        startSec: chunk.decodeStartSec,
+        endSec: chunk.decodeEndSec,
+        highResolutionVisuals: Boolean(job.highResolutionVisuals),
+      }, transfer, {
+        onStatus(message) {
+          const text = message.message || '';
+          job.statusMessage = text ? `Visual chunk ${chunkLabel}: ${text}` : `Rendering visuals chunk ${chunkLabel}...`;
+          if (job.id === selectedOfflineJobId) setStatus(offlineStatus, job.statusMessage);
+          scheduleOfflineBatchListRender();
+        },
+      });
+
+      const croppedWaveform = cropWaveformVisual(visualResult.waveform, chunk.coreStartSec, chunk.coreEndSec);
+      const croppedSpectrogram = cropSpectrogramVisual(visualResult.spectrogram, chunk.coreStartSec, chunk.coreEndSec);
+      if (croppedWaveform || croppedSpectrogram) {
+        visualChunkCount += 1;
+        if (croppedWaveform) waveformChunks.push(croppedWaveform);
+        if (croppedSpectrogram) spectrogramChunks.push(croppedSpectrogram);
+      }
+      if (visualResult.visualError?.message) {
+        visualError = visualResult.visualError;
+      }
+    }
+  } finally {
+    if (audioContext) await audioContext.close().catch(() => {});
+  }
+
+  if (waveformChunks.length) job.waveform = stitchWaveformVisuals(waveformChunks);
+  if (spectrogramChunks.length) job.spectrogram = stitchSpectrogramVisuals(spectrogramChunks);
+  job.visualsStatus = job.waveform || job.spectrogram ? 'done' : 'error';
+  job.visualsError = visualError?.message || (job.visualsStatus === 'error' ? 'Chunked visual rendering failed.' : null);
+  job.statusMessage = previousStatusMessage || `Done. Detected ${job.segments.length} segment(s).`;
+  job.summary = [
+    ...(job.summary || []).filter((item) => {
+      const text = String(item);
+      return !text.startsWith('visual unavailable')
+        && !text.startsWith('visual stitched')
+        && !text.startsWith('visual pending');
+    }),
+    job.visualsStatus === 'done' ? `visual stitched ${visualChunkCount}/${chunks.length} chunk(s)` : null,
+    job.visualsError ? `visual unavailable: ${job.visualsError}` : null,
+  ].filter(Boolean);
+}
+
 async function ensureOfflineJobVisuals(job) {
   if (!job || !job.file) return;
   if (job.status !== 'done' && job.status !== 'saved') return;
@@ -3852,11 +4102,6 @@ async function ensureOfflineJobVisuals(job) {
   if (job.generateVisuals === false) {
     job.visualsStatus = 'skipped';
     job.visualsError = null;
-    return;
-  }
-  if (job.chunkedAnalysis) {
-    job.visualsStatus = 'skipped';
-    job.visualsError = 'Long audio visual rendering is skipped to avoid excessive memory use.';
     return;
   }
   if (offlineBatchRunning) return;
@@ -3876,6 +4121,11 @@ async function ensureOfflineJobVisuals(job) {
 
   let audioContext = null;
   try {
+    if (job.chunkedAnalysis) {
+      await renderChunkedOfflineJobVisuals(job, previousStatusMessage);
+      return;
+    }
+
     audioContext = new AudioContext();
     let decodedAudio = await decodeAudioFile(audioContext, job.file, {
       startSec: Number(job.startSec) || 0,
@@ -3943,17 +4193,13 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
   }
 
   const allAnalyses = [];
-  const waveformChunks = [];
-  const spectrogramChunks = [];
   let runtimeInfo = null;
   let detectorVersion = null;
-  let visualError = null;
-  let visualChunkCount = 0;
 
   job.chunkedAnalysis = true;
   job.chunkedAnalysisChunks = chunks.length;
   job.generateVisuals = Boolean(jobConfig.generateVisuals);
-  job.visualsStatus = jobConfig.generateVisuals ? 'running' : 'skipped';
+  job.visualsStatus = jobConfig.generateVisuals ? 'idle' : 'skipped';
   job.visualsError = null;
   job.startSec = startSec;
   job.endSec = endSec;
@@ -4025,7 +4271,7 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
       endSec: chunk.decodeEndSec,
       splitMedley: false,
       highResolutionVisuals: Boolean(jobConfig.highResolutionVisuals),
-      generateVisuals: Boolean(jobConfig.generateVisuals),
+      generateVisuals: false,
       analysisOnly: true,
       minSegmentDurationSec: jobConfig.minSegmentDurationSec,
       chunkSec: OFFLINE_ANALYSIS_CHUNK_SEC,
@@ -4041,9 +4287,7 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
       },
       onStatus(message) {
         const text = message.message || '';
-        job.statusMessage = text.toLowerCase().includes('rendering')
-          ? `Visualizing chunk ${chunkLabel}: ${text}`
-          : `Chunk ${chunkLabel}: ${text}`;
+        job.statusMessage = `Chunk ${chunkLabel}: ${text}`;
         if (job.id === selectedOfflineJobId) setStatus(offlineStatus, job.statusMessage);
         scheduleOfflineBatchListRender();
       },
@@ -4057,31 +4301,8 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
     detectorVersion = result.detectorVersion || detectorVersion;
     allAnalyses.push(...filterChunkCoreAnalyses(result.analyses, chunk, index === chunks.length - 1));
     job.analyses = mergeAnalysisFrames(allAnalyses);
-    if (jobConfig.generateVisuals) {
-      const croppedWaveform = cropWaveformVisual(result.waveform, chunk.coreStartSec, chunk.coreEndSec);
-      const croppedSpectrogram = cropSpectrogramVisual(result.spectrogram, chunk.coreStartSec, chunk.coreEndSec);
-      if (croppedWaveform || croppedSpectrogram) {
-        visualChunkCount += 1;
-        if (croppedWaveform) waveformChunks.push(croppedWaveform);
-        if (croppedSpectrogram) spectrogramChunks.push(croppedSpectrogram);
-        job.statusMessage = `Visualized chunk ${chunkLabel}.`;
-        updateOfflineAnalysisProgressUi(job);
-      }
-    }
-    if (result.visualError?.message) {
-      visualError = result.visualError;
-    }
     scheduleOfflineBatchListRender();
     await nextAnimationFrame();
-  }
-
-  if (jobConfig.generateVisuals && (waveformChunks.length || spectrogramChunks.length)) {
-    job.statusMessage = `Stitching visuals from ${visualChunkCount}/${chunks.length} chunk(s)...`;
-    updateOfflineAnalysisProgressUi(job, { force: true });
-    await nextAnimationFrame();
-    job.waveform = stitchWaveformVisuals(waveformChunks);
-    job.spectrogram = stitchSpectrogramVisuals(spectrogramChunks);
-    if (job.id === selectedOfflineJobId) renderOfflineWaveform(job);
   }
 
   const analyses = mergeAnalysisFrames(allAnalyses);
@@ -4092,12 +4313,25 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
   const smoothing = smoothFireRedAnalyses(analyses, endSec, {
     startSec,
     minSegmentDurationSec: jobConfig.minSegmentDurationSec,
+    smoothingProfile: OFFLINE_SEGMENT_FILTER_PROFILE,
   });
-  const baseSegments = Array.isArray(smoothing?.segments) ? smoothing.segments : [];
+  const rawBaseSegments = Array.isArray(smoothing?.segments) ? smoothing.segments : [];
+  job.statusMessage = `Applying offline final filter to ${rawBaseSegments.length} segment(s)...`;
+  updateOfflineAnalysisProgressUi(job, { force: true });
+  await nextAnimationFrame();
+  const offlineFilter = await applyOfflineFinalSegmentFilter(rawBaseSegments, analyses, {
+    startSec,
+    endSec,
+    minSegmentDurationSec: jobConfig.minSegmentDurationSec,
+  });
+  const baseSegments = offlineFilter.segments;
   let boundarySplit = null;
 
+  job.rawBaseSegments = rawBaseSegments;
   job.baseSegments = baseSegments;
   job.analyses = analyses;
+  job.offlineSegmentFilter = offlineFilter.runtimeInfo;
+  job.offlineSegmentFilterAdjustments = offlineFilter.adjustments;
   job.excludedMusicOnlySpans = Array.isArray(smoothing?.excludedMusicOnlySpans) ? smoothing.excludedMusicOnlySpans : [];
   job.droppedMusicOnlySegments = Array.isArray(smoothing?.droppedMusicOnlySegments) ? smoothing.droppedMusicOnlySegments : [];
   job.boundarySelection = {};
@@ -4120,8 +4354,8 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
   job.runtimeInfo = runtimeInfo;
   job.highResolutionVisuals = Boolean(jobConfig.highResolutionVisuals);
   if (jobConfig.generateVisuals) {
-    job.visualsStatus = job.waveform || job.spectrogram ? 'done' : 'error';
-    job.visualsError = visualError?.message || (job.visualsStatus === 'error' ? 'Long audio visual rendering failed.' : null);
+    job.visualsStatus = 'idle';
+    job.visualsError = null;
   } else {
     job.visualsStatus = 'skipped';
     job.visualsError = null;
@@ -4138,6 +4372,8 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
     chunkedAnalysisChunks: chunks.length,
     smoothingMethod: smoothing?.method || null,
     smoothingVersion: smoothing?.smoothingVersion || null,
+    offlineSegmentFilter: offlineFilter.runtimeInfo,
+    offlineSegmentFilterAdjustmentCount: offlineFilter.adjustments.length,
     excludedMusicOnlySpans: job.excludedMusicOnlySpans,
     droppedMusicOnlySegments: job.droppedMusicOnlySegments,
   };
@@ -4162,6 +4398,7 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
     `chunked ${chunks.length} chunk(s)`,
     `overlap ${Math.round(OFFLINE_LONG_AUDIO_OVERLAP_SEC)}s`,
     runtimeLabel ? `runtime ${runtimeLabel}` : null,
+    offlineFilter.runtimeInfo?.applied ? `offline filter adjustments ${offlineFilter.adjustments.length}` : null,
     `${job.segments.length} segment(s)`,
     job.droppedMusicOnlySegments.length ? `dropped long music-only ${job.droppedMusicOnlySegments.length} segment(s)` : null,
     `min segment ${job.minSegmentDurationSec}s`,
@@ -4196,7 +4433,10 @@ async function analyzeOfflineJob(job, config) {
   job.error = null;
   job.segments = [];
   job.baseSegments = [];
+  job.rawBaseSegments = [];
   job.analyses = [];
+  job.offlineSegmentFilter = null;
+  job.offlineSegmentFilterAdjustments = [];
   job.waveform = null;
   job.spectrogram = null;
   job.generateVisuals = jobConfig.generateVisuals;
@@ -4293,7 +4533,7 @@ async function analyzeOfflineJob(job, config) {
       audio,
       startSec,
       endSec,
-      splitMedley: jobConfig.splitMedley,
+      splitMedley: false,
       highResolutionVisuals: jobConfig.highResolutionVisuals,
       generateVisuals: false,
       minSegmentDurationSec: jobConfig.minSegmentDurationSec,
@@ -4323,11 +4563,25 @@ async function analyzeOfflineJob(job, config) {
       },
     });
 
-    job.baseSegments = Array.isArray(result.baseSegments) ? result.baseSegments : (Array.isArray(result.segments) ? result.segments : []);
+    const rawBaseSegments = Array.isArray(result.baseSegments) ? result.baseSegments : (Array.isArray(result.segments) ? result.segments : []);
     job.analyses = Array.isArray(result.analyses) ? result.analyses : [];
+    job.statusMessage = `Applying offline final filter to ${rawBaseSegments.length} segment(s)...`;
+    updateOfflineAnalysisProgressUi(job, { force: true });
+    await nextAnimationFrame();
+    const offlineFilter = await applyOfflineFinalSegmentFilter(rawBaseSegments, job.analyses, {
+      startSec,
+      endSec,
+      minSegmentDurationSec: jobConfig.minSegmentDurationSec,
+    });
+    job.rawBaseSegments = rawBaseSegments;
+    job.baseSegments = offlineFilter.segments;
+    job.offlineSegmentFilter = offlineFilter.runtimeInfo;
+    job.offlineSegmentFilterAdjustments = offlineFilter.adjustments;
     job.waveform = result.waveform || job.waveform || null;
     job.spectrogram = result.spectrogram || job.spectrogram || null;
-    job.boundarySplit = result.boundarySplit || null;
+    job.boundarySplit = jobConfig.splitMedley
+      ? splitSongSegmentsByBoundaries(job.baseSegments, job.analyses)
+      : null;
     job.excludedMusicOnlySpans = Array.isArray(result.excludedMusicOnlySpans) ? result.excludedMusicOnlySpans : [];
     job.droppedMusicOnlySegments = Array.isArray(result.droppedMusicOnlySegments) ? result.droppedMusicOnlySegments : [];
     job.boundarySelection = {};
@@ -4351,6 +4605,8 @@ async function analyzeOfflineJob(job, config) {
       minSegmentDurationSec: result.minSegmentDurationSec || jobConfig.minSegmentDurationSec,
       smoothingMethod: result.smoothingMethod || null,
       smoothingVersion: result.smoothingVersion || null,
+      offlineSegmentFilter: offlineFilter.runtimeInfo,
+      offlineSegmentFilterAdjustmentCount: offlineFilter.adjustments.length,
       excludedMusicOnlySpans: job.excludedMusicOnlySpans,
       droppedMusicOnlySegments: job.droppedMusicOnlySegments,
     };
@@ -4384,12 +4640,13 @@ async function analyzeOfflineJob(job, config) {
       `sample rate ${Math.round(sampleRate)} Hz`,
       `decoder ${decoderName}`,
       runtimeLabel ? `runtime ${runtimeLabel}` : null,
+      offlineFilter.runtimeInfo?.applied ? `offline filter adjustments ${offlineFilter.adjustments.length}` : null,
       `${job.segments.length} segment(s)`,
       job.droppedMusicOnlySegments.length ? `dropped long music-only ${job.droppedMusicOnlySegments.length} segment(s)` : null,
       `min segment ${job.minSegmentDurationSec}s`,
       `hop ${HOP_SEC}s`,
       jobConfig.generateVisuals
-        ? (job.highResolutionVisuals ? 'visual high resolution' : 'visual standard resolution')
+        ? (job.highResolutionVisuals ? 'visual pending high resolution' : 'visual pending standard resolution')
         : 'visual editor disabled',
       visualWarning,
       jobConfig.splitMedley ? `medley boundaries ${boundaryCount}` : null,
@@ -4603,12 +4860,16 @@ async function saveOfflineJob(job, { switchToGlobal = false } = {}) {
   const store = await chrome.storage.local.get([itemsKey, metaKey]);
   const existingMeta = store[metaKey] || {};
   const existing = normalizePlaylist(store[itemsKey] || [], existingMeta).items;
-  const kept = existing.filter((item) => !(item.type === AUTO_SONG_TYPE && item.source === OFFLINE_SOURCE));
+  const overwriteOfflineAutoSongs = offlineOverwriteAutoSongsToggle?.checked !== false;
+  const existingOfflineAutoCount = existing.filter((item) => item.type === AUTO_SONG_TYPE && item.source === OFFLINE_SOURCE).length;
+  const kept = overwriteOfflineAutoSongs
+    ? existing.filter((item) => !(item.type === AUTO_SONG_TYPE && item.source === OFFLINE_SOURCE))
+    : existing;
   const now = new Date().toISOString();
   const autoItems = job.segments.map((segment, index) => normalizePlaylistItem({
     startSec: segment.startSec,
     endSec: Math.max(segment.startSec + 1, segment.endSec),
-    title: segment.title || `Offline Auto Song #${index + 1}`,
+    title: segment.title || `Offline Auto Song #${(overwriteOfflineAutoSongs ? 0 : existingOfflineAutoCount) + index + 1}`,
     type: AUTO_SONG_TYPE,
     confidence: segment.confidence,
     provisional: false,
@@ -5359,13 +5620,26 @@ function startLibraryDrag(event) {
 }
 
 function getYoutubeUrl(item) {
-  return `https://www.youtube.com/watch?v=${encodeURIComponent(item.videoId)}&t=${formatUrlSeconds(item.startSec)}s&autoplay=1`;
+  const url = new URL('https://www.youtube.com/watch');
+  url.searchParams.set('v', item.videoId);
+  url.searchParams.set('t', `${formatUrlSeconds(item.startSec)}s`);
+  url.searchParams.set('autoplay', '1');
+  return url.toString();
 }
 
 async function sendQueueControl(tabId, patch = {}) {
   const response = await chrome.tabs.sendMessage(tabId, { action: 'workbenchQueueControl', patch });
   if (!response || !response.success) throw new Error(response?.message || 'YouTube player is not ready.');
   return response;
+}
+
+async function requestPlaybackTabHideLiveChat(tabId) {
+  if (userPreferences.hideLiveChatForStudioPlayback === false) return;
+  try {
+    await chrome.tabs.sendMessage(tabId, { action: 'workbenchHideLiveChat' });
+  } catch (error) {
+    // YouTube may not have live chat or the content script may still be settling.
+  }
 }
 
 function isTransientQueueControlError(error) {
@@ -5439,6 +5713,7 @@ async function createPlaybackTab(item, { focused = true, preload = false } = {})
   const tabId = tab?.id;
   if (!Number.isFinite(tabId)) throw new Error('Failed to create playback tab.');
   await waitForQueueTabReady(tabId, item.videoId);
+  await requestPlaybackTabHideLiveChat(tabId);
   if (preload) {
     await sendQueueControl(tabId, { currentTime: item.startSec, muted: true, command: 'pause' }).catch(() => {});
   }
@@ -5485,6 +5760,7 @@ async function focusHandle(handle) {
 async function navigateHandle(handle, item) {
   await chrome.tabs.update(handle.tabId, { url: getYoutubeUrl(item) });
   await waitForQueueTabReady(handle.tabId, item.videoId);
+  await requestPlaybackTabHideLiveChat(handle.tabId);
   handle.videoId = item.videoId;
   handle.queueId = item.queueId;
   return handle;
@@ -5831,6 +6107,10 @@ function bindEvents() {
       .then(() => renderSettingsForm({ minSegmentDurationSec: offlineMinSegmentSec.value }))
       .catch((error) => showToast(tr('settings_save_failed', [error?.message || String(error)]), { warning: true }));
   });
+  offlineOverwriteAutoSongsToggle?.addEventListener('change', () => {
+    saveUserPreferences({ offlineOverwriteAutoSongsDefault: offlineOverwriteAutoSongsToggle.checked })
+      .catch((error) => showToast(tr('settings_save_failed', [error?.message || String(error)]), { warning: true }));
+  });
   refreshGlobalBtn.addEventListener('click', refreshGlobalPlaylist);
   refreshDatabaseBtn.addEventListener('click', () => runDatabaseAction(() => refreshDatabaseEditor()));
   databaseSearch.addEventListener('input', renderDatabaseVideoList);
@@ -5936,6 +6216,7 @@ async function init() {
   offlineSplitMedleyToggle.checked = Boolean(userPreferences.offlineSplitMedleyDefault);
   offlineVisualEditorToggle.checked = userPreferences.offlineVisualEditorDefault !== false;
   offlineHighResolutionToggle.checked = Boolean(userPreferences.offlineHighResolutionDefault);
+  offlineOverwriteAutoSongsToggle.checked = userPreferences.offlineOverwriteAutoSongsDefault !== false;
   syncOfflineVisualOptionState();
   advancedPreloadToggle.checked = Boolean(userPreferences.advancedPreloadDefault);
   renderSettingsForm(detectionConfig);

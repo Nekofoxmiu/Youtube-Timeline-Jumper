@@ -161,6 +161,9 @@ The packaging script includes only runtime files required by the extension and e
 - `lib/vendor/onnxruntime/`: ONNX Runtime Web runtime assets.
 - `models/fireredvad/aed/`: Runtime model assets used by local detection.
 - `tools/`: Training, diagnostics, conversion, smoothing, and packaging utilities.
+- `tools/live/`: Live simulation, PCM A/B, regression, and diagnostics utilities.
+- `tools/samples/live/`: Sample definitions for Live PCM A/B and regression.
+- `tools/docs/`: Detector experiment notes and mode-specific training guidance.
 
 ## Release Notes
 

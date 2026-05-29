@@ -347,6 +347,48 @@
             font-variant-numeric: tabular-nums;
         }
 
+        .live-method-field {
+            display: grid;
+            gap: 6px;
+            min-width: 0;
+        }
+
+        .live-method-label {
+            color: var(--muted);
+            font-size: 11px;
+            font-weight: 700;
+        }
+
+        .live-method-toggle {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 9px;
+            padding: 4px;
+            background: rgba(11, 18, 32, 0.5);
+        }
+
+        .live-method-btn,
+        .live-method-btn:hover:not(:disabled) {
+            min-width: 0;
+            border-radius: 7px;
+            padding: 7px 8px;
+            color: var(--muted);
+            background: transparent;
+            box-shadow: none;
+            font-size: 11px;
+            font-weight: 700;
+            transform: none;
+            filter: none;
+        }
+
+        .live-method-btn.active {
+            color: #fff;
+            background: linear-gradient(180deg, var(--accent), #2563eb);
+            box-shadow: 0 6px 14px rgba(59, 130, 246, 0.14);
+        }
+
         #detectStatusText,
         #detectHint {
             color: var(--muted);
@@ -765,6 +807,14 @@
                     <span data-ui-key="min_segment_seconds">最短片段秒數</span>
                     <input id="minSegmentSecInput" type="number" min="15" max="600" step="1" placeholder="90">
                 </label>
+            </div>
+
+            <div class="live-method-field">
+                <span class="live-method-label" data-ui-key="live_method_label">Live 方法</span>
+                <div class="live-method-toggle" role="group" aria-label="Live analysis method">
+                    <button class="live-method-btn active" type="button" data-live-method="aed-cache-60s" aria-pressed="true" data-ui-key="live_method_aed_cache_60s">60 秒 AED cache</button>
+                    <button class="live-method-btn" type="button" data-live-method="pcm-rollover-30min" aria-pressed="false" data-ui-key="live_method_pcm_rollover">30 分鐘 PCM cache</button>
+                </div>
             </div>
 
             <div class="status-row">

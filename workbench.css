@@ -1297,6 +1297,10 @@ h2 {
   line-height: 1.45;
 }
 
+.offline-save-option {
+  margin: 10px 0 14px;
+}
+
 .queue-controls {
   margin-top: 12px;
 }
