@@ -196,17 +196,30 @@ function overlapSeconds(a, b) {
   return Math.max(0, Math.min(a.endSec, b.endSec) - Math.max(a.startSec, b.startSec));
 }
 
-function segmentMatches(predicted, manual) {
+function overlapWithRanges(segment, ranges) {
+  return (Array.isArray(ranges) ? ranges : [])
+    .reduce((total, range) => total + overlapSeconds(segment, range), 0);
+}
+
+function segmentDurationSec(segment) {
+  return Math.max(0, Number(segment?.endSec) - Number(segment?.startSec));
+}
+
+function segmentMatches(predicted, manual, ignoredRanges = []) {
   return manual.map((target) => {
     let best = null;
     for (const segment of predicted) {
       const overlap = overlapSeconds(segment, target);
+      const ignoredOverlapSec = overlapWithRanges(segment, ignoredRanges);
+      const effectivePredictedDurationSec = Math.max(1, segmentDurationSec(segment) - ignoredOverlapSec);
       if (!best || overlap > best.overlapSec) {
         best = {
           overlapSec: overlap,
           predicted: segment,
           recallRatio: overlap / Math.max(1, target.endSec - target.startSec),
-          predictedPrecisionRatio: overlap / Math.max(1, segment.endSec - segment.startSec),
+          predictedPrecisionRatio: overlap / effectivePredictedDurationSec,
+          ignoredOverlapSec,
+          effectivePredictedDurationSec,
           startDeltaSec: segment.startSec - target.startSec,
           endDeltaSec: segment.endSec - target.endSec,
         };
@@ -344,7 +357,7 @@ function classifyMatchOutlier(match, { frames, manualSegments, minSegmentDuratio
   return outliers;
 }
 
-function classifyPredictionOutliers(predicted, manual, frames) {
+function classifyPredictionOutliers(predicted, manual, frames, ignoredRanges = []) {
   const outliers = [];
   for (const segment of Array.isArray(predicted) ? predicted : []) {
     let bestOverlapSec = 0;
@@ -352,8 +365,9 @@ function classifyPredictionOutliers(predicted, manual, frames) {
       bestOverlapSec = Math.max(bestOverlapSec, overlapSeconds(segment, target));
     }
     const durationSec = Math.max(0, Number(segment.endSec) - Number(segment.startSec));
-    const extraSec = Math.max(0, durationSec - bestOverlapSec);
-    if ((bestOverlapSec <= 0 && durationSec >= 60) || extraSec > 60) {
+    const ignoredOverlapSec = overlapWithRanges(segment, ignoredRanges);
+    const extraSec = Math.max(0, durationSec - bestOverlapSec - ignoredOverlapSec);
+    if ((bestOverlapSec <= 0 && extraSec >= 60) || extraSec > 60) {
       const segmentFeatures = summarizeSegmentDiagnosticFeatures(frames, segment);
       const type = segmentFeatures.repetitionScore >= 0.66
         ? 'false-positive-repetitive-bgm'
@@ -363,6 +377,7 @@ function classifyPredictionOutliers(predicted, manual, frames) {
         segment,
         durationSec: roundNumber(durationSec, 3),
         overlapSec: roundNumber(bestOverlapSec, 3),
+        ignoredOverlapSec: roundNumber(ignoredOverlapSec, 3),
         extraSec: roundNumber(extraSec, 3),
         segmentFeatures,
       });
@@ -443,6 +458,28 @@ function splitManualSegmentsByDuration(segments, minDurationSec) {
     }
   }
   return { kept, skippedShort };
+}
+
+function mergeEvaluationIgnoreRanges(ranges) {
+  const sorted = (Array.isArray(ranges) ? ranges : [])
+    .map((range) => ({
+      ...range,
+      startSec: Math.max(0, Number(range?.startSec) || 0),
+      endSec: Math.max(0, Number(range?.endSec) || 0),
+    }))
+    .filter((range) => range.endSec > range.startSec)
+    .sort((a, b) => a.startSec - b.startSec || a.endSec - b.endSec);
+  const output = [];
+  for (const range of sorted) {
+    const previous = output[output.length - 1];
+    if (!previous || range.startSec > previous.endSec + 1e-6) {
+      output.push(range);
+      continue;
+    }
+    previous.endSec = Math.max(previous.endSec, range.endSec);
+    previous.reason = [previous.reason, range.reason].filter(Boolean).join('|') || null;
+  }
+  return output;
 }
 
 function computeNextIntegerSecond(currentTimeSec) {
@@ -1378,6 +1415,14 @@ const {
   kept: evaluationManual,
   skippedShort: evaluationSkippedShortManualSegments,
 } = splitManualSegmentsByDuration(clippedEvaluationManual, minSegmentDurationSec);
+const evaluationIgnoreRanges = mergeEvaluationIgnoreRanges([
+  ...ignoreRanges,
+  ...evaluationSkippedShortManualSegments.map((segment) => ({
+    startSec: segment.startSec,
+    endSec: segment.endSec,
+    reason: 'below-min-segment-duration',
+  })),
+]);
 const frameTimes = frames.map((frame) => Number(frame.timeSec) || 0);
 const predictedLabels = labelsFromSegments(frameTimes, finalSegments);
 const manualLabels = labelsFromSegments(frameTimes, evaluationManual);
@@ -1386,11 +1431,11 @@ const rawModelLabels = frames.map((frame) => {
   return Number(frame.temporalHeadProbability ?? frame.songProbability) >= threshold ? 1 : 0;
 });
 const evaluationMask = frameTimes.map((timeSec) => (
-  !ignoreRanges.some((range) => timeSec >= range.startSec && timeSec < range.endSec)
+  !evaluationIgnoreRanges.some((range) => timeSec >= range.startSec && timeSec < range.endSec)
 ));
 const filterByEvaluationMask = (values) => values.filter((_, index) => evaluationMask[index]);
 const ignoredEvaluationFrameCount = evaluationMask.reduce((total, keep) => total + (keep ? 0 : 1), 0);
-const matches = evaluationManual.length ? segmentMatches(finalSegments, evaluationManual) : [];
+const matches = evaluationManual.length ? segmentMatches(finalSegments, evaluationManual, evaluationIgnoreRanges) : [];
 const matchOutlierContext = {
   frames,
   manualSegments: clippedEvaluationManual,
@@ -1399,7 +1444,7 @@ const matchOutlierContext = {
 const severeOutliers = [
   ...matches.flatMap((match) => classifyMatchOutlier(match, matchOutlierContext)),
   ...classifySkippedShortManualSegments(evaluationSkippedShortManualSegments, minSegmentDurationSec, frames),
-  ...classifyPredictionOutliers(finalSegments, evaluationManual, frames),
+  ...classifyPredictionOutliers(finalSegments, evaluationManual, frames, evaluationIgnoreRanges),
   ...classifyModelDropOutliers(matches, frames),
 ];
 
@@ -1421,6 +1466,7 @@ const summary = {
     stallInsertions,
     snapshotUnavailableInsertions,
     ignoreRanges,
+    evaluationIgnoreRanges,
     snapshotUnavailableSec: roundNumber(snapshotUnavailableDiagnostics.insertedSec, 3),
     snapshotUnavailableSkippedSec: roundNumber(snapshotUnavailableDiagnostics.skippedSec, 3),
     hopSec: DEFAULT_HOP_SEC,

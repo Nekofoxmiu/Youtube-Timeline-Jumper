@@ -27,6 +27,13 @@ const VARIANTS = Object.freeze({
     enableStartEdgeTrim: true,
     startEdgeTrimScale: 0.75,
   },
+  'pcm-current-start-trim-1x': {
+    suffix: 'pcm_filter_on_start_trim_1x',
+    liveMethod: 'pcm-rollover-30min',
+    segmentFilter: true,
+    enableStartEdgeTrim: true,
+    startEdgeTrimScale: 1,
+  },
   'pcm-current-no-start-trim': {
     suffix: 'pcm_filter_on_no_start_trim',
     liveMethod: 'pcm-rollover-30min',
@@ -48,6 +55,13 @@ const VARIANTS = Object.freeze({
     liveMethod: 'aed-cache-60s',
     segmentFilter: true,
     disableStartEdgeTrim: true,
+  },
+  'aed60-current-start-trim-1x': {
+    suffix: 'aed60_overlap60_start_trim_1x',
+    liveMethod: 'aed-cache-60s',
+    segmentFilter: true,
+    enableStartEdgeTrim: true,
+    startEdgeTrimScale: 1,
   },
   'aed60-current-no-speech-reset': {
     suffix: 'aed60_overlap60_no_speech_reset',
