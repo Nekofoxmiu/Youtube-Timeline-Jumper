@@ -13,6 +13,7 @@ import { smoothFireRedAnalyses } from '../../lib/songDetection/globalSmoothing.j
 import {
   DEFAULT_SEGMENT_FILTER_OPTIONS,
   applySegmentFilterPredictions,
+  refineLiveSegmentStartsByShortPrefixRestart,
   refineLiveSegmentEndsBySpeechReset,
   loadEdgeTrimAdvisorModel,
   loadSegmentFilterModel,
@@ -853,6 +854,7 @@ async function applyFinalizer(runtimes, segments, frames, smoothing, {
     startTrimMinAbsSec: liveStartEdgeTrimMinAbsSec,
     startTrimEvidenceFrames: frames,
     startTrimEvidenceMinFrames: 3,
+    negativeStartTrimBoundaryScan: liveFrameBuilderConfig.liveAnalysisMethod === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN,
     endTrimEvidenceFrames: endTrimEvidenceGuardEnabled ? frames : [],
     endTrimEvidenceGuard: endTrimEvidenceGuardEnabled,
     endTrimEvidenceMinFrames: 4,
@@ -868,11 +870,22 @@ async function applyFinalizer(runtimes, segments, frames, smoothing, {
   const speechResetRefined = finalizeAll && speechResetEndRefinement
     ? refineLiveSegmentEndsBySpeechReset(filtered.segments, frames, { minSegmentDurationSec })
     : { segments: filtered.segments, adjustments: [], changed: false };
+  const protectedStartSecs = (filtered.adjustments || [])
+    .filter((adjustment) => adjustment?.startTrimEvidence?.boundaryScan)
+    .map((adjustment) => Number(adjustment?.segment?.startSec))
+    .filter(Number.isFinite);
+  const shortPrefixRefined = finalizeAll && liveFrameBuilderConfig.liveAnalysisMethod === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN
+    ? refineLiveSegmentStartsByShortPrefixRestart(speechResetRefined.segments, frames, {
+      minSegmentDurationSec,
+      protectedStartSecs,
+    })
+    : { segments: speechResetRefined.segments, adjustments: [], changed: false };
   return {
-    segments: uniqueSegments(speechResetRefined.segments || filtered.segments || []),
+    segments: uniqueSegments(shortPrefixRefined.segments || speechResetRefined.segments || filtered.segments || []),
     adjustments: [
       ...(filtered.adjustments || []),
       ...(speechResetRefined.adjustments || []),
+      ...(shortPrefixRefined.adjustments || []),
     ],
     applied: true,
     runtimeInfo: {
@@ -888,6 +901,7 @@ async function applyFinalizer(runtimes, segments, frames, smoothing, {
       startEdgeTrimEvidenceGuard: true,
       speechResetEndRefinementEnabled: finalizeAll && speechResetEndRefinement,
       speechResetEndRefinementChanged: Boolean(speechResetRefined.changed),
+      shortPrefixRestartStartRefinementChanged: Boolean(shortPrefixRefined.changed),
     },
   };
 }

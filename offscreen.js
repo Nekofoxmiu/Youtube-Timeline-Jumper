@@ -21,6 +21,7 @@ import {
   DEFAULT_SEGMENT_FILTER_OPTIONS,
   SEGMENT_FILTER_VERSION,
   applySegmentFilterPredictions,
+  refineLiveSegmentStartsByShortPrefixRestart,
   refineLiveSegmentEndsBySpeechReset,
   loadEdgeTrimAdvisorModel,
   loadSegmentFilterModel,
@@ -827,6 +828,7 @@ async function applyLiveSegmentFilterToFinalSegments(
       startTrimMinAbsSec: LIVE_START_EDGE_TRIM_MIN_ABS_SEC,
       startTrimEvidenceFrames: frames,
       startTrimEvidenceMinFrames: 3,
+      negativeStartTrimBoundaryScan: session.liveAnalysisMethod === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN,
       endTrimEvidenceFrames: endTrimEvidenceGuardEnabled ? frames : [],
       endTrimEvidenceGuard: endTrimEvidenceGuardEnabled,
       endTrimEvidenceMinFrames: 4,
@@ -850,15 +852,26 @@ async function applyLiveSegmentFilterToFinalSegments(
         minSegmentDurationSec: session.minSegmentDurationSec,
       })
       : { segments: filtered.segments, adjustments: [], changed: false };
-    const finalSegments = speechResetRefined.segments || filtered.segments;
+    const protectedStartSecs = (filtered.adjustments || [])
+      .filter((adjustment) => adjustment?.startTrimEvidence?.boundaryScan)
+      .map((adjustment) => Number(adjustment?.segment?.startSec))
+      .filter(Number.isFinite);
+    const shortPrefixRefined = finalizeAll && session.liveAnalysisMethod === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN
+      ? refineLiveSegmentStartsByShortPrefixRestart(speechResetRefined.segments, frames, {
+        minSegmentDurationSec: session.minSegmentDurationSec,
+        protectedStartSecs,
+      })
+      : { segments: speechResetRefined.segments, adjustments: [], changed: false };
+    const finalSegments = shortPrefixRefined.segments || speechResetRefined.segments || filtered.segments;
     return {
       segments: sortReportSegments(finalSegments, { provisional: false }),
       adjustments: [
         ...(filtered.adjustments || []),
         ...(speechResetRefined.adjustments || []),
+        ...(shortPrefixRefined.adjustments || []),
       ],
       applied: true,
-      changed: Boolean(filtered.changed || speechResetRefined.changed),
+      changed: Boolean(filtered.changed || speechResetRefined.changed || shortPrefixRefined.changed),
       runtimeInfo: session.segmentFilterRuntimeInfo || buildSegmentFilterRuntimeInfo(runtimes),
     };
   } catch (error) {
