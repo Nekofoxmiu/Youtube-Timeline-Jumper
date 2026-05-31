@@ -13,8 +13,13 @@ import { smoothFireRedAnalyses } from '../../lib/songDetection/globalSmoothing.j
 import {
   DEFAULT_SEGMENT_FILTER_OPTIONS,
   applySegmentFilterPredictions,
+  getSegmentFilterRuntimeProfile,
   refineLiveSegmentStartsByShortPrefixRestart,
   refineLiveSegmentEndsBySpeechReset,
+  resolveSegmentFilterProfileOptions,
+  resolveShortPrefixRestartStartRefinementOptions,
+  resolveSpeechResetEndRefinementOptions,
+  segmentFilterProfileForLiveAnalysisMethod,
   loadEdgeTrimAdvisorModel,
   loadSegmentFilterModel,
   runSegmentFilterPipeline,
@@ -27,14 +32,7 @@ const DEFAULT_HOP_SEC = 0.5;
 const DEFAULT_LIVE_FINALIZE_DELAY_SEC = 180;
 const DEFAULT_REPORT_STEP_SEC = 5;
 const DEFAULT_MIN_SEGMENT_DURATION_SEC = 90;
-const LIVE_SEGMENT_FILTER_KEEP_THRESHOLD = 0.35;
-const LIVE_FINAL_SEGMENT_FILTER_KEEP_THRESHOLD = 0.9;
 const DEFAULT_LIVE_START_EDGE_TRIM_ENABLED = true;
-const DEFAULT_LIVE_START_EDGE_TRIM_MODE = 'bidirectional';
-const DEFAULT_LIVE_START_EDGE_TRIM_SCALE = 0.75;
-const DEFAULT_LIVE_START_EDGE_TRIM_MIN_ABS_SEC = 2;
-const LIVE_LARGE_END_TRIM_THRESHOLD_SEC = 30;
-const LIVE_LARGE_END_TRIM_SCALE = 1.6;
 const LIVE_ANALYSIS_METHODS = Object.freeze({
   AED_CACHE_60S: 'aed-cache-60s',
   PCM_ROLLOVER_30MIN: 'pcm-rollover-30min',
@@ -49,6 +47,11 @@ const LIVE_FILTER_DROP_PROTECTION = Object.freeze({
   minSingingP90: 0.55,
   minSingingRatioMean: 0.08,
   maxLowSingingHighMusicRatio: 0.65,
+  strongMinTemporalMean: 0.72,
+  strongMinSingingMean: 0.28,
+  strongMinSingingP90: 0.82,
+  strongMinSingingRatioMean: 0.16,
+  strongMaxLowSingingHighMusicRatio: 0.55,
 });
 
 function parseArgs(argv) {
@@ -586,7 +589,47 @@ function summarizeLiveSegmentEvidence(frames, segment) {
   };
 }
 
-function protectLiveFilterDrops(originalSegments, filteredResult, frames) {
+function shouldProtectLiveFilterDrop(segment, frames, keepProbability = 1, { minSegmentDurationSec = null } = {}) {
+  const probability = Number(keepProbability);
+  const durationSec = Number(segment?.endSec) - Number(segment?.startSec);
+  const confidence = Number(segment?.confidence) || 0;
+  const minDurationSec = Math.min(
+    LIVE_FILTER_DROP_PROTECTION.minDurationSec,
+    Math.max(15, Number(minSegmentDurationSec) || LIVE_FILTER_DROP_PROTECTION.minDurationSec)
+  );
+  if (durationSec < minDurationSec) return false;
+  if (confidence < LIVE_FILTER_DROP_PROTECTION.minConfidence) return false;
+
+  const evidence = summarizeLiveSegmentEvidence(frames, segment);
+  if (evidence.frameCount < 10) return false;
+
+  const passesProbabilityGate = !Number.isFinite(probability)
+    || probability >= LIVE_FILTER_DROP_PROTECTION.minKeepProbability;
+  const hasTemporalEvidence = evidence.temporalMean >= LIVE_FILTER_DROP_PROTECTION.minTemporalMean;
+  const hasVocalEvidence = evidence.singingMean >= LIVE_FILTER_DROP_PROTECTION.minSingingMean
+    || evidence.singingP90 >= LIVE_FILTER_DROP_PROTECTION.minSingingP90
+    || evidence.singingRatioMean >= LIVE_FILTER_DROP_PROTECTION.minSingingRatioMean;
+  const looksMusicOnly = evidence.lowSingingHighMusicRatio >= LIVE_FILTER_DROP_PROTECTION.maxLowSingingHighMusicRatio;
+  if (passesProbabilityGate && hasTemporalEvidence && hasVocalEvidence && !looksMusicOnly) {
+    return { evidence, reason: 'probability-gated-vocal-evidence' };
+  }
+
+  // Live profile heads can over-drop when a segment is clearly song-like but
+  // outside the small model's calibration set. Fail open only for strong vocal
+  // evidence so pure BGM remains droppable.
+  const hasStrongTemporalEvidence = evidence.temporalMean >= LIVE_FILTER_DROP_PROTECTION.strongMinTemporalMean;
+  const hasStrongVocalEvidence = evidence.singingMean >= LIVE_FILTER_DROP_PROTECTION.strongMinSingingMean
+    || evidence.singingP90 >= LIVE_FILTER_DROP_PROTECTION.strongMinSingingP90
+    || evidence.singingRatioMean >= LIVE_FILTER_DROP_PROTECTION.strongMinSingingRatioMean;
+  const stronglyLooksMusicOnly = evidence.lowSingingHighMusicRatio >= LIVE_FILTER_DROP_PROTECTION.strongMaxLowSingingHighMusicRatio;
+  if (hasStrongTemporalEvidence && hasStrongVocalEvidence && !stronglyLooksMusicOnly) {
+    return { evidence, reason: 'strong-live-vocal-evidence' };
+  }
+
+  return false;
+}
+
+function protectLiveFilterDrops(originalSegments, filteredResult, frames, options = {}) {
   const sourceSegments = Array.isArray(originalSegments) ? originalSegments : [];
   const result = filteredResult || { segments: [], adjustments: [], changed: false };
   const adjustments = Array.isArray(result.adjustments) ? result.adjustments.map((item) => ({ ...item })) : [];
@@ -599,34 +642,23 @@ function protectLiveFilterDrops(originalSegments, filteredResult, frames) {
     const sourceIndex = Number.isInteger(adjustment.index) ? adjustment.index : index;
     const segment = sourceSegments[sourceIndex];
     if (!segment) continue;
-    const keepProbability = Number(adjustment.keepProbability);
-    if (Number.isFinite(keepProbability) && keepProbability < LIVE_FILTER_DROP_PROTECTION.minKeepProbability) continue;
-    const durationSec = Number(segment.endSec) - Number(segment.startSec);
-    const confidence = Number(segment.confidence) || 0;
-    if (durationSec < LIVE_FILTER_DROP_PROTECTION.minDurationSec) continue;
-    if (confidence < LIVE_FILTER_DROP_PROTECTION.minConfidence) continue;
-
-    const evidence = summarizeLiveSegmentEvidence(frames, segment);
-    const hasTemporalEvidence = evidence.temporalMean >= LIVE_FILTER_DROP_PROTECTION.minTemporalMean;
-    const hasVocalEvidence = evidence.singingMean >= LIVE_FILTER_DROP_PROTECTION.minSingingMean
-      || evidence.singingP90 >= LIVE_FILTER_DROP_PROTECTION.minSingingP90
-      || evidence.singingRatioMean >= LIVE_FILTER_DROP_PROTECTION.minSingingRatioMean;
-    const looksMusicOnly = evidence.lowSingingHighMusicRatio >= LIVE_FILTER_DROP_PROTECTION.maxLowSingingHighMusicRatio;
-    if (!hasTemporalEvidence || !hasVocalEvidence || looksMusicOnly) continue;
+    const protection = shouldProtectLiveFilterDrop(segment, frames, adjustment.keepProbability, options);
+    if (!protection) continue;
 
     const restoredSegment = { ...segment, provisional: false };
     keptSegments.push(restoredSegment);
     adjustments[index] = {
       ...adjustment,
       action: 'keep-live-protected',
+      reason: protection.reason,
       segment: restoredSegment,
       evidence: {
-        frameCount: evidence.frameCount,
-        temporalMean: roundNumber(evidence.temporalMean, 4),
-        singingMean: roundNumber(evidence.singingMean, 4),
-        singingP90: roundNumber(evidence.singingP90, 4),
-        singingRatioMean: roundNumber(evidence.singingRatioMean, 4),
-        lowSingingHighMusicRatio: roundNumber(evidence.lowSingingHighMusicRatio, 4),
+        frameCount: protection.evidence.frameCount,
+        temporalMean: roundNumber(protection.evidence.temporalMean, 4),
+        singingMean: roundNumber(protection.evidence.singingMean, 4),
+        singingP90: roundNumber(protection.evidence.singingP90, 4),
+        singingRatioMean: roundNumber(protection.evidence.singingRatioMean, 4),
+        lowSingingHighMusicRatio: roundNumber(protection.evidence.lowSingingHighMusicRatio, 4),
       },
     };
     restored = true;
@@ -698,12 +730,6 @@ async function loadOrtRuntime() {
 
 function toFileUrl(path) {
   return pathToFileURL(resolve(path)).href;
-}
-
-function segmentFilterProfileForLiveMethod(liveMethod) {
-  return liveMethod === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN
-    ? 'live-pcm30'
-    : 'live-realtime-aed60';
 }
 
 async function loadFinalizerRuntimes({
@@ -790,10 +816,6 @@ function shouldDisableLiveEdgeTrim(edgeMeta = {}) {
   return edgeMeta.disableLiveEdgeTrim === true;
 }
 
-function shouldEnableLiveEndTrimEvidenceGuard(edgeMeta = {}) {
-  return edgeMeta.enableLiveEndTrimEvidenceGuard === true;
-}
-
 async function applyFinalizer(runtimes, segments, frames, smoothing, {
   currentTimeSec,
   finalCutoffSec,
@@ -824,61 +846,54 @@ async function applyFinalizer(runtimes, segments, frames, smoothing, {
     selectedModelFallbackSegments: smoothing?.selectedModelFallbackSegments || [],
     endSec: predictionEndSec,
   };
+  const liveProfile = segmentFilterProfileForLiveAnalysisMethod(liveFrameBuilderConfig.liveAnalysisMethod);
   const edgeMeta = runtimes?.edgeTrimAdvisor?.meta || {};
   const edgeTrimDisabledByModel = shouldDisableLiveEdgeTrim(edgeMeta);
-  const endTrimEvidenceGuardEnabled = shouldEnableLiveEndTrimEvidenceGuard(edgeMeta);
   const activeRuntimes = finalizeAll && !disableEdgeTrim && !edgeTrimDisabledByModel
     ? runtimes
     : { segmentFilter: runtimes.segmentFilter, edgeTrimAdvisor: null };
-  const resolveLiveFinalKeepThreshold = (segmentMeta = {}) => {
-    const profileThreshold = Number(segmentMeta.liveFinalKeepThreshold);
-    if (Number.isFinite(profileThreshold)) return Math.max(0.01, Math.min(0.99, profileThreshold));
-    return Math.max(
-      LIVE_FINAL_SEGMENT_FILTER_KEEP_THRESHOLD,
-      Number(segmentMeta.keepThreshold) || DEFAULT_SEGMENT_FILTER_OPTIONS.keepThreshold
-    );
-  };
-  const options = {
-    ...DEFAULT_SEGMENT_FILTER_OPTIONS,
-    keepThreshold: finalizeAll
-      ? resolveLiveFinalKeepThreshold(runtimes.segmentFilter.meta || {})
-      : LIVE_SEGMENT_FILTER_KEEP_THRESHOLD,
+  const options = resolveSegmentFilterProfileOptions(liveProfile, {
+    segmentMeta: activeRuntimes.segmentFilter?.meta || {},
+    edgeMeta: activeRuntimes.edgeTrimAdvisor?.meta || {},
     minSegmentDurationSec,
+    finalizeAll,
     startSec: Number.isFinite(Number(previousFinalEndSec))
       ? Number(previousFinalEndSec)
       : (Number.isFinite(Number(firstFrame?.timeSec)) ? Number(firstFrame.timeSec) : 0),
     endSec: finalCutoffSec,
-    allowStartTrim: liveStartEdgeTrimEnabled,
-    startTrimMode: DEFAULT_LIVE_START_EDGE_TRIM_MODE,
-    startTrimScale: liveStartEdgeTrimScale,
-    startTrimMinAbsSec: liveStartEdgeTrimMinAbsSec,
+    overrides: {
+      allowStartTrim: liveStartEdgeTrimEnabled,
+      startTrimScale: liveStartEdgeTrimScale,
+      startTrimMinAbsSec: liveStartEdgeTrimMinAbsSec,
+    },
+  });
+  const applyOptions = {
+    ...options,
     startTrimEvidenceFrames: frames,
     startTrimEvidenceMinFrames: 3,
-    negativeStartTrimBoundaryScan: liveFrameBuilderConfig.liveAnalysisMethod === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN,
-    endTrimEvidenceFrames: endTrimEvidenceGuardEnabled ? frames : [],
-    endTrimEvidenceGuard: endTrimEvidenceGuardEnabled,
-    endTrimEvidenceMinFrames: 4,
-    largeEndTrimThresholdSec: LIVE_LARGE_END_TRIM_THRESHOLD_SEC,
-    largeEndTrimScale: LIVE_LARGE_END_TRIM_SCALE,
+    endTrimEvidenceFrames: options.endTrimEvidenceGuard ? frames : [],
   };
   const predictions = await runSegmentFilterPipeline(activeRuntimes, normalized, frames, context, options);
   const filtered = protectLiveFilterDrops(
     normalized,
-    applySegmentFilterPredictions(normalized, predictions, options),
-    frames
+    applySegmentFilterPredictions(normalized, predictions, applyOptions),
+    frames,
+    { minSegmentDurationSec }
   );
-  const speechResetRefined = finalizeAll && speechResetEndRefinement
-    ? refineLiveSegmentEndsBySpeechReset(filtered.segments, frames, { minSegmentDurationSec })
+  const speechResetOptions = resolveSpeechResetEndRefinementOptions(liveProfile, { minSegmentDurationSec });
+  const speechResetRefined = finalizeAll && speechResetEndRefinement && speechResetOptions.enabled
+    ? refineLiveSegmentEndsBySpeechReset(filtered.segments, frames, speechResetOptions)
     : { segments: filtered.segments, adjustments: [], changed: false };
   const protectedStartSecs = (filtered.adjustments || [])
     .filter((adjustment) => adjustment?.startTrimEvidence?.boundaryScan)
     .map((adjustment) => Number(adjustment?.segment?.startSec))
     .filter(Number.isFinite);
-  const shortPrefixRefined = finalizeAll && liveFrameBuilderConfig.liveAnalysisMethod === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN
-    ? refineLiveSegmentStartsByShortPrefixRestart(speechResetRefined.segments, frames, {
+  const shortPrefixOptions = resolveShortPrefixRestartStartRefinementOptions(liveProfile, {
       minSegmentDurationSec,
       protectedStartSecs,
-    })
+    });
+  const shortPrefixRefined = finalizeAll && shortPrefixOptions.enabled
+    ? refineLiveSegmentStartsByShortPrefixRestart(speechResetRefined.segments, frames, shortPrefixOptions)
     : { segments: speechResetRefined.segments, adjustments: [], changed: false };
   return {
     segments: uniqueSegments(shortPrefixRefined.segments || speechResetRefined.segments || filtered.segments || []),
@@ -892,7 +907,8 @@ async function applyFinalizer(runtimes, segments, frames, smoothing, {
       segmentFilterLoaded: Boolean(runtimes.segmentFilter),
       edgeTrimAdvisorLoaded: Boolean(activeRuntimes.edgeTrimAdvisor),
       liveEdgeTrimDisabledByModel: edgeTrimDisabledByModel,
-      liveEndTrimEvidenceGuardEnabled: endTrimEvidenceGuardEnabled,
+      liveEndTrimEvidenceGuardEnabled: Boolean(options.endTrimEvidenceGuard),
+      finalizerProfile: liveProfile,
       keepThreshold: options.keepThreshold,
       liveFinalKeepThreshold: finalizeAll ? options.keepThreshold : null,
       startEdgeTrimEnabled: liveStartEdgeTrimEnabled,
@@ -974,15 +990,24 @@ const minSegmentDurationSec = Math.max(15, Number(args['min-segment-duration-sec
 const includeFrames = Boolean(args['include-frames']);
 const includeCheckpoints = Boolean(args['include-checkpoints']);
 const segmentFilterEnabled = !Boolean(args['no-segment-filter']);
+const liveFrameBuilderConfig = resolveLiveFrameBuilderConfig(args['live-method']);
+const segmentFilterAssetProfile = String(
+  args['segment-filter-profile'] || segmentFilterProfileForLiveAnalysisMethod(liveFrameBuilderConfig.liveAnalysisMethod)
+);
+const liveProfileDefaults = getSegmentFilterRuntimeProfile(segmentFilterAssetProfile, 'live-realtime-aed60');
 const liveStartEdgeTrimEnabled = Boolean(args['disable-start-edge-trim'])
   ? false
   : (Boolean(args['enable-start-edge-trim']) || DEFAULT_LIVE_START_EDGE_TRIM_ENABLED);
-const liveStartEdgeTrimScale = Math.max(0, Number(args['start-edge-trim-scale']) || DEFAULT_LIVE_START_EDGE_TRIM_SCALE);
-const liveStartEdgeTrimMinAbsSec = Math.max(0, Number(args['start-edge-trim-min-abs-sec']) || DEFAULT_LIVE_START_EDGE_TRIM_MIN_ABS_SEC);
+const liveStartEdgeTrimScale = Math.max(
+  0,
+  Number(args['start-edge-trim-scale']) || Number(liveProfileDefaults.startTrimScale) || DEFAULT_SEGMENT_FILTER_OPTIONS.trimScale
+);
+const liveStartEdgeTrimMinAbsSec = Math.max(
+  0,
+  Number(args['start-edge-trim-min-abs-sec']) || Number(liveProfileDefaults.startTrimMinAbsSec) || 0
+);
 const speechResetEndRefinement = !Boolean(args['disable-speech-reset-end-refinement']);
 const segmentFilterModelDir = String(args['segment-filter-model-dir'] || 'models/fireredvad/aed');
-const liveFrameBuilderConfig = resolveLiveFrameBuilderConfig(args['live-method']);
-const segmentFilterAssetProfile = String(args['segment-filter-profile'] || segmentFilterProfileForLiveMethod(liveFrameBuilderConfig.liveAnalysisMethod));
 const requireProfileAssets = Boolean(args['require-profile-assets']);
 const stallInsertions = parseStallInsertions(args['stall-insertions']);
 const gateStalls = Boolean(args['gate-stalls']);

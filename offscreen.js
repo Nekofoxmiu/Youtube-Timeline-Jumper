@@ -21,8 +21,13 @@ import {
   DEFAULT_SEGMENT_FILTER_OPTIONS,
   SEGMENT_FILTER_VERSION,
   applySegmentFilterPredictions,
+  getSegmentFilterRuntimeProfile,
   refineLiveSegmentStartsByShortPrefixRestart,
   refineLiveSegmentEndsBySpeechReset,
+  resolveSegmentFilterProfileOptions,
+  resolveShortPrefixRestartStartRefinementOptions,
+  resolveSpeechResetEndRefinementOptions,
+  segmentFilterProfileForLiveAnalysisMethod,
   loadEdgeTrimAdvisorModel,
   loadSegmentFilterModel,
   runSegmentFilterPipeline,
@@ -45,15 +50,7 @@ const LIVE_FINALIZE_DELAY_SEC = 180;
 const LIVE_RESMOOTH_INTERVAL_SEC = 5;
 const LIVE_RESMOOTH_WINDOW_SEC = null;
 const LIVE_SEGMENT_FILTER_ENABLED = true;
-const LIVE_SEGMENT_FILTER_KEEP_THRESHOLD = 0.35;
-const LIVE_FINAL_SEGMENT_FILTER_KEEP_THRESHOLD = 0.9;
 const LIVE_EDGE_TRIM_DURING_STREAM = false;
-const LIVE_START_EDGE_TRIM_ENABLED = true;
-const LIVE_START_EDGE_TRIM_MODE = 'bidirectional';
-const LIVE_START_EDGE_TRIM_SCALE = 0.75;
-const LIVE_START_EDGE_TRIM_MIN_ABS_SEC = 2;
-const LIVE_LARGE_END_TRIM_THRESHOLD_SEC = 30;
-const LIVE_LARGE_END_TRIM_SCALE = 1.6;
 const LIVE_SEGMENT_FILTER_EXECUTION_PROVIDERS = ['wasm'];
 const LIVE_FILTER_DROP_PROTECTION = Object.freeze({
   minKeepProbability: 0.86,
@@ -64,6 +61,11 @@ const LIVE_FILTER_DROP_PROTECTION = Object.freeze({
   minSingingP90: 0.55,
   minSingingRatioMean: 0.08,
   maxLowSingingHighMusicRatio: 0.65,
+  strongMinTemporalMean: 0.72,
+  strongMinSingingMean: 0.28,
+  strongMinSingingP90: 0.82,
+  strongMinSingingRatioMean: 0.16,
+  strongMaxLowSingingHighMusicRatio: 0.55,
 });
 const LIVE_ANALYSIS_METHODS = Object.freeze({
   AED_CACHE_60S: 'aed-cache-60s',
@@ -134,12 +136,6 @@ function normalizeLiveAnalysisMethod(value, fallback = DEFAULT_LIVE_ANALYSIS_MET
   if (key === LIVE_ANALYSIS_METHODS.AED_CACHE_60S) return LIVE_ANALYSIS_METHODS.AED_CACHE_60S;
   if (key === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN) return LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN;
   return fallback;
-}
-
-function segmentFilterProfileForLiveAnalysisMethod(method) {
-  return normalizeLiveAnalysisMethod(method) === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN
-    ? 'live-pcm30'
-    : 'live-realtime-aed60';
 }
 
 function resolveLiveFrameBuilderConfig(method) {
@@ -365,6 +361,22 @@ function getCachedGlobalSmoothing(session, currentTimeSec, { finalizeAll = false
 function buildSegmentFilterRuntimeInfo(runtimes = null, error = null) {
   const segmentMeta = runtimes?.segmentFilter?.meta || {};
   const edgeMeta = runtimes?.edgeTrimAdvisor?.meta || {};
+  const requestedProfile = runtimes?.segmentFilter?.requestedAssetProfile
+    || runtimes?.edgeTrimAdvisor?.requestedAssetProfile
+    || runtimes?.segmentFilter?.assetProfile
+    || runtimes?.edgeTrimAdvisor?.assetProfile
+    || 'live-realtime-aed60';
+  const profileConfig = getSegmentFilterRuntimeProfile(requestedProfile, 'live-realtime-aed60');
+  const liveOptions = resolveSegmentFilterProfileOptions(profileConfig.key, {
+    segmentMeta,
+    edgeMeta,
+    finalizeAll: false,
+  });
+  const finalOptions = resolveSegmentFilterProfileOptions(profileConfig.key, {
+    segmentMeta,
+    edgeMeta,
+    finalizeAll: true,
+  });
   return {
     version: SEGMENT_FILTER_VERSION,
     enabled: LIVE_SEGMENT_FILTER_ENABLED,
@@ -376,10 +388,15 @@ function buildSegmentFilterRuntimeInfo(runtimes = null, error = null) {
     segmentFilterAssetProfileFallbackUsed: Boolean(runtimes?.segmentFilter?.assetProfileFallbackUsed),
     edgeTrimAdvisorAssetProfile: runtimes?.edgeTrimAdvisor?.assetProfile || null,
     edgeTrimAdvisorAssetProfileFallbackUsed: Boolean(runtimes?.edgeTrimAdvisor?.assetProfileFallbackUsed),
-    liveKeepThreshold: LIVE_SEGMENT_FILTER_KEEP_THRESHOLD,
-    liveFinalKeepThreshold: resolveLiveFinalKeepThreshold(segmentMeta),
+    finalizerProfile: profileConfig.key,
+    liveKeepThreshold: liveOptions.keepThreshold,
+    liveFinalKeepThreshold: finalOptions.keepThreshold,
     liveEdgeTrimDuringStream: LIVE_EDGE_TRIM_DURING_STREAM,
-    liveStartEdgeTrimEnabled: LIVE_START_EDGE_TRIM_ENABLED,
+    liveStartEdgeTrimEnabled: finalOptions.allowStartTrim !== false,
+    liveStartEdgeTrimMode: finalOptions.startTrimMode,
+    liveStartEdgeTrimScale: finalOptions.startTrimScale,
+    liveLargeEndTrimScale: finalOptions.largeEndTrimScale,
+    liveNegativeStartBoundaryScan: Boolean(finalOptions.negativeStartTrimBoundaryScan),
     keepThreshold: Number.isFinite(Number(segmentMeta.keepThreshold))
       ? Number(segmentMeta.keepThreshold)
       : DEFAULT_SEGMENT_FILTER_OPTIONS.keepThreshold,
@@ -391,42 +408,24 @@ function buildSegmentFilterRuntimeInfo(runtimes = null, error = null) {
   };
 }
 
-function resolveNumberOption(value, fallback) {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : fallback;
-}
-
-function resolveLiveFinalKeepThreshold(segmentMeta = {}) {
-  const profileThreshold = Number(segmentMeta.liveFinalKeepThreshold);
-  if (Number.isFinite(profileThreshold)) {
-    return Math.max(0.01, Math.min(0.99, profileThreshold));
-  }
-  return Math.max(
-    LIVE_FINAL_SEGMENT_FILTER_KEEP_THRESHOLD,
-    resolveNumberOption(segmentMeta.keepThreshold, DEFAULT_SEGMENT_FILTER_OPTIONS.keepThreshold)
-  );
-}
-
 function shouldDisableLiveEdgeTrim(edgeMeta = {}) {
   return edgeMeta.disableLiveEdgeTrim === true;
 }
 
-function shouldEnableLiveEndTrimEvidenceGuard(edgeMeta = {}) {
-  return edgeMeta.enableLiveEndTrimEvidenceGuard === true;
-}
-
-function buildLiveSegmentFilterOptions(session, runtimes, overrides = {}) {
+function buildLiveSegmentFilterOptions(session, runtimes, {
+  finalizeAll = false,
+  ...overrides
+} = {}) {
   const segmentMeta = runtimes?.segmentFilter?.meta || {};
   const edgeMeta = runtimes?.edgeTrimAdvisor?.meta || {};
-  return {
-    ...DEFAULT_SEGMENT_FILTER_OPTIONS,
-    keepThreshold: resolveNumberOption(segmentMeta.keepThreshold, DEFAULT_SEGMENT_FILTER_OPTIONS.keepThreshold),
-    trimConfidenceThreshold: resolveNumberOption(edgeMeta.trimConfidenceThreshold, DEFAULT_SEGMENT_FILTER_OPTIONS.trimConfidenceThreshold),
-    trimClampSec: resolveNumberOption(edgeMeta.trimClampSec, DEFAULT_SEGMENT_FILTER_OPTIONS.trimClampSec),
-    trimScale: resolveNumberOption(edgeMeta.trimScale, DEFAULT_SEGMENT_FILTER_OPTIONS.trimScale),
+  const profile = segmentFilterProfileForLiveAnalysisMethod(session.liveAnalysisMethod);
+  return resolveSegmentFilterProfileOptions(profile, {
+    segmentMeta,
+    edgeMeta,
     minSegmentDurationSec: session.minSegmentDurationSec,
-    ...overrides,
-  };
+    finalizeAll,
+    overrides,
+  });
 }
 
 async function loadOptionalSegmentFilterRuntime(label, loadRuntime) {
@@ -657,26 +656,46 @@ function summarizeLiveSegmentEvidence(frames, segment) {
   };
 }
 
-function shouldProtectLiveFilterDrop(segment, frames, keepProbability = 1) {
+function shouldProtectLiveFilterDrop(segment, frames, keepProbability = 1, { minSegmentDurationSec = null } = {}) {
   const probability = Number(keepProbability);
-  if (Number.isFinite(probability) && probability < LIVE_FILTER_DROP_PROTECTION.minKeepProbability) return false;
   const durationSec = Number(segment?.endSec) - Number(segment?.startSec);
   const confidence = Number(segment?.confidence) || 0;
-  if (durationSec < LIVE_FILTER_DROP_PROTECTION.minDurationSec) return false;
+  const minDurationSec = Math.min(
+    LIVE_FILTER_DROP_PROTECTION.minDurationSec,
+    Math.max(15, Number(minSegmentDurationSec) || LIVE_FILTER_DROP_PROTECTION.minDurationSec)
+  );
+  if (durationSec < minDurationSec) return false;
   if (confidence < LIVE_FILTER_DROP_PROTECTION.minConfidence) return false;
 
   const evidence = summarizeLiveSegmentEvidence(frames, segment);
   if (evidence.frameCount < 10) return false;
+  const passesProbabilityGate = !Number.isFinite(probability)
+    || probability >= LIVE_FILTER_DROP_PROTECTION.minKeepProbability;
   const hasTemporalEvidence = evidence.temporalMean >= LIVE_FILTER_DROP_PROTECTION.minTemporalMean;
   const hasVocalEvidence = evidence.singingMean >= LIVE_FILTER_DROP_PROTECTION.minSingingMean
     || evidence.singingP90 >= LIVE_FILTER_DROP_PROTECTION.minSingingP90
     || evidence.singingRatioMean >= LIVE_FILTER_DROP_PROTECTION.minSingingRatioMean;
   const looksMusicOnly = evidence.lowSingingHighMusicRatio >= LIVE_FILTER_DROP_PROTECTION.maxLowSingingHighMusicRatio;
+  if (passesProbabilityGate && hasTemporalEvidence && hasVocalEvidence && !looksMusicOnly) {
+    return { evidence, reason: 'probability-gated-vocal-evidence' };
+  }
 
-  return hasTemporalEvidence && hasVocalEvidence && !looksMusicOnly;
+  // Live profile heads can over-drop when a segment is clearly song-like but
+  // outside the small model's calibration set. Fail open only for strong vocal
+  // evidence so pure BGM remains droppable.
+  const hasStrongTemporalEvidence = evidence.temporalMean >= LIVE_FILTER_DROP_PROTECTION.strongMinTemporalMean;
+  const hasStrongVocalEvidence = evidence.singingMean >= LIVE_FILTER_DROP_PROTECTION.strongMinSingingMean
+    || evidence.singingP90 >= LIVE_FILTER_DROP_PROTECTION.strongMinSingingP90
+    || evidence.singingRatioMean >= LIVE_FILTER_DROP_PROTECTION.strongMinSingingRatioMean;
+  const stronglyLooksMusicOnly = evidence.lowSingingHighMusicRatio >= LIVE_FILTER_DROP_PROTECTION.strongMaxLowSingingHighMusicRatio;
+  if (hasStrongTemporalEvidence && hasStrongVocalEvidence && !stronglyLooksMusicOnly) {
+    return { evidence, reason: 'strong-live-vocal-evidence' };
+  }
+
+  return false;
 }
 
-function protectLiveFilterDrops(originalSegments, filteredResult, frames) {
+function protectLiveFilterDrops(originalSegments, filteredResult, frames, options = {}) {
   const inputSegments = Array.isArray(originalSegments) ? originalSegments : [];
   const result = filteredResult || { segments: [], adjustments: [], changed: false };
   const adjustments = Array.isArray(result.adjustments) ? result.adjustments.map((item) => ({ ...item })) : [];
@@ -688,9 +707,11 @@ function protectLiveFilterDrops(originalSegments, filteredResult, frames) {
     if (adjustment?.action !== 'drop') continue;
     const sourceIndex = Number.isInteger(adjustment.index) ? adjustment.index : index;
     const sourceSegment = inputSegments[sourceIndex];
-    if (!sourceSegment || !shouldProtectLiveFilterDrop(sourceSegment, frames, adjustment.keepProbability)) continue;
+    const protection = sourceSegment
+      ? shouldProtectLiveFilterDrop(sourceSegment, frames, adjustment.keepProbability, options)
+      : false;
+    if (!protection) continue;
 
-    const evidence = summarizeLiveSegmentEvidence(frames, sourceSegment);
     const normalized = {
       ...sourceSegment,
       provisional: false,
@@ -699,14 +720,15 @@ function protectLiveFilterDrops(originalSegments, filteredResult, frames) {
     adjustments[index] = {
       ...adjustment,
       action: 'keep-live-protected',
+      reason: protection.reason,
       segment: normalized,
       evidence: {
-        frameCount: evidence.frameCount,
-        temporalMean: roundNumber(evidence.temporalMean, 4),
-        singingMean: roundNumber(evidence.singingMean, 4),
-        singingP90: roundNumber(evidence.singingP90, 4),
-        singingRatioMean: roundNumber(evidence.singingRatioMean, 4),
-        lowSingingHighMusicRatio: roundNumber(evidence.lowSingingHighMusicRatio, 4),
+        frameCount: protection.evidence.frameCount,
+        temporalMean: roundNumber(protection.evidence.temporalMean, 4),
+        singingMean: roundNumber(protection.evidence.singingMean, 4),
+        singingP90: roundNumber(protection.evidence.singingP90, 4),
+        singingRatioMean: roundNumber(protection.evidence.singingRatioMean, 4),
+        lowSingingHighMusicRatio: roundNumber(protection.evidence.lowSingingHighMusicRatio, 4),
       },
     };
     restored = true;
@@ -803,16 +825,14 @@ async function applyLiveSegmentFilterToFinalSegments(
       selectedModelFallbackSegments: smoothing?.selectedModelFallbackSegments || [],
       endSec: predictionEndSec,
     };
+    const liveProfile = segmentFilterProfileForLiveAnalysisMethod(session.liveAnalysisMethod);
     const edgeMeta = runtimes?.edgeTrimAdvisor?.meta || {};
     const edgeTrimDisabledByModel = shouldDisableLiveEdgeTrim(edgeMeta);
-    const endTrimEvidenceGuardEnabled = shouldEnableLiveEndTrimEvidenceGuard(edgeMeta);
     const activeRuntimes = !disableEdgeTrim && !edgeTrimDisabledByModel && (finalizeAll || LIVE_EDGE_TRIM_DURING_STREAM)
       ? runtimes
       : { segmentFilter: runtimes.segmentFilter, edgeTrimAdvisor: null };
     const predictionOptions = buildLiveSegmentFilterOptions(session, activeRuntimes, {
-      keepThreshold: finalizeAll
-        ? resolveLiveFinalKeepThreshold(runtimes?.segmentFilter?.meta || {})
-        : LIVE_SEGMENT_FILTER_KEEP_THRESHOLD,
+      finalizeAll,
       startSec: Number.isFinite(Number(firstFrame?.timeSec)) ? Number(firstFrame.timeSec) : 0,
       endSec: predictionEndSec,
     });
@@ -822,18 +842,9 @@ async function applyLiveSegmentFilterToFinalSegments(
         ? Number(lowerBoundSec)
         : predictionOptions.startSec,
       endSec: finalEndBoundSec,
-      allowStartTrim: LIVE_START_EDGE_TRIM_ENABLED,
-      startTrimMode: LIVE_START_EDGE_TRIM_MODE,
-      startTrimScale: LIVE_START_EDGE_TRIM_SCALE,
-      startTrimMinAbsSec: LIVE_START_EDGE_TRIM_MIN_ABS_SEC,
       startTrimEvidenceFrames: frames,
       startTrimEvidenceMinFrames: 3,
-      negativeStartTrimBoundaryScan: session.liveAnalysisMethod === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN,
-      endTrimEvidenceFrames: endTrimEvidenceGuardEnabled ? frames : [],
-      endTrimEvidenceGuard: endTrimEvidenceGuardEnabled,
-      endTrimEvidenceMinFrames: 4,
-      largeEndTrimThresholdSec: LIVE_LARGE_END_TRIM_THRESHOLD_SEC,
-      largeEndTrimScale: LIVE_LARGE_END_TRIM_SCALE,
+      endTrimEvidenceFrames: predictionOptions.endTrimEvidenceGuard ? frames : [],
     };
     const predictions = await runSegmentFilterPipeline(
       activeRuntimes,
@@ -845,22 +856,25 @@ async function applyLiveSegmentFilterToFinalSegments(
     const filtered = protectLiveFilterDrops(
       normalizedFinalSegments,
       applySegmentFilterPredictions(normalizedFinalSegments, predictions, applyOptions),
-      frames
+      frames,
+      { minSegmentDurationSec: session.minSegmentDurationSec }
     );
-    const speechResetRefined = finalizeAll
-      ? refineLiveSegmentEndsBySpeechReset(filtered.segments, frames, {
-        minSegmentDurationSec: session.minSegmentDurationSec,
-      })
+    const speechResetOptions = resolveSpeechResetEndRefinementOptions(liveProfile, {
+      minSegmentDurationSec: session.minSegmentDurationSec,
+    });
+    const speechResetRefined = finalizeAll && speechResetOptions.enabled
+      ? refineLiveSegmentEndsBySpeechReset(filtered.segments, frames, speechResetOptions)
       : { segments: filtered.segments, adjustments: [], changed: false };
     const protectedStartSecs = (filtered.adjustments || [])
       .filter((adjustment) => adjustment?.startTrimEvidence?.boundaryScan)
       .map((adjustment) => Number(adjustment?.segment?.startSec))
       .filter(Number.isFinite);
-    const shortPrefixRefined = finalizeAll && session.liveAnalysisMethod === LIVE_ANALYSIS_METHODS.PCM_ROLLOVER_30MIN
-      ? refineLiveSegmentStartsByShortPrefixRestart(speechResetRefined.segments, frames, {
-        minSegmentDurationSec: session.minSegmentDurationSec,
-        protectedStartSecs,
-      })
+    const shortPrefixOptions = resolveShortPrefixRestartStartRefinementOptions(liveProfile, {
+      minSegmentDurationSec: session.minSegmentDurationSec,
+      protectedStartSecs,
+    });
+    const shortPrefixRefined = finalizeAll && shortPrefixOptions.enabled
+      ? refineLiveSegmentStartsByShortPrefixRestart(speechResetRefined.segments, frames, shortPrefixOptions)
       : { segments: speechResetRefined.segments, adjustments: [], changed: false };
     const finalSegments = shortPrefixRefined.segments || speechResetRefined.segments || filtered.segments;
     return {

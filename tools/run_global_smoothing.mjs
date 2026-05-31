@@ -1,6 +1,10 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { smoothFireRedAnalyses } from '../lib/songDetection/globalSmoothing.js';
 import { splitSongSegmentsByBoundaries } from '../lib/songDetection/boundaryDetector.js';
+import {
+  applySegmentFilterFinalizationRefinements,
+  resolveSegmentFilterProfileOptions,
+} from '../lib/songDetection/segmentFilter.js';
 
 function parseArgs(argv) {
   const args = {};
@@ -50,6 +54,15 @@ async function loadManual(path) {
     })
     .filter((segment) => segment.endSec > segment.startSec)
     .sort((a, b) => a.startSec - b.startSec);
+}
+
+async function loadJsonIfPresent(path) {
+  if (!path) return {};
+  try {
+    return JSON.parse(await readFile(path, 'utf8'));
+  } catch {
+    return {};
+  }
 }
 
 function labelsFromSegments(times, segments) {
@@ -170,19 +183,52 @@ const ignoreRanges = collectIgnoreRanges(args, framesPayload);
 const endSec = Number(framesPayload.durationSec) || frames.at(-1)?.timeSec || 0;
 const startSec = frames[0]?.timeSec ? Math.max(0, Number(frames[0].timeSec) - Number(framesPayload.hopSec || 0.5)) : 0;
 let segmentFilterPredictions = null;
+let segmentFilterProfile = null;
+let segmentFilterOptions = null;
+let segmentFilterMetaPath = null;
+let edgeTrimMetaPath = null;
 if (args['segment-filter-predictions']) {
   const predictionsPayload = JSON.parse(await readFile(args['segment-filter-predictions'], 'utf8'));
   segmentFilterPredictions = Array.isArray(predictionsPayload)
     ? predictionsPayload
     : predictionsPayload.predictions;
+  segmentFilterProfile = args['segment-filter-profile'] || args['smoothing-profile'] || 'offline-final';
+  segmentFilterMetaPath = args['segment-filter-meta'] || null;
+  edgeTrimMetaPath = args['edge-trim-meta'] || null;
+  const segmentMeta = await loadJsonIfPresent(segmentFilterMetaPath);
+  const edgeMeta = await loadJsonIfPresent(edgeTrimMetaPath);
+  const minSegmentDurationSec = Number(args['min-segment-duration-sec']) || undefined;
+  segmentFilterOptions = resolveSegmentFilterProfileOptions(segmentFilterProfile, {
+    segmentMeta,
+    edgeMeta,
+    startSec,
+    endSec,
+    minSegmentDurationSec,
+    finalizeAll: true,
+    overrides: {
+      startTrimEvidenceFrames: frames,
+      endTrimEvidenceFrames: frames,
+      allowStartTrim: args['disable-start-edge-trim'] ? false : undefined,
+    },
+  });
 }
 const smoothing = smoothFireRedAnalyses(frames, endSec, {
   startSec,
   smoothingProfile: args['smoothing-profile'] || 'offline-final',
   segmentFilterEnabled: Boolean(segmentFilterPredictions),
   segmentFilterPredictions,
+  segmentFilterOptions,
 });
 let finalSegments = smoothing.segments;
+let finalizationRefinements = null;
+if (segmentFilterPredictions) {
+  finalizationRefinements = applySegmentFilterFinalizationRefinements(finalSegments, frames, segmentFilterProfile, {
+    minSegmentDurationSec: Number(args['min-segment-duration-sec']) || undefined,
+  });
+  if (finalizationRefinements.changed) {
+    finalSegments = finalizationRefinements.segments;
+  }
+}
 let boundarySplit = null;
 if (args['split-medley']) {
   boundarySplit = splitSongSegmentsByBoundaries(finalSegments, frames);
@@ -222,6 +268,18 @@ const summary = {
   droppedMusicOnlySegments: smoothing.droppedMusicOnlySegments || [],
   spectralEdgeRefinements: smoothing.spectralEdgeRefinements || [],
   segmentFilterAdjustments: smoothing.segmentFilterAdjustments || [],
+  segmentFilterFinalizationRefinements: finalizationRefinements?.adjustments || [],
+  segmentFilter: segmentFilterPredictions ? {
+    enabled: true,
+    profile: segmentFilterProfile,
+    metaPath: segmentFilterMetaPath,
+    edgeMetaPath: edgeTrimMetaPath,
+    predictions: segmentFilterPredictions,
+    adjustments: [
+      ...(smoothing.segmentFilterAdjustments || []),
+      ...(finalizationRefinements?.adjustments || []),
+    ],
+  } : null,
   boundarySplit,
   matches: segmentMatches(finalSegments, manual),
 };

@@ -9,7 +9,12 @@ import {
   getSmoothingProfileAuditSnapshot,
   resolveSmoothingProfile,
 } from '../lib/songDetection/globalSmoothing.js';
-import { segmentFilterAssetNames } from '../lib/songDetection/segmentFilter.js';
+import {
+  resolveShortPrefixRestartStartRefinementOptions,
+  resolveSegmentFilterProfileOptions,
+  segmentFilterAssetNames,
+  segmentFilterProfileForLiveAnalysisMethod,
+} from '../lib/songDetection/segmentFilter.js';
 import {
   DEFAULT_STREAMING_CHUNK_SEC,
   DEFAULT_STREAMING_OVERLAP_SEC,
@@ -106,16 +111,20 @@ async function validateLiveRuntimeContract(repoRoot) {
   assert(/const LIVE_PCM_ROLLOVER_SEC = 30 \* 60;/u.test(offscreenSource), 'PCM rollover chunk size must remain 30min.');
   assert(/const LIVE_PCM_OVERLAP_SEC = 120;/u.test(offscreenSource), 'PCM rollover overlap must remain 120s.');
   assert(/const LIVE_EDGE_TRIM_DURING_STREAM = false;/u.test(offscreenSource), 'Live edge trim must stay disabled during provisional streaming.');
-  assert(/const LIVE_START_EDGE_TRIM_ENABLED = true;/u.test(offscreenSource), 'Live start edge trim should be enabled only after guarded start-trim A/B gate.');
-  assert(/const LIVE_START_EDGE_TRIM_SCALE = 0\.75;/u.test(offscreenSource), 'Live start edge trim must stay conservative at 0.75 scale.');
   const segmentFilterSource = await readFile(resolve(repoRoot, 'lib/songDetection/segmentFilter.js'), 'utf8');
   assert(
     /const vocalIntroSupport = musicMean >= 0\.45 && speechMean >= 0\.58 && singingMean >= 0\.32;/u.test(segmentFilterSource),
     'Live start edge trim must require guarded speech-backed vocal intro evidence.'
   );
   assert(
-    /return normalizeLiveAnalysisMethod\(method\) === LIVE_ANALYSIS_METHODS\.PCM_ROLLOVER_30MIN[\s\S]*\? 'live-pcm30'[\s\S]*: 'live-realtime-aed60';/u.test(offscreenSource),
+    /segmentFilterProfileForLiveAnalysisMethod\(session\.liveAnalysisMethod\)/u.test(offscreenSource),
     'Live analysis methods must map to distinct segment-filter profiles.'
+  );
+  assert(
+    /resolveSegmentFilterProfileOptions\(profile/u.test(segmentFilterSource)
+      && /resolveSegmentFilterProfileOptions\(profileConfig\.key/u.test(offscreenSource)
+      && /resolveSegmentFilterProfileOptions\(profile,/u.test(offscreenSource),
+    'Live finalizer must resolve profile-specific segment-filter thresholds through the shared resolver.'
   );
   assert(
     /smoothingProfile:\s*segmentFilterProfileForLiveAnalysisMethod\(session\.liveAnalysisMethod\)/u.test(offscreenSource),
@@ -136,6 +145,24 @@ async function validateLiveRuntimeContract(repoRoot) {
       && /function openAnalysisGate/u.test(offscreenSource),
     'Live analysis must keep integer-second start alignment gate.'
   );
+  const aed60Profile = segmentFilterProfileForLiveAnalysisMethod('aed-cache-60s');
+  const pcm30Profile = segmentFilterProfileForLiveAnalysisMethod('pcm-rollover-30min');
+  const aed60Options = resolveSegmentFilterProfileOptions(aed60Profile, { finalizeAll: true });
+  const pcm30Options = resolveSegmentFilterProfileOptions(pcm30Profile, { finalizeAll: true });
+  assert(aed60Profile === 'live-realtime-aed60', 'AED60 method must map to live-realtime-aed60 finalizer profile.');
+  assert(pcm30Profile === 'live-pcm30', 'PCM30 method must map to live-pcm30 finalizer profile.');
+  assert(aed60Options.negativeStartTrimBoundaryScan === false, 'AED60 must not use PCM30 negative-start boundary scan.');
+  assert(pcm30Options.negativeStartTrimBoundaryScan === true, 'PCM30 must use guarded negative-start boundary scan.');
+  assert(aed60Options.strongInstrumentalStartTrimEnabled === true, 'AED60 must keep guarded strong-instrumental long intro recovery enabled.');
+  assert(pcm30Options.strongInstrumentalStartTrimEnabled === false, 'PCM30 must not inherit AED60-only strong-instrumental long intro recovery.');
+  assert(
+    aed60Options.weakSongSideInstrumentalStartTrimTemporalThreshold === 0.7,
+    'AED60 must keep weak song-side instrumental start extension guard enabled.'
+  );
+  assert(
+    resolveShortPrefixRestartStartRefinementOptions(aed60Profile).enabled === true,
+    'AED60 must keep guarded short-prefix restart enabled after the AED60 full gate.'
+  );
   return {
     defaultLiveAnalysisMethod: 'aed-cache-60s',
     aedCacheSec: 60,
@@ -146,7 +173,21 @@ async function validateLiveRuntimeContract(repoRoot) {
     videoBoundaryHardStop: true,
     integerStartGate: true,
     liveStartEdgeTrimEnabled: true,
-    liveStartEdgeTrimScale: 0.75,
+    aed60StartEdgeTrimScale: aed60Options.startTrimScale,
+    pcm30StartEdgeTrimScale: pcm30Options.startTrimScale,
+    aed60LargeEndTrimScale: aed60Options.largeEndTrimScale,
+    pcm30LargeEndTrimScale: pcm30Options.largeEndTrimScale,
+    aed60WeakSongSideInstrumentalStartTrim: {
+      temporalThreshold: aed60Options.weakSongSideInstrumentalStartTrimTemporalThreshold,
+      reducedScale: aed60Options.weakSongSideInstrumentalStartTrimScale,
+    },
+    aed60StrongInstrumentalStartTrim: {
+      enabled: aed60Options.strongInstrumentalStartTrimEnabled,
+      minRawSec: aed60Options.strongInstrumentalStartTrimMinRawSec,
+      maxSec: aed60Options.strongInstrumentalStartTrimMaxSec,
+      minSongSideSingingMean: aed60Options.strongInstrumentalStartTrimMinSongSideSingingMean,
+      minSongSideTemporalMean: aed60Options.strongInstrumentalStartTrimMinSongSideTemporalMean,
+    },
   };
 }
 
@@ -194,6 +235,11 @@ function validateSmoothingProfiles() {
     assert(resolveSmoothingProfile(profile) === profile, `Cannot resolve smoothing profile: ${profile}`);
     assert(SMOOTHING_PROFILES[profile] !== SMOOTHING_PROFILES['offline-final'] || profile === 'offline-final', `${profile} reuses offline-final object`);
   }
+  assert(
+    SMOOTHING_PROFILES['live-pcm30'].modelRun.musicOnlyClusterMaxGapSec
+      !== SMOOTHING_PROFILES['live-realtime-aed60'].modelRun.musicOnlyClusterMaxGapSec,
+    'PCM30 and AED60 smoothing profiles must keep at least one validated threshold split.'
+  );
   assert(resolveSmoothingProfile('pcm-rollover-30min') === 'live-pcm30', 'PCM30 method must resolve to live-pcm30.');
   assert(resolveSmoothingProfile('aed-cache-60s') === 'live-realtime-aed60', 'AED60 method must resolve to live-realtime-aed60.');
   return getSmoothingProfileAuditSnapshot();

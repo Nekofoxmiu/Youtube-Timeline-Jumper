@@ -137,5 +137,11 @@
     "audio": "tools/data/audio/video_070.m4a",
     "manual": "tools/data/manual/video_070_manual.txt",
     "end": "7200"
+  },
+  {
+    "id": "video_071_jinbee_gufeng_full",
+    "audio": "tools/data/audio/video_071.m4a",
+    "manual": "tools/data/manual/video_071_manual.txt",
+    "end": "7610.805"
   }
 ]

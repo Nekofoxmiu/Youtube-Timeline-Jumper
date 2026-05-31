@@ -2,8 +2,10 @@ import { FIRERED_AED_DETECTOR_VERSION } from './lib/songDetection/fireredAedDete
 import { splitSongSegmentsByBoundaries } from './lib/songDetection/boundaryDetector.js';
 import { smoothFireRedAnalyses } from './lib/songDetection/globalSmoothing.js';
 import {
+  applySegmentFilterFinalizationRefinements,
   applySegmentFilterPredictions,
   loadEdgeTrimAdvisorModel,
+  resolveSegmentFilterProfileOptions,
   loadSegmentFilterModel,
   runSegmentFilterPipeline,
 } from './lib/songDetection/segmentFilter.js';
@@ -3581,11 +3583,6 @@ async function getOfflineSegmentFilterRuntimes() {
   return offlineSegmentFilterRuntimesPromise;
 }
 
-function segmentFilterMetaNumber(runtime, key, fallback = null) {
-  const value = Number(runtime?.meta?.[key]);
-  return Number.isFinite(value) ? value : fallback;
-}
-
 async function applyOfflineFinalSegmentFilter(baseSegments, analyses, {
   startSec,
   endSec,
@@ -3619,22 +3616,33 @@ async function applyOfflineFinalSegmentFilter(baseSegments, analyses, {
     }, {
       minSegmentDurationSec,
     });
-    const filterOptions = {
+    const filterOptions = resolveSegmentFilterProfileOptions(OFFLINE_SEGMENT_FILTER_PROFILE, {
+      segmentMeta: runtimes.segmentFilter?.meta || {},
+      edgeMeta: runtimes.edgeTrimAdvisor?.meta || {},
       startSec,
       endSec,
       minSegmentDurationSec,
-      startTrimEvidenceFrames: analyses,
-      endTrimEvidenceFrames: analyses,
-    };
-    const keepThreshold = segmentFilterMetaNumber(runtimes.segmentFilter, 'keepThreshold', null);
-    const trimConfidenceThreshold = segmentFilterMetaNumber(runtimes.segmentFilter, 'trimConfidenceThreshold', null);
-    if (keepThreshold !== null) filterOptions.keepThreshold = keepThreshold;
-    if (trimConfidenceThreshold !== null) filterOptions.trimConfidenceThreshold = trimConfidenceThreshold;
+      finalizeAll: true,
+      overrides: {
+        startTrimEvidenceFrames: analyses,
+        endTrimEvidenceFrames: analyses,
+      },
+    });
     const filtered = applySegmentFilterPredictions(inputSegments, predictions, filterOptions);
+    const refined = applySegmentFilterFinalizationRefinements(
+      filtered.segments,
+      analyses,
+      OFFLINE_SEGMENT_FILTER_PROFILE,
+      { minSegmentDurationSec }
+    );
+    const finalSegments = refined.changed ? refined.segments : filtered.segments;
 
     return {
-      segments: filtered.segments,
-      adjustments: filtered.adjustments || [],
+      segments: finalSegments,
+      adjustments: [
+        ...(filtered.adjustments || []),
+        ...(refined.adjustments || []),
+      ],
       runtimeInfo: {
         applied: true,
         requestedAssetProfile: OFFLINE_SEGMENT_FILTER_PROFILE,
