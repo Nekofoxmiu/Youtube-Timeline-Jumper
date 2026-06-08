@@ -143,5 +143,11 @@
     "audio": "tools/data/audio/video_071.m4a",
     "manual": "tools/data/manual/video_071_manual.txt",
     "end": "7610.805"
+  },
+  {
+    "id": "video_072_rei_rain_full",
+    "audio": "tools/data/audio/video_072.m4a",
+    "manual": "tools/data/manual/video_072_manual.txt",
+    "end": "8586.07"
   }
 ]

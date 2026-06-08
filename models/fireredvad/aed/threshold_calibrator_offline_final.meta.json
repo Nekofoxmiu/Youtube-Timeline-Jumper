@@ -1,0 +1,202 @@
+{
+  "version": "threshold-calibrator-v1",
+  "assetProfile": "offline-final",
+  "profile": "offline-final",
+  "inputName": "threshold_features",
+  "outputName": "threshold_deltas",
+  "inputDim": 54,
+  "featureNames": [
+    "duration_sec",
+    "frame_count",
+    "temporal_mean",
+    "temporal_p10",
+    "temporal_p50",
+    "temporal_p90",
+    "temporal_std",
+    "temporal_above_threshold_ratio",
+    "singing_mean",
+    "singing_p50",
+    "singing_p90",
+    "singing_ratio_mean",
+    "singing_ratio_p90",
+    "music_mean",
+    "music_p50",
+    "music_p90",
+    "music_ratio_mean",
+    "music_ratio_p90",
+    "speech_mean",
+    "speech_p50",
+    "speech_p90",
+    "speech_ratio_mean",
+    "speech_ratio_p90",
+    "audio_rms_mean",
+    "audio_rms_p50",
+    "audio_rms_p90",
+    "audio_peak_mean",
+    "audio_peak_p90",
+    "spectral_flatness_mean",
+    "spectral_flatness_p90",
+    "spectral_flux_mean",
+    "spectral_flux_p90",
+    "low_energy_ratio_mean",
+    "mid_energy_ratio_mean",
+    "high_energy_ratio_mean",
+    "strict_silence_ratio",
+    "low_energy_frame_ratio",
+    "discontinuity_ratio",
+    "music_only_like_ratio",
+    "vocal_like_ratio",
+    "speech_like_ratio",
+    "music_minus_singing",
+    "music_minus_speech",
+    "temporal_minus_baseline",
+    "singing_minus_baseline",
+    "music_minus_baseline",
+    "speech_minus_baseline",
+    "rms_minus_baseline",
+    "repetition_score",
+    "repetition_music_only_window_ratio",
+    "repetition_vocal_window_ratio",
+    "source_offline_final",
+    "source_live_pcm30",
+    "source_live_aed60"
+  ],
+  "bounds": {
+    "temporalHeadThresholdDelta": {
+      "min": -0.1,
+      "max": 0.12
+    },
+    "segmentKeepThresholdDelta": {
+      "min": -0.12,
+      "max": 0.18
+    },
+    "trimConfidenceThresholdDelta": {
+      "min": -0.1,
+      "max": 0.12
+    }
+  },
+  "minConfidence": 0.35,
+  "oracleGrid": {
+    "temporal": [
+      -0.1,
+      -0.075,
+      -0.05,
+      -0.025,
+      0.0,
+      0.025,
+      0.05,
+      0.075,
+      0.1,
+      0.12
+    ],
+    "keep": [
+      -0.12,
+      -0.09,
+      -0.06,
+      -0.03,
+      0.0,
+      0.03,
+      0.06,
+      0.09,
+      0.12,
+      0.15,
+      0.18
+    ],
+    "trimConfidence": [
+      -0.1,
+      -0.075,
+      -0.05,
+      -0.025,
+      0.0,
+      0.025,
+      0.05,
+      0.075,
+      0.1,
+      0.12
+    ],
+    "selection": "outlier-guided-v1; grid constants recorded for reproducible oracle sweeps"
+  },
+  "trainingSummary": {
+    "exampleCount": 23,
+    "videos": [
+      "video_013",
+      "video_014",
+      "video_015",
+      "video_051",
+      "video_053",
+      "video_054",
+      "video_055",
+      "video_056",
+      "video_057",
+      "video_058",
+      "video_059",
+      "video_060",
+      "video_061",
+      "video_062",
+      "video_063",
+      "video_064",
+      "video_065",
+      "video_066",
+      "video_067",
+      "video_068",
+      "video_069",
+      "video_070",
+      "video_071"
+    ],
+    "reasonCodeCounts": {
+      "no-op-target": 17,
+      "recall-outliers": 5,
+      "conservative-outliers": 2,
+      "low-precision": 1
+    },
+    "outlierTypeCounts": {
+      "early-start": 5,
+      "missed-segment": 4,
+      "merged-close-songs": 4,
+      "late-end": 2,
+      "late-start": 1,
+      "low-video-f1": 1,
+      "early-end-speech-like": 1,
+      "acapella-risk": 1
+    },
+    "metrics": {
+      "train": {
+        "mse": 0.003600138472393155,
+        "deltaMae": 0.014484899118542671,
+        "confidenceMae": 0.07138673961162567
+      },
+      "validation": {
+        "mse": 0.0028420237358659506,
+        "deltaMae": 0.015395330265164375,
+        "confidenceMae": 0.06817098706960678
+      },
+      "trainVideos": [
+        "video_013",
+        "video_014",
+        "video_051",
+        "video_053",
+        "video_055",
+        "video_056",
+        "video_058",
+        "video_059",
+        "video_060",
+        "video_061",
+        "video_063",
+        "video_065",
+        "video_067",
+        "video_068",
+        "video_069",
+        "video_070",
+        "video_071"
+      ],
+      "validationVideos": [
+        "video_015",
+        "video_054",
+        "video_057",
+        "video_062",
+        "video_064",
+        "video_066"
+      ]
+    }
+  }
+}

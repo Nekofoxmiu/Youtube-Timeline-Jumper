@@ -1,10 +1,29 @@
 import { readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { smoothFireRedAnalyses } from '../lib/songDetection/globalSmoothing.js';
 import { splitSongSegmentsByBoundaries } from '../lib/songDetection/boundaryDetector.js';
 import {
   applySegmentFilterFinalizationRefinements,
   resolveSegmentFilterProfileOptions,
 } from '../lib/songDetection/segmentFilter.js';
+import {
+  applyThresholdCalibrationToFrames,
+  createHeuristicThresholdCalibration,
+  loadThresholdCalibratorModel,
+  noThresholdCalibration,
+  normalizeThresholdCalibratorProfile,
+  runThresholdCalibratorModel,
+  thresholdCalibratorAssetNames,
+} from '../lib/songDetection/thresholdCalibrator.js';
+import {
+  loadThresholdWindowAdvisorModel,
+  noThresholdWindowAdvice,
+  normalizeThresholdWindowAdvisorProfile,
+  runThresholdWindowAdvisorModel,
+  thresholdWindowAdvisorAssetNames,
+} from '../lib/songDetection/thresholdWindowAdvisor.js';
 
 function parseArgs(argv) {
   const args = {};
@@ -62,6 +81,151 @@ async function loadJsonIfPresent(path) {
     return JSON.parse(await readFile(path, 'utf8'));
   } catch {
     return {};
+  }
+}
+
+async function installFileFetch() {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, ...rest) => {
+    const text = String(url);
+    if (text.startsWith('file:')) {
+      const data = await readFile(fileURLToPath(text));
+      return new Response(data, { status: 200 });
+    }
+    return originalFetch(url, ...rest);
+  };
+}
+
+let ortPromise = null;
+
+async function loadOrtRuntime() {
+  if (!ortPromise) {
+    ortPromise = (async () => {
+      await installFileFetch();
+      const ortModule = await import('../lib/vendor/onnxruntime/ort.min.js');
+      globalThis.ort = ortModule.default || ortModule;
+      return globalThis.ort;
+    })();
+  }
+  return ortPromise;
+}
+
+function resolveThresholdCalibratorAssetPaths(modelDir, profile) {
+  const names = thresholdCalibratorAssetNames(profile);
+  return {
+    names,
+    modelPath: resolve(modelDir, names.model),
+    metaPath: resolve(modelDir, names.meta),
+  };
+}
+
+function resolveThresholdWindowAdvisorAssetPaths(modelDir, profile) {
+  const names = thresholdWindowAdvisorAssetNames(profile);
+  return {
+    names,
+    modelPath: resolve(modelDir, names.model),
+    metaPath: resolve(modelDir, names.meta),
+  };
+}
+
+async function runThresholdCalibration(frames, args, smoothingProfile) {
+  if (!args['threshold-calibrator']) {
+    return {
+      frames,
+      calibration: noThresholdCalibration('disabled', smoothingProfile),
+    };
+  }
+  const profile = normalizeThresholdCalibratorProfile(args['threshold-calibrator-profile'] || smoothingProfile);
+  const mode = String(args['threshold-calibrator'] || '').trim().toLowerCase();
+  if (mode === 'heuristic') {
+    return applyThresholdCalibrationToFrames(
+      frames,
+      createHeuristicThresholdCalibration(frames, { profile, stage: 'smoothing' })
+    );
+  }
+
+  const modelDir = String(args['threshold-calibrator-model-dir'] || 'models/fireredvad/aed');
+  const { modelPath, metaPath } = resolveThresholdCalibratorAssetPaths(modelDir, profile);
+  if (!existsSync(modelPath) || !existsSync(metaPath)) {
+    if (args['require-threshold-calibrator-assets']) {
+      throw new Error(`threshold calibrator assets missing for ${profile}: ${modelPath}, ${metaPath}`);
+    }
+    return {
+      frames,
+      calibration: noThresholdCalibration('asset-missing', profile),
+    };
+  }
+
+  try {
+    const ort = await loadOrtRuntime();
+    const runtime = await loadThresholdCalibratorModel({
+      ort,
+      assetProfile: profile,
+      modelUrl: pathToFileURL(modelPath).href,
+      metaUrl: pathToFileURL(metaPath).href,
+      executionProviders: ['wasm'],
+      requireAssetProfile: false,
+    });
+    const calibration = await runThresholdCalibratorModel(runtime, frames, { profile, stage: 'smoothing' });
+    return applyThresholdCalibrationToFrames(frames, calibration);
+  } catch (error) {
+    return {
+      frames,
+      calibration: {
+        ...noThresholdCalibration('runtime-error', profile),
+        error: error?.message || String(error),
+      },
+    };
+  }
+}
+
+async function runThresholdWindowAdvisor(frames, args, smoothingProfile) {
+  if (!args['threshold-window-advisor']) {
+    return {
+      frames,
+      advice: noThresholdWindowAdvice('disabled', smoothingProfile),
+    };
+  }
+  const profile = normalizeThresholdWindowAdvisorProfile(args['threshold-window-advisor-profile'] || smoothingProfile);
+  const mode = String(args['threshold-window-advisor'] || '').trim().toLowerCase();
+  if (mode !== 'model') {
+    return {
+      frames,
+      advice: noThresholdWindowAdvice('unsupported-mode', profile),
+    };
+  }
+
+  const modelDir = String(args['threshold-window-advisor-model-dir'] || 'models/fireredvad/aed');
+  const { modelPath, metaPath } = resolveThresholdWindowAdvisorAssetPaths(modelDir, profile);
+  if (!existsSync(modelPath) || !existsSync(metaPath)) {
+    if (args['require-threshold-window-advisor-assets']) {
+      throw new Error(`threshold window advisor assets missing for ${profile}: ${modelPath}, ${metaPath}`);
+    }
+    return {
+      frames,
+      advice: noThresholdWindowAdvice('asset-missing', profile),
+    };
+  }
+
+  try {
+    const ort = await loadOrtRuntime();
+    const runtime = await loadThresholdWindowAdvisorModel({
+      ort,
+      assetProfile: profile,
+      modelUrl: pathToFileURL(modelPath).href,
+      metaUrl: pathToFileURL(metaPath).href,
+      executionProviders: ['wasm'],
+      requireAssetProfile: false,
+    });
+    return runThresholdWindowAdvisorModel(runtime, frames, { profile, stage: 'smoothing' });
+  } catch (error) {
+    return {
+      frames,
+      advice: {
+        ...noThresholdWindowAdvice('runtime-error', profile),
+        error: error?.message || String(error),
+      },
+    };
   }
 }
 
@@ -173,13 +337,19 @@ function segmentMatches(predicted, manual) {
 
 const args = parseArgs(process.argv);
 if (!args.frames || !args.manual || !args.out) {
-  throw new Error('Usage: node tools/run_global_smoothing.mjs --frames <frames.json> --manual <manual.txt> --out <summary.json> [--smoothing-profile offline-final|live-pcm30|live-realtime-aed60] [--ignore-ranges start:end,...] [--split-medley] [--segment-filter-predictions <predictions.json>]');
+  throw new Error('Usage: node tools/run_global_smoothing.mjs --frames <frames.json> --manual <manual.txt> --out <summary.json> [--smoothing-profile offline-final|live-pcm30|live-realtime-aed60] [--threshold-calibrator model|heuristic] [--threshold-window-advisor model] [--ignore-ranges start:end,...] [--split-medley] [--segment-filter-predictions <predictions.json>]');
 }
 
 const framesPayload = JSON.parse(await readFile(args.frames, 'utf8'));
-const frames = Array.isArray(framesPayload.frames) ? framesPayload.frames : [];
+const inputFrames = Array.isArray(framesPayload.frames) ? framesPayload.frames : [];
 const manual = await loadManual(args.manual);
 const ignoreRanges = collectIgnoreRanges(args, framesPayload);
+const smoothingProfile = args['smoothing-profile'] || 'offline-final';
+const calibrationResult = await runThresholdCalibration(inputFrames, args, smoothingProfile);
+const thresholdWindowResult = await runThresholdWindowAdvisor(calibrationResult.frames || inputFrames, args, smoothingProfile);
+const frames = thresholdWindowResult.frames || calibrationResult.frames || inputFrames;
+const thresholdCalibration = calibrationResult.calibration || noThresholdCalibration('not-run', smoothingProfile);
+const thresholdWindowAdvice = thresholdWindowResult.advice || noThresholdWindowAdvice('not-run', smoothingProfile);
 const endSec = Number(framesPayload.durationSec) || frames.at(-1)?.timeSec || 0;
 const startSec = frames[0]?.timeSec ? Math.max(0, Number(frames[0].timeSec) - Number(framesPayload.hopSec || 0.5)) : 0;
 let segmentFilterPredictions = null;
@@ -211,10 +381,21 @@ if (args['segment-filter-predictions']) {
       allowStartTrim: args['disable-start-edge-trim'] ? false : undefined,
     },
   });
+  if (thresholdCalibration.applied) {
+    segmentFilterOptions.keepThreshold = Math.max(
+      0.01,
+      Math.min(0.99, Number(segmentFilterOptions.keepThreshold) + Number(thresholdCalibration.segmentKeepThresholdDelta || 0))
+    );
+    segmentFilterOptions.trimConfidenceThreshold = Math.max(
+      0.01,
+      Math.min(0.99, Number(segmentFilterOptions.trimConfidenceThreshold) + Number(thresholdCalibration.trimConfidenceThresholdDelta || 0))
+    );
+    segmentFilterOptions.thresholdCalibration = thresholdCalibration;
+  }
 }
 const smoothing = smoothFireRedAnalyses(frames, endSec, {
   startSec,
-  smoothingProfile: args['smoothing-profile'] || 'offline-final',
+  smoothingProfile,
   segmentFilterEnabled: Boolean(segmentFilterPredictions),
   segmentFilterPredictions,
   segmentFilterOptions,
@@ -253,6 +434,16 @@ const summary = {
   method: smoothing.method,
   smoothingVersion: smoothing.smoothingVersion,
   smoothingProfile: smoothing.smoothingProfile,
+  thresholdCalibration,
+  thresholdWindowAdvice: {
+    ...thresholdWindowAdvice,
+    windows: Array.isArray(thresholdWindowAdvice.windows)
+      ? thresholdWindowAdvice.windows.slice(0, 240)
+      : [],
+    truncatedWindowCount: Array.isArray(thresholdWindowAdvice.windows)
+      ? Math.max(0, thresholdWindowAdvice.windows.length - 240)
+      : 0,
+  },
   endSec,
   evaluationIgnoredFrameCount: ignoredEvaluationFrameCount,
   evaluationIgnoredSec: ignoredEvaluationFrameCount * (Number(framesPayload.hopSec) || 0.5),

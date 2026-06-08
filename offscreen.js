@@ -32,6 +32,14 @@ import {
   loadSegmentFilterModel,
   runSegmentFilterPipeline,
 } from './lib/songDetection/segmentFilter.js';
+import {
+  applyThresholdCalibrationToFrames,
+  applyThresholdCalibrationToSegmentOptions,
+  loadThresholdCalibratorModel,
+  noThresholdCalibration,
+  runThresholdCalibratorModel,
+  thresholdCalibratorAssetNames,
+} from './lib/songDetection/thresholdCalibrator.js';
 
 const HOP_MS = 500;
 const REPORT_INTERVAL_MS = 2000;
@@ -50,6 +58,7 @@ const LIVE_FINALIZE_DELAY_SEC = 180;
 const LIVE_RESMOOTH_INTERVAL_SEC = 5;
 const LIVE_RESMOOTH_WINDOW_SEC = null;
 const LIVE_SEGMENT_FILTER_ENABLED = true;
+const LIVE_THRESHOLD_CALIBRATOR_ENABLED = true;
 const LIVE_EDGE_TRIM_DURING_STREAM = false;
 const LIVE_SEGMENT_FILTER_EXECUTION_PROVIDERS = ['wasm'];
 const LIVE_FILTER_DROP_PROTECTION = Object.freeze({
@@ -383,11 +392,13 @@ function buildSegmentFilterRuntimeInfo(runtimes = null, error = null) {
     executionProviders: LIVE_SEGMENT_FILTER_EXECUTION_PROVIDERS,
     segmentFilterLoaded: Boolean(runtimes?.segmentFilter),
     edgeTrimAdvisorLoaded: Boolean(runtimes?.edgeTrimAdvisor),
+    thresholdCalibratorLoaded: Boolean(runtimes?.thresholdCalibrator),
     requestedAssetProfile: runtimes?.segmentFilter?.requestedAssetProfile || runtimes?.edgeTrimAdvisor?.requestedAssetProfile || null,
     segmentFilterAssetProfile: runtimes?.segmentFilter?.assetProfile || null,
     segmentFilterAssetProfileFallbackUsed: Boolean(runtimes?.segmentFilter?.assetProfileFallbackUsed),
     edgeTrimAdvisorAssetProfile: runtimes?.edgeTrimAdvisor?.assetProfile || null,
     edgeTrimAdvisorAssetProfileFallbackUsed: Boolean(runtimes?.edgeTrimAdvisor?.assetProfileFallbackUsed),
+    thresholdCalibratorAssetProfile: runtimes?.thresholdCalibrator?.assetProfile || null,
     finalizerProfile: profileConfig.key,
     liveKeepThreshold: liveOptions.keepThreshold,
     liveFinalKeepThreshold: finalOptions.keepThreshold,
@@ -437,6 +448,19 @@ async function loadOptionalSegmentFilterRuntime(label, loadRuntime) {
   }
 }
 
+async function thresholdCalibratorAssetsAvailable(assetProfile) {
+  if (!LIVE_THRESHOLD_CALIBRATOR_ENABLED || !globalThis.chrome?.runtime?.getURL) return false;
+  const names = thresholdCalibratorAssetNames(assetProfile);
+  try {
+    const response = await fetch(chrome.runtime.getURL(`models/fireredvad/aed/${names.meta}`), {
+      cache: 'no-store',
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function getLiveSegmentFilterRuntimes(session) {
   if (!LIVE_SEGMENT_FILTER_ENABLED || !session || session.detectorMode !== DETECTOR_MODES.FIRERED_AED) {
     return null;
@@ -456,7 +480,8 @@ async function getLiveSegmentFilterRuntimes(session) {
 
   session.segmentFilterRuntimesPromise = (async () => {
     const assetProfile = segmentFilterProfileForLiveAnalysisMethod(session.liveAnalysisMethod);
-    const [segmentFilter, edgeTrimAdvisor] = await Promise.all([
+    const canLoadThresholdCalibrator = await thresholdCalibratorAssetsAvailable(assetProfile);
+    const [segmentFilter, edgeTrimAdvisor, thresholdCalibrator] = await Promise.all([
       loadOptionalSegmentFilterRuntime('Live segment filter', () => loadSegmentFilterModel({
         ort,
         assetProfile,
@@ -469,14 +494,23 @@ async function getLiveSegmentFilterRuntimes(session) {
         requireAssetProfile: true,
         executionProviders: LIVE_SEGMENT_FILTER_EXECUTION_PROVIDERS,
       })),
+      canLoadThresholdCalibrator
+        ? loadOptionalSegmentFilterRuntime('Live threshold calibrator', () => loadThresholdCalibratorModel({
+          ort,
+          assetProfile,
+          requireAssetProfile: true,
+          executionProviders: LIVE_SEGMENT_FILTER_EXECUTION_PROVIDERS,
+        }))
+        : Promise.resolve(null),
     ]);
 
     if (!segmentFilter) {
-      if (edgeTrimAdvisor?.session && typeof edgeTrimAdvisor.session.release === 'function') {
+      for (const unusedRuntime of [edgeTrimAdvisor, thresholdCalibrator]) {
+        if (!unusedRuntime?.session || typeof unusedRuntime.session.release !== 'function') continue;
         try {
-          await edgeTrimAdvisor.session.release();
+          await unusedRuntime.session.release();
         } catch (error) {
-          console.warn('Failed to release unused live edge trim advisor session.', error);
+          console.warn('Failed to release unused live finalizer ONNX session.', error);
         }
       }
       session.segmentFilterUnavailable = true;
@@ -485,7 +519,7 @@ async function getLiveSegmentFilterRuntimes(session) {
       return null;
     }
 
-    session.segmentFilterRuntimes = { segmentFilter, edgeTrimAdvisor };
+    session.segmentFilterRuntimes = { segmentFilter, edgeTrimAdvisor, thresholdCalibrator };
     session.segmentFilterRuntimeInfo = buildSegmentFilterRuntimeInfo(session.segmentFilterRuntimes);
     return session.segmentFilterRuntimes;
   })().finally(() => {
@@ -507,6 +541,7 @@ async function releaseLiveSegmentFilterRuntimes(session) {
   const pendingRuns = [
     runtimes?.segmentFilter?.runQueue,
     runtimes?.edgeTrimAdvisor?.runQueue,
+    runtimes?.thresholdCalibrator?.runQueue,
   ].filter((queue) => queue && typeof queue.then === 'function');
   if (pendingRuns.length) {
     let timedOut = false;
@@ -527,6 +562,7 @@ async function releaseLiveSegmentFilterRuntimes(session) {
   const sessionsToRelease = [
     runtimes?.segmentFilter?.session,
     runtimes?.edgeTrimAdvisor?.session,
+    runtimes?.thresholdCalibrator?.session,
   ].filter(Boolean);
   await Promise.all(sessionsToRelease.map(async (ortSession) => {
     if (typeof ortSession.release !== 'function') return;
@@ -769,6 +805,7 @@ async function applyLiveSegmentFilterToFinalSegments(
     lowerBoundSec = null,
     skipSegmentFilter = false,
     disableEdgeTrim = false,
+    thresholdCalibration = null,
   } = {}
 ) {
   const normalizedFinalSegments = sortReportSegments(finalSegments, { provisional: false });
@@ -831,11 +868,11 @@ async function applyLiveSegmentFilterToFinalSegments(
     const activeRuntimes = !disableEdgeTrim && !edgeTrimDisabledByModel && (finalizeAll || LIVE_EDGE_TRIM_DURING_STREAM)
       ? runtimes
       : { segmentFilter: runtimes.segmentFilter, edgeTrimAdvisor: null };
-    const predictionOptions = buildLiveSegmentFilterOptions(session, activeRuntimes, {
+    const predictionOptions = applyThresholdCalibrationToSegmentOptions(buildLiveSegmentFilterOptions(session, activeRuntimes, {
       finalizeAll,
       startSec: Number.isFinite(Number(firstFrame?.timeSec)) ? Number(firstFrame.timeSec) : 0,
       endSec: predictionEndSec,
-    });
+    }), thresholdCalibration);
     const applyOptions = {
       ...predictionOptions,
       startSec: Number.isFinite(Number(lowerBoundSec))
@@ -886,7 +923,12 @@ async function applyLiveSegmentFilterToFinalSegments(
       ],
       applied: true,
       changed: Boolean(filtered.changed || speechResetRefined.changed || shortPrefixRefined.changed),
-      runtimeInfo: session.segmentFilterRuntimeInfo || buildSegmentFilterRuntimeInfo(runtimes),
+      runtimeInfo: {
+        ...(session.segmentFilterRuntimeInfo || buildSegmentFilterRuntimeInfo(runtimes)),
+        keepThreshold: predictionOptions.keepThreshold,
+        trimConfidenceThreshold: predictionOptions.trimConfidenceThreshold,
+        thresholdCalibration: thresholdCalibration || null,
+      },
     };
   } catch (error) {
     console.warn('Live segment finalization filter failed; using heuristic final segments.', error);
@@ -909,7 +951,7 @@ async function finalizeNewLiveSegments(
   frames,
   currentTimeSec,
   finalCutoffSec,
-  { finalizeAll = false, skipSegmentFilter = false } = {}
+  { finalizeAll = false, skipSegmentFilter = false, thresholdCalibration = null } = {}
 ) {
   const state = ensureLiveFinalizationState(session);
   const newCandidates = selectNewFinalizationCandidates(session, finalCandidates);
@@ -932,7 +974,7 @@ async function finalizeNewLiveSegments(
     frames,
     currentTimeSec,
     finalCutoffSec,
-    { finalizeAll, lowerBoundSec: previousFinalEndSec, skipSegmentFilter }
+    { finalizeAll, lowerBoundSec: previousFinalEndSec, skipSegmentFilter, thresholdCalibration }
   );
   const nextState = appendLiveFinalizedSegments(session, newCandidates, filtered);
   return {
@@ -961,36 +1003,51 @@ async function buildActiveReportSegments(session, currentTimeSec, { finalizeAll 
 
   const smoothing = getCachedGlobalSmoothing(session, currentTimeSec, { finalizeAll });
   if (smoothing && Array.isArray(smoothing.segments)) {
-    const smoothingFrames = getLiveSmoothingFrames(
+    let smoothingFrames = getLiveSmoothingFrames(
       Array.isArray(session.analysisCache) ? session.analysisCache : [],
       currentTimeSec,
       { finalizeAll }
     );
+    let activeSmoothing = smoothing;
+    let thresholdCalibration = null;
     if (finalizeAll) {
+      const calibrationResult = await runLiveThresholdCalibration(session, smoothingFrames, 'live-final-active');
+      smoothingFrames = calibrationResult.frames || smoothingFrames;
+      thresholdCalibration = calibrationResult.calibration;
       const lastSmoothingFrame = smoothingFrames[smoothingFrames.length - 1] || null;
       const smoothingEndSec = Math.max(
         Number(currentTimeSec) || 0,
         Number(lastSmoothingFrame?.timeSec) || 0,
-        Number(smoothing.segments[smoothing.segments.length - 1]?.endSec) || 0
+        Number(activeSmoothing.segments[activeSmoothing.segments.length - 1]?.endSec) || 0
+      );
+      activeSmoothing = smoothFireRedAnalyses(smoothingFrames, smoothingEndSec, {
+        startSec: Number(smoothingFrames[0]?.timeSec) || 0,
+        minSegmentDurationSec: session.minSegmentDurationSec,
+        smoothingProfile: segmentFilterProfileForLiveAnalysisMethod(session.liveAnalysisMethod),
+      });
+      const activeSmoothingEndSec = Math.max(
+        smoothingEndSec,
+        Number(activeSmoothing.segments[activeSmoothing.segments.length - 1]?.endSec) || 0
       );
       const filtered = await finalizeNewLiveSegments(
         session,
-        smoothing.segments,
-        smoothing,
+        activeSmoothing.segments,
+        activeSmoothing,
         smoothingFrames,
         currentTimeSec,
-        smoothingEndSec,
-        { finalizeAll, skipSegmentFilter: effectiveSkipSegmentFilter }
+        activeSmoothingEndSec,
+        { finalizeAll, skipSegmentFilter: effectiveSkipSegmentFilter, thresholdCalibration }
       );
       return {
         finalSegments: sortReportSegments(filtered.segments),
         provisionalSegments: [],
         refinedBy: filtered.applied ? `${GLOBAL_SMOOTHING_VERSION}+${SEGMENT_FILTER_VERSION}` : GLOBAL_SMOOTHING_VERSION,
         smoothingMethod: filtered.applied
-          ? `${smoothing.method || 'unknown'}+segment-filter-final`
-          : smoothing.method || null,
+          ? `${activeSmoothing.method || 'unknown'}+segment-filter-final`
+          : activeSmoothing.method || null,
         segmentFilterAdjustments: filtered.adjustments,
         segmentFilterRuntimeInfo: filtered.runtimeInfo,
+        thresholdCalibration,
       };
     }
 
@@ -998,7 +1055,7 @@ async function buildActiveReportSegments(session, currentTimeSec, { finalizeAll 
     const finalSegments = [];
     const provisionalSegments = [];
 
-    for (const segment of smoothing.segments) {
+    for (const segment of activeSmoothing.segments) {
       if (Number(segment.endSec) <= finalCutoffSec) {
         finalSegments.push(segment);
       } else {
@@ -1009,7 +1066,7 @@ async function buildActiveReportSegments(session, currentTimeSec, { finalizeAll 
     const filtered = await finalizeNewLiveSegments(
       session,
       finalSegments,
-      smoothing,
+      activeSmoothing,
       smoothingFrames,
       currentTimeSec,
       finalCutoffSec,
@@ -1031,8 +1088,8 @@ async function buildActiveReportSegments(session, currentTimeSec, { finalizeAll 
       provisionalSegments: sortReportSegments(visibleProvisionalSegments, { provisional: true }),
       refinedBy: filtered.applied ? `${GLOBAL_SMOOTHING_VERSION}+${SEGMENT_FILTER_VERSION}` : GLOBAL_SMOOTHING_VERSION,
       smoothingMethod: filtered.applied
-        ? `${smoothing.method || 'unknown'}+segment-filter-final`
-        : smoothing.method || null,
+        ? `${activeSmoothing.method || 'unknown'}+segment-filter-final`
+        : activeSmoothing.method || null,
       segmentFilterAdjustments: filtered.adjustments,
       segmentFilterRuntimeInfo: filtered.runtimeInfo,
     };
@@ -1155,12 +1212,46 @@ function buildCompletedRangesSummary(session, activeSummary = null) {
   };
 }
 
+async function runLiveThresholdCalibration(session, frames, stage = 'live-final') {
+  const profile = segmentFilterProfileForLiveAnalysisMethod(session?.liveAnalysisMethod);
+  if (!LIVE_THRESHOLD_CALIBRATOR_ENABLED || !session || session.detectorMode !== DETECTOR_MODES.FIRERED_AED) {
+    return {
+      frames,
+      calibration: noThresholdCalibration('disabled', profile),
+    };
+  }
+
+  try {
+    const runtimes = await getLiveSegmentFilterRuntimes(session);
+    if (!runtimes?.thresholdCalibrator) {
+      return {
+        frames,
+        calibration: noThresholdCalibration('asset-missing', profile),
+      };
+    }
+    const calibration = await runThresholdCalibratorModel(runtimes.thresholdCalibrator, frames, {
+      profile,
+      stage,
+    });
+    return applyThresholdCalibrationToFrames(frames, calibration);
+  } catch (error) {
+    return {
+      frames,
+      calibration: {
+        ...noThresholdCalibration('runtime-error', profile),
+        error: error?.message || String(error),
+      },
+    };
+  }
+}
+
 async function buildLiveReportSegments(session, currentTimeSec, { finalizeAll = false } = {}) {
   const activeReport = await buildActiveReportSegments(session, currentTimeSec, { finalizeAll });
   const completedSegments = getCompletedRangeSegments(session);
   let finalSegments = mergeReportSegments(completedSegments, activeReport.finalSegments);
   let segmentFilterAdjustments = activeReport.segmentFilterAdjustments || [];
   let segmentFilterRuntimeInfo = activeReport.segmentFilterRuntimeInfo || null;
+  let thresholdCalibration = activeReport.thresholdCalibration || null;
   let refinedBy = activeReport.refinedBy || null;
   let smoothingMethod = activeReport.smoothingMethod || null;
 
@@ -1170,14 +1261,17 @@ async function buildLiveReportSegments(session, currentTimeSec, { finalizeAll = 
       session.analysisCache
     );
     if (finalizationFrames.length >= 20 && finalSegments.length) {
-      const firstFrame = finalizationFrames[0] || null;
-      const lastFrame = finalizationFrames[finalizationFrames.length - 1] || null;
+      const calibrationResult = await runLiveThresholdCalibration(session, finalizationFrames, 'live-final-global');
+      const calibratedFrames = calibrationResult.frames || finalizationFrames;
+      thresholdCalibration = calibrationResult.calibration;
+      const firstFrame = calibratedFrames[0] || null;
+      const lastFrame = calibratedFrames[calibratedFrames.length - 1] || null;
       const smoothingEndSec = Math.max(
         Number(currentTimeSec) || 0,
         Number(lastFrame?.timeSec) || 0,
         Number(finalSegments[finalSegments.length - 1]?.endSec) || 0
       );
-      const smoothing = smoothFireRedAnalyses(finalizationFrames, smoothingEndSec, {
+      const smoothing = smoothFireRedAnalyses(calibratedFrames, smoothingEndSec, {
         startSec: Number(firstFrame?.timeSec) || 0,
         minSegmentDurationSec: session.minSegmentDurationSec,
         smoothingProfile: segmentFilterProfileForLiveAnalysisMethod(session.liveAnalysisMethod),
@@ -1186,7 +1280,7 @@ async function buildLiveReportSegments(session, currentTimeSec, { finalizeAll = 
         session,
         finalSegments,
         smoothing,
-        finalizationFrames,
+        calibratedFrames,
         currentTimeSec,
         smoothingEndSec,
         {
@@ -1194,6 +1288,7 @@ async function buildLiveReportSegments(session, currentTimeSec, { finalizeAll = 
           lowerBoundSec: null,
           skipSegmentFilter: false,
           disableEdgeTrim: true,
+          thresholdCalibration,
         }
       );
       finalSegments = sortReportSegments(filtered.segments, { provisional: false });
@@ -1214,6 +1309,7 @@ async function buildLiveReportSegments(session, currentTimeSec, { finalizeAll = 
     provisionalSegments: sortReportSegments(activeReport.provisionalSegments, { provisional: true }),
     refinedBy,
     smoothingMethod,
+    thresholdCalibration,
     segmentFilterAdjustments,
     segmentFilterRuntimeInfo,
   };
@@ -1251,6 +1347,7 @@ async function captureCompletedAnalysisRange(session, finalTimeSec, reason = 'di
     finalSegments,
     refinedBy: activeReport.refinedBy || null,
     smoothingMethod: activeReport.smoothingMethod || null,
+    thresholdCalibration: activeReport.thresholdCalibration || null,
     segmentFilterRuntimeInfo: activeReport.segmentFilterRuntimeInfo || null,
     segmentFilterAdjustmentCount: Array.isArray(activeReport.segmentFilterAdjustments)
       ? activeReport.segmentFilterAdjustments.length

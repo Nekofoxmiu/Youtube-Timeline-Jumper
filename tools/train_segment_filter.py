@@ -11,6 +11,7 @@ import argparse
 import csv
 import json
 import math
+import random
 import re
 import shutil
 import sys
@@ -74,6 +75,12 @@ class Example:
     recall_ratio: float
     precision_ratio: float
     extra_sec: float
+    weight: float = 1.0
+    edge_weight: float = 1.0
+    start_edge_weight: float = 1.0
+    end_edge_weight: float = 1.0
+    start_gate_target: float = 0.0
+    end_gate_target: float = 0.0
 
 
 class NormalizedMlp(nn.Module):
@@ -111,13 +118,22 @@ class EdgeTrimAdvisorNet(NormalizedMlp):
     def __init__(self, input_dim: int, feature_mean: np.ndarray, feature_std: np.ndarray, trim_clamp_sec: float) -> None:
         super().__init__(input_dim, feature_mean, feature_std)
         self.trim_clamp_sec = float(trim_clamp_sec)
+        self.gate_head = nn.Linear(24, 2)
         self.delta_head = nn.Linear(24, 2)
 
+    def encoded_outputs(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        encoded = self._encoded(x)
+        gate_logits = self.gate_head(encoded)
+        deltas = torch.tanh(self.delta_head(encoded)) * self.trim_clamp_sec
+        return gate_logits, deltas
+
     def raw_outputs(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.tanh(self.delta_head(self._encoded(x))) * self.trim_clamp_sec
+        _gate_logits, deltas = self.encoded_outputs(x)
+        return deltas
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.raw_outputs(x)
+        gate_logits, deltas = self.encoded_outputs(x)
+        return torch.cat([torch.sigmoid(gate_logits), deltas], dim=1)
 
 
 def parse_args() -> argparse.Namespace:
@@ -151,6 +167,20 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Summary file glob(s) under --batch-dir. Defaults depend on --training-profile.",
     )
+    parser.add_argument(
+        "--summary-file",
+        nargs="*",
+        type=Path,
+        default=None,
+        help="Explicit summary file(s) to include in addition to --batch-dir/--summary-glob.",
+    )
+    parser.add_argument(
+        "--summary-weight-json",
+        type=Path,
+        default=None,
+        help="Optional per-video training weight JSON, e.g. {\"video_900001\": 0.45}.",
+    )
+    parser.add_argument("--default-summary-weight", type=float, default=1.0)
     parser.add_argument("--val-videos", nargs="*", default=["video_013", "video_015", "video_051"])
     parser.add_argument("--epochs", type=int, default=900)
     parser.add_argument("--learning-rate", type=float, default=2e-3)
@@ -185,6 +215,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hard-negative-overlap-skip-sec", type=float, default=0.5)
     parser.add_argument("--hard-negative-subwindow-sec", type=float, default=60.0)
     parser.add_argument("--hard-negative-subwindow-hop-sec", type=float, default=30.0)
+    parser.add_argument(
+        "--manual-jitter-candidates",
+        type=int,
+        default=0,
+        help="Add synthetic positive candidates by jittering manual song boundaries before edge training.",
+    )
+    parser.add_argument("--manual-jitter-start-early-sec", type=float, default=45.0)
+    parser.add_argument("--manual-jitter-start-late-sec", type=float, default=20.0)
+    parser.add_argument("--manual-jitter-end-early-sec", type=float, default=20.0)
+    parser.add_argument("--manual-jitter-end-late-sec", type=float, default=45.0)
+    parser.add_argument(
+        "--manual-jitter-keep-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Keep/drop loss multiplier for manual-jitter positives. "
+            "Defaults to 0 because jittered manual boundaries are edge targets, not detector keep/drop samples."
+        ),
+    )
+    parser.add_argument(
+        "--manual-jitter-edge-weight",
+        type=float,
+        default=0.35,
+        help="Edge-trim loss multiplier for manual-jitter positives.",
+    )
     parser.add_argument(
         "--ignore-range-overlap-skip-sec",
         type=float,
@@ -251,6 +306,27 @@ def parse_args() -> argparse.Namespace:
             "Values above 1 bias the model against cutting song endings too early."
         ),
     )
+    parser.add_argument("--edge-gate-min-trim-sec", type=float, default=3.0)
+    parser.add_argument("--edge-gate-loss-weight", type=float, default=1.0)
+    parser.add_argument("--edge-delta-loss-weight", type=float, default=0.35)
+    parser.add_argument("--edge-gate-threshold", type=float, default=0.6)
+    parser.add_argument(
+        "--edge-no-trim-weight",
+        type=float,
+        default=2.5,
+        help="Extra side-specific edge loss weight for aligned keep segments whose boundary should not be trimmed.",
+    )
+    parser.add_argument("--edge-no-trim-max-delta-sec", type=float, default=2.0)
+    parser.add_argument("--edge-no-trim-min-recall", type=float, default=0.85)
+    parser.add_argument("--edge-no-trim-min-precision", type=float, default=0.85)
+    parser.add_argument(
+        "--edge-adjustment-original-candidates",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use segmentFilter.adjustments original segments as runtime-distribution edge training candidates.",
+    )
+    parser.add_argument("--edge-adjustment-original-keep-weight", type=float, default=0.35)
+    parser.add_argument("--edge-adjustment-original-edge-weight", type=float, default=2.0)
     return parser.parse_args()
 
 
@@ -294,8 +370,10 @@ def infer_video_key_from_summary_path(path: Path) -> str:
         ".smoothing_summary.json",
     ):
         if marker in name:
-            return name.split(marker)[0]
-    match = re.search(r"(video_\d+(?:_[A-Za-z0-9]+)*)", name)
+            base = name.split(marker)[0]
+            match = re.search(r"(video_\d+)", base)
+            return match.group(1) if match else base
+    match = re.search(r"(video_\d+)", name)
     if match:
         return match.group(1)
     return name.split(".")[0]
@@ -311,6 +389,12 @@ def resolved_summary_globs(args: argparse.Namespace) -> List[str]:
 def summary_paths(args: argparse.Namespace) -> List[Path]:
     seen = set()
     output: List[Path] = []
+    for explicit in args.summary_file or []:
+        resolved = explicit.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        output.append(explicit)
     for pattern in resolved_summary_globs(args):
         for path in sorted(args.batch_dir.glob(pattern)):
             if ".segment_filter" in path.name:
@@ -321,6 +405,28 @@ def summary_paths(args: argparse.Namespace) -> List[Path]:
             seen.add(resolved)
             output.append(path)
     return output
+
+
+def load_summary_weights(args: argparse.Namespace) -> Dict[str, float]:
+    if not args.summary_weight_json:
+        return {}
+    if not args.summary_weight_json.exists():
+        raise FileNotFoundError(f"summary weight JSON not found: {args.summary_weight_json}")
+    payload = load_json(args.summary_weight_json)
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"summary weight JSON must be an object: {args.summary_weight_json}")
+    weights: Dict[str, float] = {}
+    for key, value in payload.items():
+        video = normalize_video_key(str(key))
+        if not video:
+            continue
+        try:
+            weight = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(weight) and weight > 0:
+            weights[video] = weight
+    return weights
 
 
 def resolve_existing_path(raw: object, summary_path: Path) -> Optional[Path]:
@@ -707,6 +813,7 @@ def should_skip_manual_post_end_negative(
 def collect_examples(args: argparse.Namespace) -> List[Example]:
     examples: List[Example] = []
     hard_negative_groups = load_hard_negative_annotations(args.hard_negative_annotations)
+    summary_weights = load_summary_weights(args)
     ambiguous_skip_summary: Dict[str, object] = {
         "total": 0,
         "byVideo": {},
@@ -764,8 +871,46 @@ def collect_examples(args: argparse.Namespace) -> List[Example]:
             "overlapSkipSec": args.ignore_range_overlap_skip_sec,
         },
     }
+    manual_jitter_summary: Dict[str, object] = {
+        "enabled": int(args.manual_jitter_candidates or 0) > 0,
+        "candidatesPerManual": int(args.manual_jitter_candidates or 0),
+        "startEarlySec": args.manual_jitter_start_early_sec,
+        "startLateSec": args.manual_jitter_start_late_sec,
+        "endEarlySec": args.manual_jitter_end_early_sec,
+        "endLateSec": args.manual_jitter_end_late_sec,
+        "keepWeight": args.manual_jitter_keep_weight,
+        "edgeWeight": args.manual_jitter_edge_weight,
+        "total": 0,
+        "byVideo": {},
+    }
+    edge_no_trim_summary: Dict[str, object] = {
+        "enabled": float(args.edge_no_trim_weight) > 0,
+        "weight": args.edge_no_trim_weight,
+        "maxDeltaSec": args.edge_no_trim_max_delta_sec,
+        "minRecall": args.edge_no_trim_min_recall,
+        "minPrecision": args.edge_no_trim_min_precision,
+        "startWeighted": 0,
+        "endWeighted": 0,
+        "byVideo": {},
+        "bySource": {},
+    }
+    edge_adjustment_original_summary: Dict[str, object] = {
+        "enabled": bool(args.edge_adjustment_original_candidates),
+        "keepWeight": args.edge_adjustment_original_keep_weight,
+        "edgeWeight": args.edge_adjustment_original_edge_weight,
+        "total": 0,
+        "attached": 0,
+        "duplicates": 0,
+        "invalid": 0,
+        "byVideo": {},
+        "byAction": {},
+    }
     for summary_path in summary_paths(args):
         video = infer_video_key_from_summary_path(summary_path)
+        example_weight = max(
+            0.01,
+            float(summary_weights.get(video, args.default_summary_weight)),
+        )
         summary = load_json(summary_path)
         frames, frames_payload = load_frames_for_summary(args, summary, summary_path, video)
         normalized_frames = normalize_frames(frames)
@@ -900,6 +1045,151 @@ def collect_examples(args: argparse.Namespace) -> List[Example]:
                     seen.add(key)
                     candidate_segments.append(segment)
 
+        def add_manual_jitter_candidates() -> None:
+            count = max(0, int(args.manual_jitter_candidates or 0))
+            if count <= 0:
+                return
+            media_end_sec = float(context["endSec"])
+            jitter_seed = int(args.seed) + sum(ord(char) for char in video)
+            rng = random.Random(jitter_seed)
+            for manual_index, manual in enumerate(sorted(manual_segments, key=lambda item: float(item.get("startSec", 0.0)))):
+                manual_start = float(manual.get("startSec", 0.0))
+                manual_end = float(manual.get("endSec", manual_start))
+                if manual_end - manual_start < 20.0:
+                    continue
+                for jitter_index in range(count):
+                    start_offset = rng.uniform(-float(args.manual_jitter_start_early_sec), float(args.manual_jitter_start_late_sec))
+                    end_offset = rng.uniform(-float(args.manual_jitter_end_early_sec), float(args.manual_jitter_end_late_sec))
+                    # Force a few deterministic edge patterns even with small counts.
+                    if jitter_index % 4 == 0:
+                        start_offset = -rng.uniform(8.0, float(args.manual_jitter_start_early_sec))
+                    elif jitter_index % 4 == 1:
+                        end_offset = rng.uniform(8.0, float(args.manual_jitter_end_late_sec))
+                    elif jitter_index % 4 == 2:
+                        start_offset = rng.uniform(3.0, float(args.manual_jitter_start_late_sec))
+                    else:
+                        end_offset = -rng.uniform(3.0, float(args.manual_jitter_end_early_sec))
+                    start = max(0.0, manual_start + start_offset)
+                    end = min(media_end_sec, manual_end + end_offset)
+                    if end - start < 15.0:
+                        continue
+                    key = (round(start, 1), round(end, 1))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    candidate_segments.append({
+                        "startSec": start,
+                        "endSec": end,
+                        "confidence": 0.65,
+                        "provisional": False,
+                        "_forceKeep": 1.0,
+                        "_keepWeightMultiplier": max(0.0, float(args.manual_jitter_keep_weight)),
+                        "_edgeWeightMultiplier": max(0.0, float(args.manual_jitter_edge_weight)),
+                        "_segmentFilterSource": "manual-jitter-positive",
+                    })
+                    manual_jitter_summary["total"] = int(manual_jitter_summary["total"]) + 1
+                    by_video = manual_jitter_summary["byVideo"]
+                    if isinstance(by_video, dict):
+                        by_video[video] = int(by_video.get(video, 0)) + 1
+
+        def add_edge_adjustment_original_candidates() -> None:
+            if not args.edge_adjustment_original_candidates:
+                return
+            media_end_sec = float(context["endSec"])
+
+            def find_existing_candidate(key: Tuple[float, float]) -> Optional[Dict[str, object]]:
+                for candidate in candidate_segments:
+                    try:
+                        candidate_key = (
+                            round(float(candidate.get("startSec", 0.0)), 1),
+                            round(float(candidate.get("endSec", 0.0)), 1),
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    if candidate_key == key:
+                        return candidate
+                return None
+
+            def attach_teacher_delta(candidate: Dict[str, object], adjustment: Dict[str, object], start: float, end: float) -> None:
+                adjusted = adjustment.get("segment") if isinstance(adjustment.get("segment"), dict) else {}
+                try:
+                    adjusted_start = float(adjusted.get("startSec", start))
+                    adjusted_end = float(adjusted.get("endSec", end))
+                except (TypeError, ValueError):
+                    adjusted_start = start
+                    adjusted_end = end
+                candidate["_edgeTargetStartDeltaSec"] = max(-args.trim_clamp_sec, min(args.trim_clamp_sec, adjusted_start - start))
+                candidate["_edgeTargetEndDeltaSec"] = max(-args.trim_clamp_sec, min(args.trim_clamp_sec, adjusted_end - end))
+                candidate["_edgeTargetSource"] = "segment-filter-original-teacher"
+                candidate["_edgeWeightMultiplier"] = max(
+                    float(candidate.get("_edgeWeightMultiplier", 1.0) or 0.0),
+                    max(0.0, float(args.edge_adjustment_original_edge_weight)),
+                )
+
+            adjustment_groups: List[object] = []
+            segment_filter = summary.get("segmentFilter")
+            if isinstance(segment_filter, dict):
+                adjustment_groups.append(segment_filter.get("adjustments"))
+            adjustment_groups.extend([
+                summary.get("segmentFilterAdjustments"),
+                summary.get("segmentFilterFinalizationRefinements"),
+            ])
+            for group in adjustment_groups:
+                if not isinstance(group, list):
+                    continue
+                for adjustment in group:
+                    if not isinstance(adjustment, dict):
+                        continue
+                    original = adjustment.get("original")
+                    if not isinstance(original, dict):
+                        edge_adjustment_original_summary["invalid"] = int(edge_adjustment_original_summary["invalid"]) + 1
+                        continue
+                    try:
+                        start = max(0.0, float(original.get("startSec", 0.0)))
+                        end = min(media_end_sec, float(original.get("endSec", start)))
+                    except (TypeError, ValueError):
+                        edge_adjustment_original_summary["invalid"] = int(edge_adjustment_original_summary["invalid"]) + 1
+                        continue
+                    if not math.isfinite(start) or not math.isfinite(end) or end - start < 15.0:
+                        edge_adjustment_original_summary["invalid"] = int(edge_adjustment_original_summary["invalid"]) + 1
+                        continue
+                    key = (round(start, 1), round(end, 1))
+                    if key in seen:
+                        existing = find_existing_candidate(key)
+                        if existing is not None:
+                            attach_teacher_delta(existing, adjustment, start, end)
+                            edge_adjustment_original_summary["attached"] = int(edge_adjustment_original_summary["attached"]) + 1
+                        edge_adjustment_original_summary["duplicates"] = int(edge_adjustment_original_summary["duplicates"]) + 1
+                        continue
+                    seen.add(key)
+                    adjusted = adjustment.get("segment") if isinstance(adjustment.get("segment"), dict) else {}
+                    confidence_raw = original.get("confidence") or adjusted.get("confidence") or 0.75
+                    try:
+                        confidence = float(confidence_raw)
+                    except (TypeError, ValueError):
+                        confidence = 0.75
+                    action = str(adjustment.get("action") or "unknown")
+                    candidate = {
+                        **original,
+                        "startSec": start,
+                        "endSec": end,
+                        "confidence": confidence,
+                        "provisional": False,
+                        "_segmentFilterSource": "segment-filter-original",
+                        "_segmentFilterAction": action,
+                        "_keepWeightMultiplier": max(0.0, float(args.edge_adjustment_original_keep_weight)),
+                        "_edgeWeightMultiplier": max(0.0, float(args.edge_adjustment_original_edge_weight)),
+                    }
+                    attach_teacher_delta(candidate, adjustment, start, end)
+                    candidate_segments.append(candidate)
+                    edge_adjustment_original_summary["total"] = int(edge_adjustment_original_summary["total"]) + 1
+                    by_video = edge_adjustment_original_summary["byVideo"]
+                    by_action = edge_adjustment_original_summary["byAction"]
+                    if isinstance(by_video, dict):
+                        by_video[video] = int(by_video.get(video, 0)) + 1
+                    if isinstance(by_action, dict):
+                        by_action[action] = int(by_action.get(action, 0)) + 1
+
         add_candidates("final", summary.get("segments") or summary.get("finalSegments") or [])
         add_candidates("tracker", summary.get("trackerSegments") or [])
         add_candidates("selected-model-fallback", summary.get("selectedModelFallbackSegments") or [])
@@ -907,8 +1197,10 @@ def collect_examples(args: argparse.Namespace) -> List[Example]:
         add_candidates("dropped-tracker", summary.get("droppedTrackerSegments") or [])
         add_candidates("dropped-music-only", summary.get("droppedMusicOnlySegments") or [])
         add_candidates("model-run", summary.get("modelRunSegments") or [])
+        add_edge_adjustment_original_candidates()
         add_manual_post_end_negatives()
         add_explicit_hard_negatives()
+        add_manual_jitter_candidates()
 
         for index, segment in enumerate(candidate_segments):
             if not isinstance(segment, dict):
@@ -991,23 +1283,80 @@ def collect_examples(args: argparse.Namespace) -> List[Example]:
             else:
                 start_delta = 0.0
                 end_delta = 0.0
+            gate_min_trim_sec = max(0.0, float(args.edge_gate_min_trim_sec))
+            start_gate_target = 1.0 if abs(start_delta) >= gate_min_trim_sec else 0.0
+            end_gate_target = 1.0 if abs(end_delta) >= gate_min_trim_sec else 0.0
+            try:
+                edge_start_delta = float(segment.get("_edgeTargetStartDeltaSec", start_delta))
+            except (TypeError, ValueError):
+                edge_start_delta = start_delta
+            try:
+                edge_end_delta = float(segment.get("_edgeTargetEndDeltaSec", end_delta))
+            except (TypeError, ValueError):
+                edge_end_delta = end_delta
+            edge_start_delta = max(-args.trim_clamp_sec, min(args.trim_clamp_sec, edge_start_delta))
+            edge_end_delta = max(-args.trim_clamp_sec, min(args.trim_clamp_sec, edge_end_delta))
+            keep_weight = example_weight * max(0.0, float(segment.get("_keepWeightMultiplier", 1.0) or 0.0))
+            edge_weight = example_weight * max(0.0, float(segment.get("_edgeWeightMultiplier", 1.0) or 0.0))
+            start_edge_weight = edge_weight
+            end_edge_weight = edge_weight
+            source = str(segment.get("_segmentFilterSource") or "unknown")
+            if (
+                keep
+                and best_manual
+                and float(args.edge_no_trim_weight) > 0
+                and recall >= float(args.edge_no_trim_min_recall)
+                and precision >= float(args.edge_no_trim_min_precision)
+                and source != "manual-jitter-positive"
+            ):
+                no_trim_weight = max(0.0, float(args.edge_no_trim_weight))
+                no_trim_max_delta = max(0.0, float(args.edge_no_trim_max_delta_sec))
+                weighted_sides = []
+                if abs(start_delta) <= no_trim_max_delta:
+                    start_edge_weight *= no_trim_weight
+                    edge_no_trim_summary["startWeighted"] = int(edge_no_trim_summary["startWeighted"]) + 1
+                    weighted_sides.append("start")
+                if abs(end_delta) <= no_trim_max_delta:
+                    end_edge_weight *= no_trim_weight
+                    edge_no_trim_summary["endWeighted"] = int(edge_no_trim_summary["endWeighted"]) + 1
+                    weighted_sides.append("end")
+                if weighted_sides:
+                    by_video = edge_no_trim_summary["byVideo"]
+                    by_source = edge_no_trim_summary["bySource"]
+                    if isinstance(by_video, dict):
+                        entry = by_video.setdefault(video, {"start": 0, "end": 0})
+                        for side in weighted_sides:
+                            entry[side] = int(entry.get(side, 0)) + 1
+                    if isinstance(by_source, dict):
+                        entry = by_source.setdefault(source, {"start": 0, "end": 0})
+                        for side in weighted_sides:
+                            entry[side] = int(entry.get(side, 0)) + 1
             examples.append(Example(
                 video=video,
                 segment_index=index,
-                source=str(segment.get("_segmentFilterSource") or "unknown"),
+                source=source,
                 features=build_segment_filter_feature_vector(segment, frames, context),
                 keep=keep,
-                start_delta=start_delta,
-                end_delta=end_delta,
+                start_delta=edge_start_delta,
+                end_delta=edge_end_delta,
                 overlap_sec=overlap,
                 recall_ratio=recall,
                 precision_ratio=precision,
                 extra_sec=extra_sec,
+                weight=keep_weight,
+                edge_weight=edge_weight,
+                start_edge_weight=start_edge_weight,
+                end_edge_weight=end_edge_weight,
+                start_gate_target=start_gate_target,
+                end_gate_target=end_gate_target,
             ))
     setattr(args, "_ambiguous_skip_summary", ambiguous_skip_summary)
     setattr(args, "_tail_guard_summary", tail_guard_summary)
     setattr(args, "_post_end_negative_skip_summary", post_end_negative_skip_summary)
     setattr(args, "_ignore_range_skip_summary", ignore_range_skip_summary)
+    setattr(args, "_manual_jitter_summary", manual_jitter_summary)
+    setattr(args, "_edge_no_trim_summary", edge_no_trim_summary)
+    setattr(args, "_edge_adjustment_original_summary", edge_adjustment_original_summary)
     return examples
 
 
@@ -1043,7 +1392,17 @@ def segment_metrics(probs: Sequence[float], labels: Sequence[float], threshold: 
     return {"precision": precision, "recall": recall, "f1": f1, "tp": tp, "fp": fp, "fn": fn, "tn": tn}
 
 
-def evaluate_keep_model(model: SegmentKeepNet, x: torch.Tensor, y_keep: torch.Tensor, indices: Sequence[int]) -> Dict[str, object]:
+def evaluate_keep_model(
+    model: SegmentKeepNet,
+    x: torch.Tensor,
+    y_keep: torch.Tensor,
+    indices: Sequence[int],
+    sample_weight: Optional[torch.Tensor] = None,
+) -> Dict[str, object]:
+    if sample_weight is not None:
+        indices = [index for index in indices if float(sample_weight[index]) > 0.0]
+    if not indices:
+        return {"bestThreshold": 0.5, "metrics": {"precision": 0.0, "recall": 0.0, "f1": 0.0, "tp": 0, "fp": 0, "fn": 0, "tn": 0}}
     model.eval()
     with torch.no_grad():
         output = model(x[list(indices)]).detach().cpu().tolist()
@@ -1058,22 +1417,90 @@ def evaluate_keep_model(model: SegmentKeepNet, x: torch.Tensor, y_keep: torch.Te
     return {"bestThreshold": best["threshold"], "metrics": best["metrics"]}
 
 
-def evaluate_edge_model(model: EdgeTrimAdvisorNet, x: torch.Tensor, y_delta: torch.Tensor, indices: Sequence[int]) -> Dict[str, object]:
+def edge_gate_targets(y_delta: torch.Tensor, indices: Sequence[int], min_trim_sec: float) -> torch.Tensor:
     if not indices:
-        return {"deltaMae": {"start": 0.0, "end": 0.0}}
+        return torch.zeros((0, 2), dtype=torch.float32)
+    return (torch.abs(y_delta[list(indices)]) >= float(min_trim_sec)).to(dtype=torch.float32)
+
+
+def binary_metrics(probs: Sequence[float], labels: Sequence[float], threshold: float) -> Dict[str, float]:
+    tp = fp = fn = tn = 0
+    for prob, label in zip(probs, labels):
+        pred = float(prob) >= threshold
+        actual = float(label) >= 0.5
+        if pred and actual:
+            tp += 1
+        elif pred and not actual:
+            fp += 1
+        elif not pred and actual:
+            fn += 1
+        else:
+            tn += 1
+    precision = tp / max(1, tp + fp)
+    recall = tp / max(1, tp + fn)
+    f1 = (2 * precision * recall) / max(1e-9, precision + recall)
+    return {"precision": precision, "recall": recall, "f1": f1, "tp": tp, "fp": fp, "fn": fn, "tn": tn}
+
+
+def evaluate_edge_model(
+    model: EdgeTrimAdvisorNet,
+    x: torch.Tensor,
+    y_delta: torch.Tensor,
+    y_gate: torch.Tensor,
+    indices: Sequence[int],
+    *,
+    gate_min_trim_sec: float,
+    gate_threshold: float,
+) -> Dict[str, object]:
+    if not indices:
+        return {
+            "deltaMae": {"start": 0.0, "end": 0.0},
+            "gateMetrics": {
+                "start": binary_metrics([], [], gate_threshold),
+                "end": binary_metrics([], [], gate_threshold),
+            },
+        }
     model.eval()
     with torch.no_grad():
-        deltas = model(x[list(indices)]).detach().cpu().tolist()
+        gate_logits, delta_tensor = model.encoded_outputs(x[list(indices)])
+        gates = torch.sigmoid(gate_logits).detach().cpu().tolist()
+        deltas = delta_tensor.detach().cpu().tolist()
     targets = [[float(row[0]), float(row[1])] for row in y_delta[list(indices)].detach().cpu().tolist()]
     start_mae = sum(abs(float(deltas[index][0]) - targets[index][0]) for index in range(len(indices))) / len(indices)
     end_mae = sum(abs(float(deltas[index][1]) - targets[index][1]) for index in range(len(indices))) / len(indices)
-    return {"deltaMae": {"start": start_mae, "end": end_mae}}
+    gate_targets = y_gate[list(indices)].detach().cpu().tolist()
+    start_gate = binary_metrics(
+        [float(row[0]) for row in gates],
+        [float(row[0]) for row in gate_targets],
+        gate_threshold,
+    )
+    end_gate = binary_metrics(
+        [float(row[1]) for row in gates],
+        [float(row[1]) for row in gate_targets],
+        gate_threshold,
+    )
+    return {
+        "deltaMae": {"start": start_mae, "end": end_mae},
+        "gateMetrics": {
+            "threshold": gate_threshold,
+            "minTrimSec": gate_min_trim_sec,
+            "start": start_gate,
+            "end": end_gate,
+        },
+    }
 
 
-def prepare_tensors(examples: Sequence[Example], train_indices: Sequence[int]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray, np.ndarray]:
+def prepare_tensors(examples: Sequence[Example], train_indices: Sequence[int]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray, np.ndarray]:
     x_np = np.asarray([example.features for example in examples], dtype=np.float32)
     keep_np = np.asarray([example.keep for example in examples], dtype=np.float32)
     delta_np = np.asarray([[example.start_delta, example.end_delta] for example in examples], dtype=np.float32)
+    gate_np = np.asarray([[example.start_gate_target, example.end_gate_target] for example in examples], dtype=np.float32)
+    weight_np = np.asarray([max(0.0, example.weight) for example in examples], dtype=np.float32)
+    edge_weight_np = np.asarray([max(0.0, example.edge_weight) for example in examples], dtype=np.float32)
+    edge_side_weight_np = np.asarray([
+        [max(0.0, example.start_edge_weight), max(0.0, example.end_edge_weight)]
+        for example in examples
+    ], dtype=np.float32)
     feature_mean = x_np[list(train_indices)].mean(axis=0)
     feature_std = x_np[list(train_indices)].std(axis=0)
     feature_std = np.where(feature_std < 1e-6, 1.0, feature_std)
@@ -1081,6 +1508,10 @@ def prepare_tensors(examples: Sequence[Example], train_indices: Sequence[int]) -
         torch.tensor(x_np.tolist(), dtype=torch.float32),
         torch.tensor(keep_np.tolist(), dtype=torch.float32),
         torch.tensor(delta_np.tolist(), dtype=torch.float32),
+        torch.tensor(gate_np.tolist(), dtype=torch.float32),
+        torch.tensor(weight_np.tolist(), dtype=torch.float32),
+        torch.tensor(edge_weight_np.tolist(), dtype=torch.float32),
+        torch.tensor(edge_side_weight_np.tolist(), dtype=torch.float32),
         feature_mean,
         feature_std,
     )
@@ -1091,6 +1522,7 @@ def train_keep_model(
     examples: Sequence[Example],
     x: torch.Tensor,
     y_keep: torch.Tensor,
+    sample_weight: torch.Tensor,
     train_indices: Sequence[int],
     val_indices: Sequence[int],
     feature_mean: np.ndarray,
@@ -1099,22 +1531,24 @@ def train_keep_model(
     train_tensor = torch.as_tensor(train_indices, dtype=torch.long)
     model = SegmentKeepNet(x.shape[1], feature_mean, feature_std)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
-    labels = [examples[index].keep for index in train_indices]
+    labels = [examples[index].keep for index in train_indices if float(sample_weight[index]) > 0.0]
     positive = float(sum(labels))
     negative = float(len(labels) - positive)
     pos_weight = torch.tensor([max(1.0, min(12.0, negative / max(1.0, positive)))], dtype=torch.float32)
-    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction="none")
     best_state = None
     best_score = -1.0
     best_epoch = 0
     for epoch in range(1, args.epochs + 1):
         model.train()
         optimizer.zero_grad(set_to_none=True)
-        loss = loss_fn(model.raw_outputs(x[train_tensor]), y_keep[train_tensor])
+        weights = sample_weight[train_tensor]
+        weights = weights / weights.mean().clamp_min(1e-6)
+        loss = torch.mean(loss_fn(model.raw_outputs(x[train_tensor]), y_keep[train_tensor]) * weights)
         loss.backward()
         optimizer.step()
         if epoch % 25 == 0 or epoch == args.epochs:
-            val = evaluate_keep_model(model, x, y_keep, val_indices)
+            val = evaluate_keep_model(model, x, y_keep, val_indices, sample_weight)
             score = float(val["metrics"]["f1"])
             if score > best_score:
                 best_score = score
@@ -1124,8 +1558,8 @@ def train_keep_model(
         model.load_state_dict(best_state)
     return model, {
         "bestEpoch": best_epoch,
-        "trainMetrics": evaluate_keep_model(model, x, y_keep, train_indices),
-        "validationMetrics": evaluate_keep_model(model, x, y_keep, val_indices),
+        "trainMetrics": evaluate_keep_model(model, x, y_keep, train_indices, sample_weight),
+        "validationMetrics": evaluate_keep_model(model, x, y_keep, val_indices, sample_weight),
     }
 
 
@@ -1134,29 +1568,47 @@ def train_edge_model(
     x: torch.Tensor,
     y_keep: torch.Tensor,
     y_delta: torch.Tensor,
+    y_gate: torch.Tensor,
+    edge_sample_weight: torch.Tensor,
+    edge_side_weight: torch.Tensor,
     train_indices: Sequence[int],
     val_indices: Sequence[int],
     feature_mean: np.ndarray,
     feature_std: np.ndarray,
 ) -> Tuple[EdgeTrimAdvisorNet, Dict[str, object]]:
-    train_keep_indices = [index for index in train_indices if float(y_keep[index]) >= 0.5]
-    val_keep_indices = [index for index in val_indices if float(y_keep[index]) >= 0.5]
+    train_keep_indices = [
+        index for index in train_indices
+        if float(y_keep[index]) >= 0.5 and float(edge_side_weight[index].sum()) > 0.0
+    ]
+    val_keep_indices = [
+        index for index in val_indices
+        if float(y_keep[index]) >= 0.5 and float(edge_side_weight[index].sum()) > 0.0
+    ]
     if not train_keep_indices:
         raise RuntimeError("No positive segments available for edge trim advisor training.")
     train_tensor = torch.as_tensor(train_keep_indices, dtype=torch.long)
     model = EdgeTrimAdvisorNet(x.shape[1], feature_mean, feature_std, args.trim_clamp_sec)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
     loss_fn = nn.SmoothL1Loss(beta=6.0, reduction="none")
+    gate_loss_fn = nn.BCEWithLogitsLoss(reduction="none")
     end_overtrim_weight = max(1.0, float(args.edge_end_overtrim_weight))
+    gate_loss_weight = max(0.0, float(args.edge_gate_loss_weight))
+    delta_loss_weight = max(0.0, float(args.edge_delta_loss_weight))
+    gate_min_trim_sec = max(0.0, float(args.edge_gate_min_trim_sec))
+    gate_threshold = max(0.01, min(0.99, float(args.edge_gate_threshold)))
     best_state = None
     best_score = float("inf")
     best_epoch = 0
     for epoch in range(1, args.epochs + 1):
         model.train()
         optimizer.zero_grad(set_to_none=True)
-        outputs = model.raw_outputs(x[train_tensor])
+        gate_logits, outputs = model.encoded_outputs(x[train_tensor])
         targets = y_delta[train_tensor]
+        gate_targets = y_gate[train_tensor]
         loss_items = loss_fn(outputs, targets)
+        side_weights = edge_side_weight[train_tensor]
+        positive_side_weight = side_weights[side_weights > 0]
+        side_weights = side_weights / positive_side_weight.mean().clamp_min(1e-6)
         if end_overtrim_weight > 1.0:
             # End delta that is too negative cuts the song before the manual end.
             end_overtrim = outputs[:, 1] < targets[:, 1]
@@ -1165,12 +1617,33 @@ def train_edge_model(
                 loss_items[:, 1] * end_overtrim_weight,
                 loss_items[:, 1],
             )
-        loss = loss_items.mean()
+        delta_side_weights = torch.where(gate_targets > 0.5, torch.ones_like(gate_targets), torch.full_like(gate_targets, 0.15))
+        delta_loss = (loss_items * delta_side_weights * side_weights).sum() / side_weights.sum().clamp_min(1e-6)
+        gate_loss = (gate_loss_fn(gate_logits, gate_targets) * side_weights).sum() / side_weights.sum().clamp_min(1e-6)
+        loss = (delta_loss * delta_loss_weight) + (gate_loss * gate_loss_weight)
         loss.backward()
         optimizer.step()
         if epoch % 25 == 0 or epoch == args.epochs:
-            val = evaluate_edge_model(model, x, y_delta, val_keep_indices)
-            score = float(val["deltaMae"]["start"]) + float(val["deltaMae"]["end"])
+            val = evaluate_edge_model(
+                model,
+                x,
+                y_delta,
+                y_gate,
+                val_keep_indices,
+                gate_min_trim_sec=gate_min_trim_sec,
+                gate_threshold=gate_threshold,
+            )
+            gate_metrics = val.get("gateMetrics", {}) if isinstance(val, dict) else {}
+            start_gate = gate_metrics.get("start", {}) if isinstance(gate_metrics, dict) else {}
+            end_gate = gate_metrics.get("end", {}) if isinstance(gate_metrics, dict) else {}
+            gate_penalty = 10.0 * (
+                (1.0 - float(start_gate.get("f1") or 0.0))
+                + (1.0 - float(end_gate.get("f1") or 0.0))
+            )
+            score = (
+                (float(val["deltaMae"]["start"]) + float(val["deltaMae"]["end"])) * max(0.0, delta_loss_weight)
+                + gate_penalty
+            )
             if score < best_score:
                 best_score = score
                 best_epoch = epoch
@@ -1179,8 +1652,24 @@ def train_edge_model(
         model.load_state_dict(best_state)
     return model, {
         "bestEpoch": best_epoch,
-        "trainMetrics": evaluate_edge_model(model, x, y_delta, train_keep_indices),
-        "validationMetrics": evaluate_edge_model(model, x, y_delta, val_keep_indices),
+        "trainMetrics": evaluate_edge_model(
+            model,
+            x,
+            y_delta,
+            y_gate,
+            train_keep_indices,
+            gate_min_trim_sec=gate_min_trim_sec,
+            gate_threshold=gate_threshold,
+        ),
+        "validationMetrics": evaluate_edge_model(
+            model,
+            x,
+            y_delta,
+            y_gate,
+            val_keep_indices,
+            gate_min_trim_sec=gate_min_trim_sec,
+            gate_threshold=gate_threshold,
+        ),
     }
 
 
@@ -1188,14 +1677,33 @@ def train_models(args: argparse.Namespace, examples: Sequence[Example]) -> Tuple
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     train_indices, val_indices, val_groups = split_examples(examples, args.val_videos)
-    x, y_keep, y_delta, feature_mean, feature_std = prepare_tensors(examples, train_indices)
-    keep_model, keep_stats = train_keep_model(args, examples, x, y_keep, train_indices, val_indices, feature_mean, feature_std)
-    edge_model, edge_stats = train_edge_model(args, x, y_keep, y_delta, train_indices, val_indices, feature_mean, feature_std)
+    x, y_keep, y_delta, y_gate, sample_weight, edge_sample_weight, edge_side_weight, feature_mean, feature_std = prepare_tensors(examples, train_indices)
+    keep_model, keep_stats = train_keep_model(args, examples, x, y_keep, sample_weight, train_indices, val_indices, feature_mean, feature_std)
+    edge_model, edge_stats = train_edge_model(args, x, y_keep, y_delta, y_gate, edge_sample_weight, edge_side_weight, train_indices, val_indices, feature_mean, feature_std)
     source_counts: Dict[str, Dict[str, int]] = {}
+    weight_counts: Dict[str, Dict[str, float]] = {}
     for example in examples:
         entry = source_counts.setdefault(example.source, {"total": 0, "positive": 0, "negative": 0})
         entry["total"] += 1
         entry["positive" if example.keep >= 0.5 else "negative"] += 1
+        weight_entry = weight_counts.setdefault(example.video, {
+            "examples": 0,
+            "keepWeightMean": 0.0,
+            "edgeWeightMean": 0.0,
+            "startEdgeWeightMean": 0.0,
+            "endEdgeWeightMean": 0.0,
+        })
+        weight_entry["examples"] += 1
+        weight_entry["keepWeightMean"] += example.weight
+        weight_entry["edgeWeightMean"] += example.edge_weight
+        weight_entry["startEdgeWeightMean"] += example.start_edge_weight
+        weight_entry["endEdgeWeightMean"] += example.end_edge_weight
+    for entry in weight_counts.values():
+        count = max(1.0, float(entry.get("examples") or 0))
+        entry["keepWeightMean"] = float(entry.get("keepWeightMean") or 0.0) / count
+        entry["edgeWeightMean"] = float(entry.get("edgeWeightMean") or 0.0) / count
+        entry["startEdgeWeightMean"] = float(entry.get("startEdgeWeightMean") or 0.0) / count
+        entry["endEdgeWeightMean"] = float(entry.get("endEdgeWeightMean") or 0.0) / count
     keep_threshold = float(keep_stats["validationMetrics"]["bestThreshold"])
     profile = TRAINING_PROFILES[args.training_profile]
     edge_trim_scale = DEFAULT_FILTER_POLICY["trim_scale"]
@@ -1209,6 +1717,9 @@ def train_models(args: argparse.Namespace, examples: Sequence[Example]) -> Tuple
         "intendedRuntime": profile["intendedRuntime"],
         "recommendedEvaluation": profile["evaluation"],
         "summaryGlobs": resolved_summary_globs(args),
+        "summaryFiles": [str(path) for path in args.summary_file or []],
+        "summaryWeightJson": str(args.summary_weight_json) if args.summary_weight_json else None,
+        "defaultSummaryWeight": args.default_summary_weight,
         "inputName": "segment_features",
         "inputDim": len(SEGMENT_FILTER_FEATURE_NAMES),
         "featureNames": SEGMENT_FILTER_FEATURE_NAMES,
@@ -1218,6 +1729,7 @@ def train_models(args: argparse.Namespace, examples: Sequence[Example]) -> Tuple
         "positiveCount": int(sum(example.keep for example in examples)),
         "negativeCount": int(len(examples) - sum(example.keep for example in examples)),
         "sourceCounts": source_counts,
+        "videoWeightSummary": weight_counts,
         "negativeMining": {
             "manualPostEndWindowSec": [args.post_end_negative_start_sec, args.post_end_negative_end_sec],
             "manualPostEndMinDurationSec": args.post_end_negative_min_duration_sec,
@@ -1230,6 +1742,9 @@ def train_models(args: argparse.Namespace, examples: Sequence[Example]) -> Tuple
             "tailSongTargetGuard": getattr(args, "_tail_guard_summary", None),
             "postEndNegativeSongEvidenceSkip": getattr(args, "_post_end_negative_skip_summary", None),
             "ignoreRangeSkip": getattr(args, "_ignore_range_skip_summary", None),
+            "manualJitterPositiveCandidates": getattr(args, "_manual_jitter_summary", None),
+            "edgeNoTrimWeighting": getattr(args, "_edge_no_trim_summary", None),
+            "edgeAdjustmentOriginalCandidates": getattr(args, "_edge_adjustment_original_summary", None),
         },
     }
     keep_metadata = {
@@ -1268,6 +1783,15 @@ def train_models(args: argparse.Namespace, examples: Sequence[Example]) -> Tuple
         **common,
         "modelType": "firered-edge-trim-advisor",
         "outputName": "edge_trim_delta_sec",
+        "edgeTask": "gate-plus-delta",
+        "outputLayout": [
+            "startTrimGateProbability",
+            "endTrimGateProbability",
+            "startTrimDeltaSec",
+            "endTrimDeltaSec",
+        ],
+        "edgeGateThreshold": max(0.01, min(0.99, float(args.edge_gate_threshold))),
+        "edgeGateMinTrimSec": max(0.0, float(args.edge_gate_min_trim_sec)),
         "trimConfidenceThreshold": max(keep_threshold, DEFAULT_FILTER_POLICY["trim_confidence_threshold"]),
         "trimClampSec": args.trim_clamp_sec,
         "trimScale": edge_trim_scale,
@@ -1278,9 +1802,18 @@ def train_models(args: argparse.Namespace, examples: Sequence[Example]) -> Tuple
         "lossPolicy": {
             "edgeEndOvertrimWeight": max(1.0, float(args.edge_end_overtrim_weight)),
             "edgeEndOvertrimDefinition": "prediction end_delta_sec is more negative than the target, cutting the segment before the manual end.",
+            "edgeGateLossWeight": max(0.0, float(args.edge_gate_loss_weight)),
+            "edgeDeltaLossWeight": max(0.0, float(args.edge_delta_loss_weight)),
         },
         "labelPolicy": {
-            "trimTargets": "manual_best_start/end minus predicted start/end, clamped to trimClampSec. Trained on keep=1 examples only.",
+            "trimTargets": (
+                "manual_best_start/end minus predicted start/end by default, clamped to trimClampSec. "
+                "For segmentFilter original candidates, delta targets may use the previous runtime adjustment as a teacher."
+            ),
+            "edgeGateTargets": (
+                "start/end gate labels are based on the manual boundary target, independent from optional teacher delta targets. "
+                "A gate label is 1 only when the absolute manual trim target is at least edgeGateMinTrimSec."
+            ),
         },
     }
     if args.training_profile.startswith("live-") and args.live_edge_trim_scale is not None:

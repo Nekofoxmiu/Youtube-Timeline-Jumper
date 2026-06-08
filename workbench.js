@@ -9,6 +9,19 @@ import {
   loadSegmentFilterModel,
   runSegmentFilterPipeline,
 } from './lib/songDetection/segmentFilter.js';
+import {
+  applyThresholdCalibrationToFrames,
+  loadThresholdCalibratorModel,
+  noThresholdCalibration,
+  runThresholdCalibratorModel,
+  thresholdCalibratorAssetNames,
+} from './lib/songDetection/thresholdCalibrator.js';
+import {
+  loadThresholdWindowAdvisorModel,
+  noThresholdWindowAdvice,
+  runThresholdWindowAdvisorModel,
+  thresholdWindowAdvisorAssetNames,
+} from './lib/songDetection/thresholdWindowAdvisor.js';
 import { AUTO_SONG_TYPE, buildPlaylistMeta, formatSeconds, normalizePlaylist, normalizePlaylistItem, parseTimeToken, serializePlaylist } from './lib/playlistCore.js';
 import { decodeM4aFileWithWebCodecs, decodeM4aWithWebCodecs, loadM4aAudioSourceFromFile } from './lib/audio/mp4AacWebCodecsDecoder.js';
 
@@ -23,11 +36,14 @@ const QUEUE_STORAGE_KEY = 'workbench_cross_video_queue';
 const SAVED_QUEUES_STORAGE_KEY = 'workbench_cross_video_saved_queues';
 const HOP_SEC = 0.5;
 const PLAYBACK_POLL_MS = 250;
-const OFFLINE_ANALYSIS_CHUNK_SEC = 20;
+const OFFLINE_ANALYSIS_CHUNK_SEC = 600;
 const OFFLINE_LONG_AUDIO_THRESHOLD_SEC = 60 * 60;
 const OFFLINE_LONG_AUDIO_CHUNK_SEC = 60 * 60;
 const OFFLINE_LONG_AUDIO_OVERLAP_SEC = 120;
+const OFFLINE_AED_FRAME_SESSION_CACHE_MAX_ENTRIES = 48;
 const OFFLINE_SEGMENT_FILTER_PROFILE = 'offline-final';
+const OFFLINE_THRESHOLD_CALIBRATOR_PROFILE = 'offline-final';
+const OFFLINE_THRESHOLD_WINDOW_ADVISOR_PROFILE = 'offline-final';
 const OFFLINE_UI_PROGRESS_THROTTLE_MS = 250;
 const OFFLINE_WORKER_SAMPLE_RATE = 16000;
 const OFFLINE_TRANSFER_COPY_CHUNK_FRAMES = OFFLINE_WORKER_SAMPLE_RATE * 20;
@@ -574,6 +590,8 @@ let offlineLastBatchRenderAt = 0;
 let offlinePlaybackRafId = null;
 let offlineAudioDebugLastTimeupdateAt = 0;
 let offlineAudioDebugEvents = [];
+let offlineAnalysisWorkerClient = null;
+const offlineAedFrameSessionCache = new Map();
 let cachedSongRows = [];
 let databaseVideos = [];
 let selectedDatabaseVideoId = null;
@@ -821,6 +839,105 @@ function formatOfflineRuntimeInfo(runtimeInfo) {
   return runtimeInfo.providerAttempts?.length || runtimeInfo.webGpuRunFallbackError
     ? `${label}, ${tr('offline_runtime_wasm_fallback')}`
     : label;
+}
+function createOfflineTimingLogger(label, meta = {}) {
+  const start = performance.now();
+  let last = start;
+  const steps = [];
+  return {
+    mark(name, extra = {}) {
+      const now = performance.now();
+      const durationMs = now - last;
+      last = now;
+      steps.push({
+        name,
+        durationMs,
+        totalMs: now - start,
+        ...extra,
+      });
+    },
+    finish(extra = {}) {
+      const totalMs = performance.now() - start;
+      const timing = {
+        label,
+        totalMs,
+        steps,
+        ...meta,
+        ...extra,
+      };
+      logOfflineTiming(timing);
+      return timing;
+    },
+  };
+}
+function formatOfflineTimingMs(value) {
+  const ms = Number(value) || 0;
+  if (ms >= 1000) return `${(ms / 1000).toFixed(ms >= 10000 ? 1 : 2)}s`;
+  return `${Math.round(ms)}ms`;
+}
+function summarizeOfflineTiming(timing, maxSteps = 5) {
+  const steps = Array.isArray(timing?.steps) ? timing.steps : [];
+  const important = steps
+    .filter((step) => Number(step?.durationMs) > 0)
+    .sort((a, b) => Number(b.durationMs) - Number(a.durationMs))
+    .slice(0, maxSteps)
+    .map((step) => `${step.name} ${formatOfflineTimingMs(step.durationMs)}`);
+  return [
+    `total ${formatOfflineTimingMs(timing?.totalMs)}`,
+    ...important,
+  ].join(' · ');
+}
+function logOfflineTiming(timing) {
+  if (!timing) return;
+  const steps = Array.isArray(timing.steps)
+    ? timing.steps.map((step) => `${step.name}=${formatOfflineTimingMs(step.durationMs)}`).join(', ')
+    : '';
+  console.info(`[YTJ offline timing] ${timing.label}: total=${formatOfflineTimingMs(timing.totalMs)}${steps ? ` | ${steps}` : ''}`, timing);
+}
+function cloneOfflineAnalysisFrames(frames) {
+  return (Array.isArray(frames) ? frames : []).map((frame) => ({ ...frame }));
+}
+function normalizeOfflineCacheNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number * 1000) / 1000 : 0;
+}
+function makeOfflineAedFrameCacheKey({ fileKey, startSec, endSec, audio, sourceSampleRate }) {
+  const sampleRate = Math.max(8000, Number(audio?.sampleRate) || Number(sourceSampleRate) || OFFLINE_WORKER_SAMPLE_RATE);
+  return [
+    'aed-frames-v2',
+    FIRERED_AED_DETECTOR_VERSION,
+    `chunk=${OFFLINE_ANALYSIS_CHUNK_SEC}`,
+    fileKey || 'unknown-file',
+    `start=${normalizeOfflineCacheNumber(startSec)}`,
+    `end=${normalizeOfflineCacheNumber(endSec)}`,
+    `sr=${Math.round(sampleRate)}`,
+  ].join('|');
+}
+function getOfflineAedFrameCache(cacheKey) {
+  if (!cacheKey || !offlineAedFrameSessionCache.has(cacheKey)) return null;
+  const entry = offlineAedFrameSessionCache.get(cacheKey);
+  offlineAedFrameSessionCache.delete(cacheKey);
+  offlineAedFrameSessionCache.set(cacheKey, entry);
+  return {
+    ...entry,
+    analyses: cloneOfflineAnalysisFrames(entry.analyses),
+    fromSessionCache: true,
+  };
+}
+function setOfflineAedFrameCache(cacheKey, result) {
+  if (!cacheKey || !Array.isArray(result?.analyses)) return;
+  offlineAedFrameSessionCache.set(cacheKey, {
+    analyses: cloneOfflineAnalysisFrames(result.analyses),
+    analysesLength: result.analysesLength || result.analyses.length,
+    runtimeInfo: result.runtimeInfo || null,
+    detectorVersion: result.detectorVersion || null,
+    workerTiming: result.timing || null,
+    cachedAt: Date.now(),
+  });
+  while (offlineAedFrameSessionCache.size > OFFLINE_AED_FRAME_SESSION_CACHE_MAX_ENTRIES) {
+    const oldestKey = offlineAedFrameSessionCache.keys().next().value;
+    offlineAedFrameSessionCache.delete(oldestKey);
+  }
 }
 async function loadSongDetectionConfig() {
   try {
@@ -3544,6 +3661,8 @@ function mergeAnalysisFrames(frames) {
 }
 
 let offlineSegmentFilterRuntimesPromise = null;
+let offlineThresholdCalibratorRuntimePromise = null;
+let offlineThresholdWindowAdvisorRuntimePromise = null;
 
 async function loadOptionalOfflineSegmentFilterRuntime(label, loader) {
   try {
@@ -3583,10 +3702,128 @@ async function getOfflineSegmentFilterRuntimes() {
   return offlineSegmentFilterRuntimesPromise;
 }
 
+async function offlineThresholdCalibratorAssetsAvailable() {
+  const names = thresholdCalibratorAssetNames(OFFLINE_THRESHOLD_CALIBRATOR_PROFILE);
+  try {
+    const response = await fetch(chrome.runtime.getURL(`models/fireredvad/aed/${names.meta}`), {
+      cache: 'no-store',
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function offlineThresholdWindowAdvisorAssetsAvailable() {
+  const names = thresholdWindowAdvisorAssetNames(OFFLINE_THRESHOLD_WINDOW_ADVISOR_PROFILE);
+  try {
+    const response = await fetch(chrome.runtime.getURL(`models/fireredvad/aed/${names.meta}`), {
+      cache: 'no-store',
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function getOfflineThresholdCalibratorRuntime() {
+  if (offlineThresholdCalibratorRuntimePromise) return offlineThresholdCalibratorRuntimePromise;
+
+  offlineThresholdCalibratorRuntimePromise = (async () => {
+    const ort = globalThis.ort;
+    if (!ort?.InferenceSession || !ort?.Tensor) return null;
+    if (!await offlineThresholdCalibratorAssetsAvailable()) return null;
+    return loadOptionalOfflineSegmentFilterRuntime('Offline threshold calibrator', () => loadThresholdCalibratorModel({
+      ort,
+      assetProfile: OFFLINE_THRESHOLD_CALIBRATOR_PROFILE,
+      requireAssetProfile: true,
+      executionProviders: ['wasm'],
+    }));
+  })();
+
+  return offlineThresholdCalibratorRuntimePromise;
+}
+
+async function getOfflineThresholdWindowAdvisorRuntime() {
+  if (offlineThresholdWindowAdvisorRuntimePromise) return offlineThresholdWindowAdvisorRuntimePromise;
+
+  offlineThresholdWindowAdvisorRuntimePromise = (async () => {
+    const ort = globalThis.ort;
+    if (!ort?.InferenceSession || !ort?.Tensor) return null;
+    if (!await offlineThresholdWindowAdvisorAssetsAvailable()) return null;
+    return loadOptionalOfflineSegmentFilterRuntime('Offline threshold window advisor', () => loadThresholdWindowAdvisorModel({
+      ort,
+      assetProfile: OFFLINE_THRESHOLD_WINDOW_ADVISOR_PROFILE,
+      requireAssetProfile: true,
+      executionProviders: ['wasm'],
+    }));
+  })();
+
+  return offlineThresholdWindowAdvisorRuntimePromise;
+}
+
+async function runOfflineThresholdCalibration(analyses, stage = 'offline-final') {
+  try {
+    const runtime = await getOfflineThresholdCalibratorRuntime();
+    if (!runtime) {
+      return {
+        frames: analyses,
+        calibration: noThresholdCalibration('asset-missing', OFFLINE_THRESHOLD_CALIBRATOR_PROFILE),
+      };
+    }
+    const calibration = await runThresholdCalibratorModel(runtime, analyses, {
+      profile: OFFLINE_THRESHOLD_CALIBRATOR_PROFILE,
+      stage,
+    });
+    return applyThresholdCalibrationToFrames(analyses, calibration);
+  } catch (error) {
+    return {
+      frames: analyses,
+      calibration: {
+        ...noThresholdCalibration('runtime-error', OFFLINE_THRESHOLD_CALIBRATOR_PROFILE),
+        error: error?.message || String(error),
+      },
+    };
+  }
+}
+
+async function runOfflineFrameThresholdAdjustment(analyses, stage = 'offline-final') {
+  let thresholdWindowAdvice = noThresholdWindowAdvice('asset-missing', OFFLINE_THRESHOLD_WINDOW_ADVISOR_PROFILE);
+  try {
+    const runtime = await getOfflineThresholdWindowAdvisorRuntime();
+    if (runtime) {
+      const result = await runThresholdWindowAdvisorModel(runtime, analyses, {
+        profile: OFFLINE_THRESHOLD_WINDOW_ADVISOR_PROFILE,
+        stage,
+      });
+      return {
+        frames: Array.isArray(result?.frames) ? result.frames : analyses,
+        thresholdWindowAdvice: result?.advice || noThresholdWindowAdvice('not-run', OFFLINE_THRESHOLD_WINDOW_ADVISOR_PROFILE),
+        thresholdCalibration: noThresholdCalibration('disabled-by-threshold-window-advisor', OFFLINE_THRESHOLD_CALIBRATOR_PROFILE),
+        thresholdAdjustmentMode: 'threshold-window-advisor',
+      };
+    }
+  } catch (error) {
+    thresholdWindowAdvice = {
+      ...noThresholdWindowAdvice('runtime-error', OFFLINE_THRESHOLD_WINDOW_ADVISOR_PROFILE),
+      error: error?.message || String(error),
+    };
+  }
+
+  const calibrationResult = await runOfflineThresholdCalibration(analyses, stage);
+  return {
+    frames: Array.isArray(calibrationResult.frames) ? calibrationResult.frames : analyses,
+    thresholdWindowAdvice,
+    thresholdCalibration: calibrationResult.calibration,
+    thresholdAdjustmentMode: 'threshold-calibrator-fallback',
+  };
+}
+
 async function applyOfflineFinalSegmentFilter(baseSegments, analyses, {
   startSec,
   endSec,
   minSegmentDurationSec,
+  thresholdCalibration = null,
 } = {}) {
   const inputSegments = Array.isArray(baseSegments) ? baseSegments : [];
   if (!inputSegments.length) {
@@ -3626,6 +3863,7 @@ async function applyOfflineFinalSegmentFilter(baseSegments, analyses, {
       overrides: {
         startTrimEvidenceFrames: analyses,
         endTrimEvidenceFrames: analyses,
+        thresholdCalibration,
       },
     });
     const filtered = applySegmentFilterPredictions(inputSegments, predictions, filterOptions);
@@ -3648,6 +3886,7 @@ async function applyOfflineFinalSegmentFilter(baseSegments, analyses, {
         requestedAssetProfile: OFFLINE_SEGMENT_FILTER_PROFILE,
         segmentFilterAssetProfileUsed: runtimes.segmentFilter.assetProfile || null,
         edgeTrimAdvisorAssetProfileUsed: runtimes.edgeTrimAdvisor?.assetProfile || null,
+        thresholdCalibration,
         segmentFilterFallbackUsed: Boolean(runtimes.segmentFilter.assetProfileFallbackUsed),
         edgeTrimAdvisorFallbackUsed: Boolean(runtimes.edgeTrimAdvisor?.assetProfileFallbackUsed),
       },
@@ -3889,64 +4128,122 @@ async function sliceAudioBufferForWorker(audioBuffer, startFrame, endFrame, { on
   };
 }
 
-function runOfflineAnalysisWorker(payload, transfer, callbacks = {}) {
-  return new Promise((resolve, reject) => {
-    const jobId = `offline-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const worker = new Worker(chrome.runtime.getURL('lib/songDetection/offlineDetectionWorker.js'));
-    const signal = callbacks.signal || null;
-    let settled = false;
+class OfflineAnalysisWorkerClient {
+  constructor() {
+    this.worker = null;
+    this.activeJob = null;
+  }
 
-    const finish = (callback, value) => {
-      if (settled) return;
-      settled = true;
-      if (signal) signal.removeEventListener('abort', abortHandler);
-      worker.terminate();
-      callback(value);
-    };
-    const abortHandler = () => finish(reject, createOfflineAbortError());
-    if (signal?.aborted) {
-      abortHandler();
-      return;
+  ensureWorker() {
+    if (this.worker) return this.worker;
+    this.worker = new Worker(chrome.runtime.getURL('lib/songDetection/offlineDetectionWorker.js'));
+    this.worker.onmessage = (event) => this.handleMessage(event);
+    this.worker.onerror = (event) => this.handleCrash(event);
+    return this.worker;
+  }
+
+  terminate() {
+    if (this.worker) {
+      this.worker.terminate();
+      this.worker = null;
     }
-    if (signal) signal.addEventListener('abort', abortHandler, { once: true });
+    this.activeJob = null;
+  }
 
-    worker.onmessage = (event) => {
-      const message = event.data || {};
-      if (message.jobId !== jobId) return;
+  analyze(payload, transfer, callbacks = {}) {
+    if (this.activeJob) {
+      return Promise.reject(new Error('Offline analysis worker is already busy.'));
+    }
 
-      if (message.type === 'progress') {
-        if (callbacks.onProgress) callbacks.onProgress(message);
-        else {
-          setProgress(offlineProgressBar, Number(message.ratio) || 0);
-          if (message.message) setStatus(offlineStatus, message.message);
-        }
-      } else if (message.type === 'status') {
-        if (callbacks.onStatus) callbacks.onStatus(message);
-        else setStatus(offlineStatus, message.message || '');
-      } else if (message.type === 'model-status') {
-        if (callbacks.onModelStatus) callbacks.onModelStatus(message);
-        else setStatus(modelStatus, message.message || '');
-      } else if (message.type === 'waveform') {
-        if (callbacks.onWaveform) callbacks.onWaveform(message);
-      } else if (message.type === 'complete') {
-        finish(resolve, message.result || {});
-      } else if (message.type === 'error') {
-        const error = new Error(message.error?.message || 'Offline detection worker failed.');
-        if (message.error?.stack) error.stack = message.error.stack;
-        finish(reject, error);
+    return new Promise((resolve, reject) => {
+      const jobId = `offline-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const signal = callbacks.signal || null;
+      const worker = this.ensureWorker();
+      let settled = false;
+
+      const finish = (callback, value, { terminate = false } = {}) => {
+        if (settled) return;
+        settled = true;
+        if (signal) signal.removeEventListener('abort', abortHandler);
+        if (this.activeJob?.jobId === jobId) this.activeJob = null;
+        if (terminate) this.terminate();
+        callback(value);
+      };
+      const abortHandler = () => finish(reject, createOfflineAbortError(), { terminate: true });
+
+      if (signal?.aborted) {
+        abortHandler();
+        return;
       }
-    };
+      if (signal) signal.addEventListener('abort', abortHandler, { once: true });
 
-    worker.onerror = (event) => {
-      finish(reject, new Error(event.message || 'Offline detection worker crashed.'));
-    };
+      this.activeJob = {
+        jobId,
+        callbacks,
+        resolve: (value) => finish(resolve, value),
+        reject: (error, options = {}) => finish(reject, error, options),
+      };
 
-    worker.postMessage({
-      type: 'analyze-offline-audio',
-      jobId,
-      payload,
-    }, transfer);
-  });
+      worker.postMessage({
+        type: 'analyze-offline-audio',
+        jobId,
+        payload,
+      }, transfer);
+    });
+  }
+
+  handleMessage(event) {
+    const message = event.data || {};
+    const active = this.activeJob;
+    if (!active || message.jobId !== active.jobId) return;
+    const callbacks = active.callbacks || {};
+
+    if (message.type === 'progress') {
+      if (callbacks.onProgress) callbacks.onProgress(message);
+      else {
+        setProgress(offlineProgressBar, Number(message.ratio) || 0);
+        if (message.message) setStatus(offlineStatus, message.message);
+      }
+    } else if (message.type === 'status') {
+      if (callbacks.onStatus) callbacks.onStatus(message);
+      else setStatus(offlineStatus, message.message || '');
+    } else if (message.type === 'model-status') {
+      if (callbacks.onModelStatus) callbacks.onModelStatus(message);
+      else setStatus(modelStatus, message.message || '');
+    } else if (message.type === 'waveform') {
+      if (callbacks.onWaveform) callbacks.onWaveform(message);
+    } else if (message.type === 'complete') {
+      active.resolve(message.result || {});
+    } else if (message.type === 'error') {
+      const error = new Error(message.error?.message || 'Offline detection worker failed.');
+      if (message.error?.stack) error.stack = message.error.stack;
+      active.reject(error);
+    }
+  }
+
+  handleCrash(event) {
+    const active = this.activeJob;
+    const error = new Error(event.message || 'Offline detection worker crashed.');
+    this.terminate();
+    if (active) active.reject(error, { terminate: false });
+  }
+}
+
+function getOfflineAnalysisWorkerClient() {
+  if (!offlineAnalysisWorkerClient) {
+    offlineAnalysisWorkerClient = new OfflineAnalysisWorkerClient();
+  }
+  return offlineAnalysisWorkerClient;
+}
+
+function disposeOfflineAnalysisWorkerClient() {
+  if (!offlineAnalysisWorkerClient) return;
+  offlineAnalysisWorkerClient.terminate();
+  offlineAnalysisWorkerClient = null;
+}
+
+function runOfflineAnalysisWorker(payload, transfer, callbacks = {}) {
+  return getOfflineAnalysisWorkerClient().analyze(payload, transfer, callbacks);
 }
 
 function runOfflineVisualWorker(payload, transfer, callbacks = {}) {
@@ -4203,6 +4500,12 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
   const allAnalyses = [];
   let runtimeInfo = null;
   let detectorVersion = null;
+  const timing = createOfflineTimingLogger('offline chunked analysis', {
+    jobId: job.id,
+    fileName: job.fileName,
+    chunkCount: chunks.length,
+    chunkSec: OFFLINE_ANALYSIS_CHUNK_SEC,
+  });
 
   job.chunkedAnalysis = true;
   job.chunkedAnalysisChunks = chunks.length;
@@ -4224,6 +4527,26 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
     const chunkLabel = `${index + 1}/${chunks.length}`;
     const rangeLabel = `${formatSeconds(chunk.coreStartSec)} - ${formatSeconds(chunk.coreEndSec)}`;
     const decodeLabel = `${formatSeconds(chunk.decodeStartSec)} - ${formatSeconds(chunk.decodeEndSec)}`;
+    const chunkCacheKey = makeOfflineAedFrameCacheKey({
+      fileKey: job.fileKey,
+      startSec: chunk.decodeStartSec,
+      endSec: chunk.decodeEndSec,
+      sourceSampleRate: source.sampleRate,
+    });
+    const cachedChunkResult = getOfflineAedFrameCache(chunkCacheKey);
+    if (cachedChunkResult) {
+      job.statusMessage = `Chunk ${chunkLabel}: using session AED frame cache...`;
+      job.progress = clamp((index + 0.98) / chunks.length, 0, 0.98);
+      updateOfflineAnalysisProgressUi(job, { force: true });
+      scheduleOfflineBatchListRender();
+      runtimeInfo = cachedChunkResult.runtimeInfo || runtimeInfo;
+      detectorVersion = cachedChunkResult.detectorVersion || detectorVersion;
+      allAnalyses.push(...filterChunkCoreAnalyses(cachedChunkResult.analyses, chunk, index === chunks.length - 1));
+      job.analyses = mergeAnalysisFrames(allAnalyses);
+      timing.mark(`aed cache chunk ${chunkLabel}`, { frameCount: cachedChunkResult.analyses.length });
+      await nextAnimationFrame();
+      continue;
+    }
 
     job.statusMessage = `Decoding chunk ${chunkLabel} (${decodeLabel})...`;
     job.progress = Math.max(job.progress || 0, index / chunks.length);
@@ -4246,6 +4569,7 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
         allowFullFileFallback: false,
       });
     let audioBuffer = decodedAudio.audioBuffer;
+    timing.mark(`decode chunk ${chunkLabel}`);
     const decodedStartSec = decodedAudio.decodedStartSec ?? chunk.decodeStartSec;
     const sampleRate = Math.max(8000, Number(audioBuffer.sampleRate) || source.sampleRate || 48000);
     const startFrame = Math.max(0, Math.floor((chunk.decodeStartSec - decodedStartSec) * sampleRate));
@@ -4268,6 +4592,7 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
       },
     });
     throwIfOfflineSignalAborted(signal);
+    timing.mark(`prepare chunk ${chunkLabel}`);
     decodedAudio.audioBuffer = null;
     decodedAudio = null;
     audioBuffer = null;
@@ -4304,6 +4629,11 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
         if (job.id === selectedOfflineJobId) setStatus(modelStatus, `${job.modelStatus} · chunk ${chunkLabel}`);
       },
     });
+    timing.mark(`aed chunk ${chunkLabel}`, {
+      frameCount: Array.isArray(result.analyses) ? result.analyses.length : 0,
+      workerTiming: result.timing || null,
+    });
+    setOfflineAedFrameCache(chunkCacheKey, result);
 
     runtimeInfo = result.runtimeInfo || runtimeInfo;
     detectorVersion = result.detectorVersion || detectorVersion;
@@ -4314,37 +4644,55 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
   }
 
   const analyses = mergeAnalysisFrames(allAnalyses);
-  job.statusMessage = `Smoothing ${analyses.length} analysis windows...`;
+  job.statusMessage = `Calibrating ${analyses.length} analysis windows...`;
   updateOfflineAnalysisProgressUi(job, { force: true });
   await nextAnimationFrame();
 
-  const smoothing = smoothFireRedAnalyses(analyses, endSec, {
+  const thresholdAdjustment = await runOfflineFrameThresholdAdjustment(analyses, 'offline-final-workbench');
+  const calibratedAnalyses = Array.isArray(thresholdAdjustment.frames)
+    ? thresholdAdjustment.frames
+    : analyses;
+  const thresholdCalibration = thresholdAdjustment.thresholdCalibration;
+  const thresholdWindowAdvice = thresholdAdjustment.thresholdWindowAdvice;
+  timing.mark('threshold adjustment', { frameCount: calibratedAnalyses.length });
+
+  job.statusMessage = `Smoothing ${calibratedAnalyses.length} analysis windows...`;
+  updateOfflineAnalysisProgressUi(job, { force: true });
+  await nextAnimationFrame();
+
+  const smoothing = smoothFireRedAnalyses(calibratedAnalyses, endSec, {
     startSec,
     minSegmentDurationSec: jobConfig.minSegmentDurationSec,
     smoothingProfile: OFFLINE_SEGMENT_FILTER_PROFILE,
   });
+  timing.mark('global smoothing', { frameCount: calibratedAnalyses.length });
   const rawBaseSegments = Array.isArray(smoothing?.segments) ? smoothing.segments : [];
   job.statusMessage = `Applying offline final filter to ${rawBaseSegments.length} segment(s)...`;
   updateOfflineAnalysisProgressUi(job, { force: true });
   await nextAnimationFrame();
-  const offlineFilter = await applyOfflineFinalSegmentFilter(rawBaseSegments, analyses, {
+  const offlineFilter = await applyOfflineFinalSegmentFilter(rawBaseSegments, calibratedAnalyses, {
     startSec,
     endSec,
     minSegmentDurationSec: jobConfig.minSegmentDurationSec,
+    thresholdCalibration,
   });
+  timing.mark('offline final filter', { segmentCount: rawBaseSegments.length });
   const baseSegments = offlineFilter.segments;
   let boundarySplit = null;
 
   job.rawBaseSegments = rawBaseSegments;
   job.baseSegments = baseSegments;
-  job.analyses = analyses;
+  job.analyses = calibratedAnalyses;
+  job.thresholdCalibration = thresholdCalibration;
+  job.thresholdWindowAdvice = thresholdWindowAdvice;
   job.offlineSegmentFilter = offlineFilter.runtimeInfo;
   job.offlineSegmentFilterAdjustments = offlineFilter.adjustments;
   job.excludedMusicOnlySpans = Array.isArray(smoothing?.excludedMusicOnlySpans) ? smoothing.excludedMusicOnlySpans : [];
   job.droppedMusicOnlySegments = Array.isArray(smoothing?.droppedMusicOnlySegments) ? smoothing.droppedMusicOnlySegments : [];
   job.boundarySelection = {};
   if (jobConfig.splitMedley) {
-    boundarySplit = splitSongSegmentsByBoundaries(baseSegments, analyses);
+    boundarySplit = splitSongSegmentsByBoundaries(baseSegments, calibratedAnalyses);
+    timing.mark('medley boundary split', { segmentCount: baseSegments.length });
     job.boundarySplit = boundarySplit;
     if (boundarySplit?.boundaries?.length) {
       for (const boundary of boundarySplit.boundaries) {
@@ -4369,9 +4717,12 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
     job.visualsError = null;
   }
   job.result = {
-    analysesLength: analyses.length,
+    analysesLength: calibratedAnalyses.length,
     detectorVersion,
     runtimeInfo,
+    thresholdCalibration,
+    thresholdWindowAdvice,
+    thresholdAdjustmentMode: thresholdAdjustment.thresholdAdjustmentMode,
     highResolutionVisuals: Boolean(jobConfig.highResolutionVisuals),
     generateVisuals: Boolean(jobConfig.generateVisuals),
     visualError: job.visualsError ? { message: job.visualsError } : null,
@@ -4398,6 +4749,11 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
   job.minSegmentDurationSec = jobConfig.minSegmentDurationSec;
   const boundaryCount = job.boundarySplit?.boundaries?.length || 0;
   const runtimeLabel = formatOfflineRuntimeInfo(job.runtimeInfo);
+  job.offlineTiming = timing.finish({
+    frameCount: calibratedAnalyses.length,
+    segmentCount: job.segments.length,
+    cacheEntries: offlineAedFrameSessionCache.size,
+  });
   job.statusMessage = `Done. Detected ${job.segments.length} segment(s).`;
   job.summary = [
     `duration ${formatSeconds(endSec - startSec)}`,
@@ -4406,7 +4762,10 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
     `chunked ${chunks.length} chunk(s)`,
     `overlap ${Math.round(OFFLINE_LONG_AUDIO_OVERLAP_SEC)}s`,
     runtimeLabel ? `runtime ${runtimeLabel}` : null,
+    thresholdWindowAdvice?.applied ? `threshold windows ${thresholdWindowAdvice.appliedWindowCount}/${thresholdWindowAdvice.windowCount}` : null,
     offlineFilter.runtimeInfo?.applied ? `offline filter adjustments ${offlineFilter.adjustments.length}` : null,
+    job.offlineTiming ? `timing ${summarizeOfflineTiming(job.offlineTiming)}` : null,
+    `AED cache ${offlineAedFrameSessionCache.size}/${OFFLINE_AED_FRAME_SESSION_CACHE_MAX_ENTRIES}`,
     `${job.segments.length} segment(s)`,
     job.droppedMusicOnlySegments.length ? `dropped long music-only ${job.droppedMusicOnlySegments.length} segment(s)` : null,
     `min segment ${job.minSegmentDurationSec}s`,
@@ -4414,8 +4773,8 @@ async function analyzeOfflineJobInChunks(job, jobConfig, source, audioContext) {
     !jobConfig.generateVisuals
       ? 'visual editor disabled'
       : job.visualsStatus === 'done'
-      ? `visual stitched ${visualChunkCount}/${chunks.length} chunk(s)`
-      : `visual unavailable: ${job.visualsError}`,
+      ? `visual stitched ${chunks.length}/${chunks.length} chunk(s)`
+      : 'visual pending',
     jobConfig.generateVisuals ? (job.highResolutionVisuals ? 'visual high resolution' : 'visual standard resolution') : null,
     jobConfig.splitMedley ? `medley boundaries ${boundaryCount}` : null,
   ].filter(Boolean);
@@ -4436,6 +4795,11 @@ async function analyzeOfflineJob(job, config) {
     highResolutionVisuals: Boolean((job.generateVisuals ?? config.generateVisuals) !== false && (job.highResolutionVisuals ?? config.highResolutionVisuals)),
     signal: config.signal || null,
   };
+  const timing = createOfflineTimingLogger('offline analysis', {
+    jobId: job.id,
+    fileName: job.fileName,
+    chunkSec: OFFLINE_ANALYSIS_CHUNK_SEC,
+  });
   job.status = 'running';
   job.progress = 0;
   job.error = null;
@@ -4443,8 +4807,11 @@ async function analyzeOfflineJob(job, config) {
   job.baseSegments = [];
   job.rawBaseSegments = [];
   job.analyses = [];
+  job.thresholdCalibration = null;
+  job.thresholdWindowAdvice = null;
   job.offlineSegmentFilter = null;
   job.offlineSegmentFilterAdjustments = [];
+  job.offlineTiming = null;
   job.waveform = null;
   job.spectrogram = null;
   job.generateVisuals = jobConfig.generateVisuals;
@@ -4503,6 +4870,7 @@ async function analyzeOfflineJob(job, config) {
       startSec: jobConfig.requestedStartSec,
       endSec: jobConfig.requestedEndSec,
     });
+    timing.mark('decode');
     throwIfOfflineSignalAborted(jobConfig.signal);
     let audioBuffer = decodedAudio.audioBuffer;
     const decoderName = decodedAudio.decoderName;
@@ -4517,62 +4885,110 @@ async function analyzeOfflineJob(job, config) {
       throw new Error(`Selected range has no decodable audio samples. File duration is ${formatSeconds(durationSec)}.`);
     }
     const rangeLabel = `${formatSeconds(startSec)} - ${formatSeconds(endSec)}`;
-    job.statusMessage = `Preparing worker buffer for ${job.fileName} (${rangeLabel})...`;
-    renderOfflineBatchList();
-    if (job.id === selectedOfflineJobId) renderSelectedOfflineJob();
-    await nextAnimationFrame();
-
-    const { audio, transfer } = await sliceAudioBufferForWorker(audioBuffer, startFrame, endFrame, {
-      signal: jobConfig.signal,
-      onProgress({ ratio }) {
-        job.progress = Math.min(0.08, (Number(ratio) || 0) * 0.08);
-        job.statusMessage = `Preparing worker buffer... ${Math.round((Number(ratio) || 0) * 100)}%`;
-        updateOfflineAnalysisProgressUi(job);
-        scheduleOfflineBatchListRender();
-      },
-    });
-    decodedAudio.audioBuffer = null;
-    decodedAudio = null;
-    audioBuffer = null;
-    await audioContext.close().catch(() => {});
-    audioContext = null;
-
-    const result = await runOfflineAnalysisWorker({
-      audio,
+    const cacheKey = makeOfflineAedFrameCacheKey({
+      fileKey: job.fileKey,
       startSec,
       endSec,
-      splitMedley: false,
-      highResolutionVisuals: jobConfig.highResolutionVisuals,
-      generateVisuals: false,
-      minSegmentDurationSec: jobConfig.minSegmentDurationSec,
-      chunkSec: OFFLINE_ANALYSIS_CHUNK_SEC,
-      rangeLabel,
-    }, transfer, {
-      signal: jobConfig.signal,
-      onProgress(message) {
-        job.progress = Number(message.ratio) || 0;
-        if (message.message) job.statusMessage = message.message;
-        updateOfflineAnalysisProgressUi(job);
-        scheduleOfflineBatchListRender();
-      },
-      onStatus(message) {
-        job.statusMessage = message.message || '';
-        if (job.id === selectedOfflineJobId) setStatus(offlineStatus, job.statusMessage);
-        scheduleOfflineBatchListRender({ force: true });
-      },
-      onModelStatus(message) {
-        job.modelStatus = message.message || '';
-        if (job.id === selectedOfflineJobId) setStatus(modelStatus, job.modelStatus);
-      },
-      onWaveform(message) {
-        job.waveform = message.waveform || null;
-        job.spectrogram = message.spectrogram || null;
-        if (job.id === selectedOfflineJobId) renderOfflineWaveform(job);
-      },
+      sourceSampleRate: sampleRate,
     });
+    let result = getOfflineAedFrameCache(cacheKey);
+    if (result) {
+      job.progress = 0.85;
+      job.statusMessage = `Using session AED frame cache for ${rangeLabel}...`;
+      updateOfflineAnalysisProgressUi(job, { force: true });
+      scheduleOfflineBatchListRender();
+      decodedAudio.audioBuffer = null;
+      decodedAudio = null;
+      audioBuffer = null;
+      await audioContext.close().catch(() => {});
+      audioContext = null;
+      timing.mark('aed cache', { frameCount: result.analyses.length });
+    } else {
+      job.statusMessage = `Preparing worker buffer for ${job.fileName} (${rangeLabel})...`;
+      renderOfflineBatchList();
+      if (job.id === selectedOfflineJobId) renderSelectedOfflineJob();
+      await nextAnimationFrame();
 
-    const rawBaseSegments = Array.isArray(result.baseSegments) ? result.baseSegments : (Array.isArray(result.segments) ? result.segments : []);
-    job.analyses = Array.isArray(result.analyses) ? result.analyses : [];
+      const { audio, transfer } = await sliceAudioBufferForWorker(audioBuffer, startFrame, endFrame, {
+        signal: jobConfig.signal,
+        onProgress({ ratio }) {
+          job.progress = Math.min(0.08, (Number(ratio) || 0) * 0.08);
+          job.statusMessage = `Preparing worker buffer... ${Math.round((Number(ratio) || 0) * 100)}%`;
+          updateOfflineAnalysisProgressUi(job);
+          scheduleOfflineBatchListRender();
+        },
+      });
+      timing.mark('prepare worker buffer');
+      decodedAudio.audioBuffer = null;
+      decodedAudio = null;
+      audioBuffer = null;
+      await audioContext.close().catch(() => {});
+      audioContext = null;
+
+      result = await runOfflineAnalysisWorker({
+        audio,
+        startSec,
+        endSec,
+        splitMedley: false,
+        highResolutionVisuals: jobConfig.highResolutionVisuals,
+        generateVisuals: false,
+        analysisOnly: true,
+        minSegmentDurationSec: jobConfig.minSegmentDurationSec,
+        chunkSec: OFFLINE_ANALYSIS_CHUNK_SEC,
+        rangeLabel,
+      }, transfer, {
+        signal: jobConfig.signal,
+        onProgress(message) {
+          job.progress = Number(message.ratio) || 0;
+          if (message.message) job.statusMessage = message.message;
+          updateOfflineAnalysisProgressUi(job);
+          scheduleOfflineBatchListRender();
+        },
+        onStatus(message) {
+          job.statusMessage = message.message || '';
+          if (job.id === selectedOfflineJobId) setStatus(offlineStatus, job.statusMessage);
+          scheduleOfflineBatchListRender({ force: true });
+        },
+        onModelStatus(message) {
+          job.modelStatus = message.message || '';
+          if (job.id === selectedOfflineJobId) setStatus(modelStatus, job.modelStatus);
+        },
+        onWaveform(message) {
+          job.waveform = message.waveform || null;
+          job.spectrogram = message.spectrogram || null;
+          if (job.id === selectedOfflineJobId) renderOfflineWaveform(job);
+        },
+      });
+      timing.mark('aed analysis', {
+        frameCount: Array.isArray(result.analyses) ? result.analyses.length : 0,
+        workerTiming: result.timing || null,
+      });
+      setOfflineAedFrameCache(cacheKey, result);
+    }
+
+    const rawAnalyses = Array.isArray(result.analyses) ? result.analyses : [];
+    job.statusMessage = `Calibrating ${rawAnalyses.length} analysis windows...`;
+    updateOfflineAnalysisProgressUi(job, { force: true });
+    await nextAnimationFrame();
+    const thresholdAdjustment = await runOfflineFrameThresholdAdjustment(rawAnalyses, 'offline-final-workbench');
+    const calibratedAnalyses = Array.isArray(thresholdAdjustment.frames)
+      ? thresholdAdjustment.frames
+      : rawAnalyses;
+    const thresholdCalibration = thresholdAdjustment.thresholdCalibration;
+    const thresholdWindowAdvice = thresholdAdjustment.thresholdWindowAdvice;
+    timing.mark('threshold adjustment', { frameCount: calibratedAnalyses.length });
+
+    job.statusMessage = `Smoothing ${calibratedAnalyses.length} analysis windows...`;
+    updateOfflineAnalysisProgressUi(job, { force: true });
+    await nextAnimationFrame();
+    const smoothing = smoothFireRedAnalyses(calibratedAnalyses, endSec, {
+      startSec,
+      minSegmentDurationSec: jobConfig.minSegmentDurationSec,
+      smoothingProfile: OFFLINE_SEGMENT_FILTER_PROFILE,
+    });
+    timing.mark('global smoothing', { frameCount: calibratedAnalyses.length });
+    const rawBaseSegments = Array.isArray(smoothing?.segments) ? smoothing.segments : [];
+    job.analyses = calibratedAnalyses;
     job.statusMessage = `Applying offline final filter to ${rawBaseSegments.length} segment(s)...`;
     updateOfflineAnalysisProgressUi(job, { force: true });
     await nextAnimationFrame();
@@ -4580,9 +4996,13 @@ async function analyzeOfflineJob(job, config) {
       startSec,
       endSec,
       minSegmentDurationSec: jobConfig.minSegmentDurationSec,
+      thresholdCalibration,
     });
+    timing.mark('offline final filter', { segmentCount: rawBaseSegments.length });
     job.rawBaseSegments = rawBaseSegments;
     job.baseSegments = offlineFilter.segments;
+    job.thresholdCalibration = thresholdCalibration;
+    job.thresholdWindowAdvice = thresholdWindowAdvice;
     job.offlineSegmentFilter = offlineFilter.runtimeInfo;
     job.offlineSegmentFilterAdjustments = offlineFilter.adjustments;
     job.waveform = result.waveform || job.waveform || null;
@@ -4590,8 +5010,8 @@ async function analyzeOfflineJob(job, config) {
     job.boundarySplit = jobConfig.splitMedley
       ? splitSongSegmentsByBoundaries(job.baseSegments, job.analyses)
       : null;
-    job.excludedMusicOnlySpans = Array.isArray(result.excludedMusicOnlySpans) ? result.excludedMusicOnlySpans : [];
-    job.droppedMusicOnlySegments = Array.isArray(result.droppedMusicOnlySegments) ? result.droppedMusicOnlySegments : [];
+    job.excludedMusicOnlySpans = Array.isArray(smoothing?.excludedMusicOnlySpans) ? smoothing.excludedMusicOnlySpans : [];
+    job.droppedMusicOnlySegments = Array.isArray(smoothing?.droppedMusicOnlySegments) ? smoothing.droppedMusicOnlySegments : [];
     job.boundarySelection = {};
     if (job.boundarySplit?.boundaries?.length) {
       for (const boundary of job.boundarySplit.boundaries) {
@@ -4607,12 +5027,15 @@ async function analyzeOfflineJob(job, config) {
       analysesLength: result.analysesLength || job.analyses.length,
       detectorVersion: result.detectorVersion || null,
       runtimeInfo: result.runtimeInfo || null,
+      thresholdCalibration,
+      thresholdWindowAdvice,
+      thresholdAdjustmentMode: thresholdAdjustment.thresholdAdjustmentMode || null,
       highResolutionVisuals: Boolean(result.highResolutionVisuals),
       generateVisuals: Boolean(jobConfig.generateVisuals),
       visualError: result.visualError || null,
       minSegmentDurationSec: result.minSegmentDurationSec || jobConfig.minSegmentDurationSec,
-      smoothingMethod: result.smoothingMethod || null,
-      smoothingVersion: result.smoothingVersion || null,
+      smoothingMethod: smoothing?.method || null,
+      smoothingVersion: smoothing?.smoothingVersion || null,
       offlineSegmentFilter: offlineFilter.runtimeInfo,
       offlineSegmentFilterAdjustmentCount: offlineFilter.adjustments.length,
       excludedMusicOnlySpans: job.excludedMusicOnlySpans,
@@ -4637,6 +5060,11 @@ async function analyzeOfflineJob(job, config) {
     }
     const boundaryCount = job.boundarySplit?.boundaries?.length || 0;
     const runtimeLabel = formatOfflineRuntimeInfo(job.runtimeInfo);
+    job.offlineTiming = timing.finish({
+      frameCount: job.analyses.length,
+      segmentCount: job.segments.length,
+      cacheEntries: offlineAedFrameSessionCache.size,
+    });
     const visualWarning = result.visualError?.message
       ? `visual unavailable: ${result.visualError.message}`
       : null;
@@ -4648,7 +5076,10 @@ async function analyzeOfflineJob(job, config) {
       `sample rate ${Math.round(sampleRate)} Hz`,
       `decoder ${decoderName}`,
       runtimeLabel ? `runtime ${runtimeLabel}` : null,
+      thresholdWindowAdvice?.applied ? `threshold windows ${thresholdWindowAdvice.appliedWindowCount}/${thresholdWindowAdvice.windowCount}` : null,
       offlineFilter.runtimeInfo?.applied ? `offline filter adjustments ${offlineFilter.adjustments.length}` : null,
+      job.offlineTiming ? `timing ${summarizeOfflineTiming(job.offlineTiming)}` : null,
+      `AED cache ${offlineAedFrameSessionCache.size}/${OFFLINE_AED_FRAME_SESSION_CACHE_MAX_ENTRIES}`,
       `${job.segments.length} segment(s)`,
       job.droppedMusicOnlySegments.length ? `dropped long music-only ${job.droppedMusicOnlySegments.length} segment(s)` : null,
       `min segment ${job.minSegmentDurationSec}s`,
@@ -6209,6 +6640,7 @@ function bindEvents() {
   }
   window.addEventListener('beforeunload', () => {
     revokeOfflineJobUrls(offlineBatchJobs);
+    disposeOfflineAnalysisWorkerClient();
     offlineWaveformResizeObserver?.disconnect();
   });
 }

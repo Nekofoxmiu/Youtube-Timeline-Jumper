@@ -60,6 +60,20 @@ function Copy-PathToStaging {
     }
 }
 
+function Copy-OptionalPathToStaging {
+    param(
+        [string]$RepoRoot,
+        [string]$StagingDir,
+        [string]$RelativePath
+    )
+
+    $source = Join-Path $RepoRoot $RelativePath
+    if (-not (Test-Path -LiteralPath $source)) {
+        return
+    }
+    Copy-PathToStaging -RepoRoot $RepoRoot -StagingDir $StagingDir -RelativePath $RelativePath
+}
+
 function Test-ManifestResource {
     param(
         [string]$RepoRoot,
@@ -266,6 +280,22 @@ $packagePaths = @(
 try {
     foreach ($path in $packagePaths) {
         Copy-PathToStaging -RepoRoot $repoRoot -StagingDir $stagingDir -RelativePath $path
+    }
+    foreach ($optionalPath in @(
+        "models/fireredvad/aed/threshold_calibrator_offline_final.meta.json",
+        "models/fireredvad/aed/threshold_calibrator_offline_final.onnx",
+        "models/fireredvad/aed/threshold_calibrator_live_aed60.meta.json",
+        "models/fireredvad/aed/threshold_calibrator_live_aed60.onnx",
+        "models/fireredvad/aed/threshold_calibrator_live_pcm30.meta.json",
+        "models/fireredvad/aed/threshold_calibrator_live_pcm30.onnx",
+        "models/fireredvad/aed/threshold_window_advisor_offline_final.meta.json",
+        "models/fireredvad/aed/threshold_window_advisor_offline_final.onnx",
+        "models/fireredvad/aed/threshold_window_advisor_live_aed60.meta.json",
+        "models/fireredvad/aed/threshold_window_advisor_live_aed60.onnx",
+        "models/fireredvad/aed/threshold_window_advisor_live_pcm30.meta.json",
+        "models/fireredvad/aed/threshold_window_advisor_live_pcm30.onnx"
+    )) {
+        Copy-OptionalPathToStaging -RepoRoot $repoRoot -StagingDir $stagingDir -RelativePath $optionalPath
     }
 
     $unpackedSize = Get-DirectorySize -Path $stagingDir

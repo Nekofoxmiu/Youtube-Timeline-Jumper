@@ -111,6 +111,7 @@ DEFAULT_FEATURE_OPTIONS = {
 DEFAULT_FILTER_POLICY = {
     "keep_threshold": 0.35,
     "trim_confidence_threshold": 0.55,
+    "edge_gate_threshold": 0.6,
     "trim_clamp_sec": 60.0,
     "trim_scale": 0.75,
     "min_segment_duration_sec": 90.0,

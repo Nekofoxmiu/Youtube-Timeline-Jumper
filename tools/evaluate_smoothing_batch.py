@@ -97,6 +97,51 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--disable-edge-trim-advisor", action="store_true")
     parser.add_argument("--disable-start-edge-trim", action="store_true", help="Keep smoothing start times while still allowing end trim.")
+    parser.add_argument(
+        "--threshold-calibrator",
+        nargs="?",
+        const="model",
+        choices=["model", "heuristic"],
+        default=None,
+        help="Apply dynamic threshold calibration before smoothing. Missing model assets fall back to no-op.",
+    )
+    parser.add_argument("--threshold-calibrator-model-dir", type=Path, default=Path("models/fireredvad/aed"))
+    parser.add_argument("--require-threshold-calibrator-assets", action="store_true")
+    parser.add_argument(
+        "--threshold-calibrator-profile",
+        choices=["offline-final", "live-pcm30", "live-realtime-aed60"],
+        default=None,
+        help="Threshold calibrator profile. Defaults to --smoothing-profile when compatible.",
+    )
+    parser.add_argument(
+        "--threshold-window-advisor",
+        nargs="?",
+        const="model",
+        choices=["model"],
+        default=None,
+        help="Apply window-level dynamic threshold advisor before smoothing.",
+    )
+    parser.add_argument("--threshold-window-advisor-model-dir", type=Path, default=Path("models/fireredvad/aed"))
+    parser.add_argument("--require-threshold-window-advisor-assets", action="store_true")
+    parser.add_argument(
+        "--threshold-window-advisor-profile",
+        choices=["offline-final", "live-pcm30", "live-realtime-aed60"],
+        default=None,
+        help="Threshold window advisor profile. Defaults to --smoothing-profile when compatible.",
+    )
+    parser.add_argument(
+        "--include-short-manual-outliers",
+        action="store_true",
+        help=(
+            "Count manual songs shorter than the active minSegmentDurationSec as severe outliers. "
+            "By default they remain in frame metrics but are skipped in severe outlier diagnostics."
+        ),
+    )
+    parser.add_argument(
+        "--split-medley",
+        action="store_true",
+        help="Enable the existing opt-in boundary detector after smoothing/finalization for evaluation.",
+    )
     parser.add_argument("--boundary-candidates", action="store_true", help="Emit debug-only intra-segment boundary candidates; never changes output segments.")
     parser.add_argument("--simulate-live", action="store_true")
     parser.add_argument("--live-lookahead-sec", nargs="*", type=float, default=[20.0, 30.0, 60.0, 90.0, 120.0])
@@ -404,6 +449,54 @@ def assert_profile_asset_used(kind: str, requested_profile: str, used_profile: s
     )
 
 
+def append_threshold_calibrator_args(cmd: List[str], args: argparse.Namespace) -> None:
+    if not args.threshold_calibrator:
+        return
+    profile = args.threshold_calibrator_profile or args.smoothing_profile
+    if profile == "default":
+        profile = "offline-final"
+    cmd.extend([
+        "--threshold-calibrator",
+        str(args.threshold_calibrator),
+        "--threshold-calibrator-profile",
+        str(profile),
+        "--threshold-calibrator-model-dir",
+        str(args.threshold_calibrator_model_dir),
+    ])
+    if args.require_threshold_calibrator_assets:
+        cmd.append("--require-threshold-calibrator-assets")
+
+
+def append_threshold_window_advisor_args(cmd: List[str], args: argparse.Namespace) -> None:
+    if not args.threshold_window_advisor:
+        return
+    cmd.extend([
+        "--threshold-window-advisor",
+        str(args.threshold_window_advisor),
+        "--threshold-window-advisor-profile",
+        str(args.threshold_window_advisor_profile or args.smoothing_profile),
+        "--threshold-window-advisor-model-dir",
+        str(args.threshold_window_advisor_model_dir),
+    ])
+    if args.require_threshold_window_advisor_assets:
+        cmd.append("--require-threshold-window-advisor-assets")
+
+
+def count_outlier_types(outliers: Sequence[Dict[str, object]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for outlier in outliers:
+        outlier_type = str(outlier.get("type") or "unknown")
+        counts[outlier_type] = counts.get(outlier_type, 0) + 1
+    return counts
+
+
+def diff_counts(active: Dict[str, int], baseline: Dict[str, int]) -> Dict[str, int]:
+    output: Dict[str, int] = {}
+    for key in sorted(set(active) | set(baseline)):
+        output[key] = int(active.get(key, 0)) - int(baseline.get(key, 0))
+    return output
+
+
 def overlap_seconds(left: Dict[str, float], right: Dict[str, float]) -> float:
     return max(0.0, min(float(left["endSec"]), float(right["endSec"])) - max(float(left["startSec"]), float(right["startSec"])))
 
@@ -568,9 +661,13 @@ def classify_match_outlier(
     match: Dict[str, object],
     frames: Sequence[Dict[str, object]] = (),
     manual_segments: Sequence[Dict[str, object]] = (),
+    min_outlier_manual_duration_sec: float = 0.0,
 ) -> List[Dict[str, object]]:
     outliers: List[Dict[str, object]] = []
     manual = match.get("manual") or {}
+    manual_duration = finite_float(manual.get("endSec")) - finite_float(manual.get("startSec"))
+    if min_outlier_manual_duration_sec > 0 and 0 < manual_duration < min_outlier_manual_duration_sec:
+        return outliers
     best = match.get("best") or {}
     predicted = best.get("predicted") if isinstance(best, dict) else None
     title = manual.get("title", "")
@@ -796,11 +893,13 @@ class SegmentFilterRuntime:
             self.edge_input_name = str(self.edge_meta.get("inputName") or self.edge_session.get_inputs()[0].name)
             self.edge_output_name = str(self.edge_meta.get("outputName") or self.edge_session.get_outputs()[0].name)
             self.trim_threshold = float(trim_threshold if trim_threshold is not None else self.edge_meta.get("trimConfidenceThreshold", DEFAULT_FILTER_POLICY["trim_confidence_threshold"]))
+            self.edge_gate_threshold = float(self.edge_meta.get("edgeGateThreshold", DEFAULT_FILTER_POLICY.get("edge_gate_threshold", 0.6)))
             self.trim_clamp_sec = float(self.edge_meta.get("trimClampSec", self.trim_clamp_sec))
             self.trim_scale = float(self.edge_meta.get("trimScale", self.trim_scale))
             self.min_segment_duration_sec = float(self.edge_meta.get("minSegmentDurationSec", self.min_segment_duration_sec))
         else:
             self.trim_threshold = float(trim_threshold if trim_threshold is not None else DEFAULT_FILTER_POLICY["trim_confidence_threshold"])
+            self.edge_gate_threshold = float(DEFAULT_FILTER_POLICY.get("edge_gate_threshold", 0.6))
 
     def predict(self, segments: Sequence[Dict[str, object]], frames: Sequence[Dict[str, object]], summary: Dict[str, object]) -> List[Dict[str, float]]:
         if not segments:
@@ -820,15 +919,23 @@ class SegmentFilterRuntime:
         predictions = []
         for index, row in enumerate(keep_output):
             edge_row = edge_output[index] if edge_output is not None else None
+            edge_width = len(edge_row) if edge_row is not None else 0
             predictions.append({
                 "keepProbability": float(np.clip(row[0], 0.0, 1.0)),
-                "startTrimDeltaSec": float(np.clip(edge_row[0], -self.trim_clamp_sec, self.trim_clamp_sec)) if edge_row is not None and len(edge_row) >= 2 else 0.0,
-                "endTrimDeltaSec": float(np.clip(edge_row[1], -self.trim_clamp_sec, self.trim_clamp_sec)) if edge_row is not None and len(edge_row) >= 2 else 0.0,
+                "startTrimGateProbability": float(np.clip(edge_row[0], 0.0, 1.0)) if edge_row is not None and edge_width >= 4 else None,
+                "endTrimGateProbability": float(np.clip(edge_row[1], 0.0, 1.0)) if edge_row is not None and edge_width >= 4 else None,
+                "startTrimDeltaSec": float(np.clip(edge_row[2 if edge_width >= 4 else 0], -self.trim_clamp_sec, self.trim_clamp_sec)) if edge_row is not None and edge_width >= 2 else 0.0,
+                "endTrimDeltaSec": float(np.clip(edge_row[3 if edge_width >= 4 else 1], -self.trim_clamp_sec, self.trim_clamp_sec)) if edge_row is not None and edge_width >= 2 else 0.0,
             })
         return predictions
 
 
-def severe_outliers_for_summary(video_key: str, summary: Dict[str, object], frames: Sequence[Dict[str, object]] = ()) -> List[Dict[str, object]]:
+def severe_outliers_for_summary(
+    video_key: str,
+    summary: Dict[str, object],
+    frames: Sequence[Dict[str, object]] = (),
+    min_outlier_manual_duration_sec: float = 0.0,
+) -> List[Dict[str, object]]:
     severe_outliers: List[Dict[str, object]] = []
     metrics = summary.get("metrics") or {}
     manual_segments = [match.get("manual") for match in summary.get("matches", []) if isinstance(match.get("manual"), dict)]
@@ -836,7 +943,13 @@ def severe_outliers_for_summary(video_key: str, summary: Dict[str, object], fram
         severe_outliers.append({"type": "low-video-f1", "video": video_key, "metrics": metrics})
     for match in summary.get("matches", []):
         if isinstance(match, dict):
-            severe_outliers.extend(classify_match_outlier(video_key, match, frames, manual_segments))
+            severe_outliers.extend(classify_match_outlier(
+                video_key,
+                match,
+                frames,
+                manual_segments,
+                min_outlier_manual_duration_sec,
+            ))
     severe_outliers.extend(classify_prediction_outliers(video_key, summary, frames))
     return severe_outliers
 
@@ -973,11 +1086,23 @@ def apply_segment_filter_to_summary(
     frames_payload: Dict[str, object],
     runtime: SegmentFilterRuntime,
     repo_root: Path,
+    min_outlier_manual_duration_sec: float = 0.0,
+    suffix_override: Optional[str] = None,
+    include_threshold_adjustments: bool = True,
 ) -> Dict[str, object]:
     frames = frames_payload.get("frames", []) if isinstance(frames_payload, dict) else []
     predictions = runtime.predict(summary.get("segments") or [], frames, summary)
-    predictions_path = args.out_dir / f"{sample.video_key}.segment_filter_predictions.json"
-    out_path = args.out_dir / f"{sample.video_key}.segment_filter_summary.json"
+    if suffix_override is not None:
+        suffix = suffix_override
+    else:
+        suffix_parts: List[str] = []
+        if args.threshold_calibrator:
+            suffix_parts.append("threshold_calibrated")
+        if args.threshold_window_advisor:
+            suffix_parts.append("threshold_window")
+        suffix = f".{'.'.join(suffix_parts)}" if suffix_parts else ""
+    predictions_path = args.out_dir / f"{sample.video_key}{suffix}.segment_filter_predictions.json"
+    out_path = args.out_dir / f"{sample.video_key}{suffix}.segment_filter_summary.json"
     predictions_path.write_text(json.dumps({"predictions": predictions}, ensure_ascii=False, indent=2), encoding="utf-8")
     cmd = [
         args.node,
@@ -1008,6 +1133,11 @@ def apply_segment_filter_to_summary(
             "--ignore-ranges",
             ",".join(f"{float(item['startSec']):.3f}:{float(item['endSec']):.3f}" for item in sample.ignore_ranges),
         ])
+    if include_threshold_adjustments:
+        append_threshold_calibrator_args(cmd, args)
+        append_threshold_window_advisor_args(cmd, args)
+    if args.split_medley:
+        cmd.append("--split-medley")
     result = run_command(cmd, repo_root, args.command_timeout_sec)
     if result.returncode != 0:
         raise RuntimeError(f"segment filter smoothing failed for {sample.video_key}\n{tail_text(result.stdout)}\n{tail_text(result.stderr)}")
@@ -1022,15 +1152,21 @@ def apply_segment_filter_to_summary(
         "edgeMetaPath": str(runtime.edge_meta_path) if runtime.edge_session is not None else None,
         "keepThreshold": runtime.keep_threshold,
         "trimConfidenceThreshold": runtime.trim_threshold,
+        "edgeGateThreshold": runtime.edge_gate_threshold,
         "startEdgeTrimEnabled": not args.disable_start_edge_trim,
         "trimScale": runtime.trim_scale,
         "predictionsPath": str(predictions_path),
     })
     filtered_summary["segmentFilter"] = segment_filter
     filtered_summary["boundaryCandidates"] = boundary_candidates_for_segments(filtered_summary.get("segments") or [], frames) if args.boundary_candidates else []
-    filtered_summary["severeOutliers"] = severe_outliers_for_summary(sample.video_key, filtered_summary, frames)
+    filtered_summary["severeOutliers"] = severe_outliers_for_summary(
+        sample.video_key,
+        filtered_summary,
+        frames,
+        min_outlier_manual_duration_sec,
+    )
     filtered_summary["outlierReplay"] = build_outlier_replay(sample.video_key, filtered_summary, frames)
-    replay_path = args.out_dir / f"{sample.video_key}.outlier_replay.json"
+    replay_path = args.out_dir / f"{sample.video_key}{suffix}.outlier_replay.json"
     out_path.write_text(json.dumps(filtered_summary, ensure_ascii=False, indent=2), encoding="utf-8")
     replay_path.write_text(json.dumps(filtered_summary["outlierReplay"], ensure_ascii=False, indent=2), encoding="utf-8")
     return filtered_summary
@@ -1073,7 +1209,14 @@ def run_live_simulation(args: argparse.Namespace, sample: Sample, frames_path: P
 
 def evaluate_sample(args: argparse.Namespace, sample: Sample, repo_root: Path, segment_filter_runtime: Optional[SegmentFilterRuntime] = None) -> Dict[str, object]:
     frames_path = args.out_dir / f"{sample.video_key}.frames.json"
-    smoothing_path = args.out_dir / f"{sample.video_key}.smoothing_summary.json"
+    suffix_parts: List[str] = []
+    if args.threshold_calibrator:
+        suffix_parts.append("threshold_calibrated")
+    if args.threshold_window_advisor:
+        suffix_parts.append("threshold_window")
+    smoothing_suffix = f".{'.'.join(suffix_parts)}" if suffix_parts else ""
+    current_smoothing_path = args.out_dir / f"{sample.video_key}.smoothing_summary.json"
+    smoothing_path = args.out_dir / f"{sample.video_key}{smoothing_suffix}.smoothing_summary.json"
 
     if args.rebuild_diagnostics or not frames_path.exists():
         diagnose_cmd = [
@@ -1099,33 +1242,105 @@ def evaluate_sample(args: argparse.Namespace, sample: Sample, repo_root: Path, s
         if diagnose.returncode != 0:
             raise RuntimeError(f"diagnose failed for {sample.video_key}\n{tail_text(diagnose.stdout)}\n{tail_text(diagnose.stderr)}")
 
-    smoothing_cmd = [
-        args.node,
-        "tools/run_global_smoothing.mjs",
-        "--frames",
-        str(frames_path),
-        "--manual",
-        str(sample.manual_path),
-        "--out",
-        str(smoothing_path),
-        "--smoothing-profile",
-        args.smoothing_profile,
-    ]
-    if sample.ignore_ranges:
-        smoothing_cmd.extend([
-            "--ignore-ranges",
-            ",".join(f"{float(item['startSec']):.3f}:{float(item['endSec']):.3f}" for item in sample.ignore_ranges),
-        ])
+    def build_smoothing_cmd(
+        out_path: Path,
+        with_threshold_calibrator: bool,
+        with_threshold_window_advisor: bool,
+    ) -> List[str]:
+        cmd = [
+            args.node,
+            "tools/run_global_smoothing.mjs",
+            "--frames",
+            str(frames_path),
+            "--manual",
+            str(sample.manual_path),
+            "--out",
+            str(out_path),
+            "--smoothing-profile",
+            args.smoothing_profile,
+        ]
+        if sample.ignore_ranges:
+            cmd.extend([
+                "--ignore-ranges",
+                ",".join(f"{float(item['startSec']):.3f}:{float(item['endSec']):.3f}" for item in sample.ignore_ranges),
+            ])
+        if with_threshold_calibrator:
+            append_threshold_calibrator_args(cmd, args)
+        if with_threshold_window_advisor:
+            append_threshold_window_advisor_args(cmd, args)
+        if args.split_medley:
+            cmd.append("--split-medley")
+        return cmd
+
+    has_threshold_adjustment = bool(args.threshold_calibrator or args.threshold_window_advisor)
+    if has_threshold_adjustment and (
+        args.rebuild_diagnostics
+        or args.rebuild_smoothing
+        or not current_smoothing_path.exists()
+        or sample.ignore_ranges
+    ):
+        current = run_command(build_smoothing_cmd(current_smoothing_path, False, False), repo_root, args.command_timeout_sec)
+        if current.returncode != 0:
+            raise RuntimeError(f"baseline smoothing failed for {sample.video_key}\n{tail_text(current.stdout)}\n{tail_text(current.stderr)}")
+
     if args.rebuild_diagnostics or args.rebuild_smoothing or not smoothing_path.exists() or sample.ignore_ranges:
-        smoothing = run_command(smoothing_cmd, repo_root, args.command_timeout_sec)
+        smoothing = run_command(
+            build_smoothing_cmd(
+                smoothing_path,
+                bool(args.threshold_calibrator),
+                bool(args.threshold_window_advisor),
+            ),
+            repo_root,
+            args.command_timeout_sec,
+        )
         if smoothing.returncode != 0:
             raise RuntimeError(f"smoothing failed for {sample.video_key}\n{tail_text(smoothing.stdout)}\n{tail_text(smoothing.stderr)}")
 
     summary = load_json(smoothing_path)
+    baseline_summary = load_json(current_smoothing_path) if has_threshold_adjustment and current_smoothing_path.exists() else summary
     frames_payload_for_outliers = load_json(frames_path)
     frames_for_outliers = frames_payload_for_outliers.get("frames", []) if isinstance(frames_payload_for_outliers, dict) else []
-    baseline_metrics = summary.get("metrics") or {}
-    baseline_severe_outliers = severe_outliers_for_summary(sample.video_key, summary, frames_for_outliers)
+    min_outlier_manual_duration_sec = 0.0
+    if not args.include_short_manual_outliers:
+        min_outlier_manual_duration_sec = float(
+            segment_filter_runtime.min_segment_duration_sec
+            if segment_filter_runtime is not None
+            else DEFAULT_FILTER_POLICY["min_segment_duration_sec"]
+        )
+    baseline_metrics = baseline_summary.get("metrics") or {}
+    baseline_severe_outliers = severe_outliers_for_summary(
+        sample.video_key,
+        baseline_summary,
+        frames_for_outliers,
+        min_outlier_manual_duration_sec,
+    )
+    baseline_segment_filter_summary = None
+    baseline_segment_filter_summary_path = None
+    if segment_filter_runtime is not None and has_threshold_adjustment:
+        frames_payload = frames_payload_for_outliers
+        if not isinstance(frames_payload, dict):
+            raise RuntimeError(f"invalid frames payload for {sample.video_key}: {frames_path}")
+        baseline_segment_filter_summary = apply_segment_filter_to_summary(
+            args,
+            sample,
+            baseline_summary,
+            frames_payload,
+            segment_filter_runtime,
+            repo_root,
+            min_outlier_manual_duration_sec,
+            suffix_override=".baseline_segment_filter",
+            include_threshold_adjustments=False,
+        )
+        baseline_segment_filter_summary_path = str(args.out_dir / f"{sample.video_key}.baseline_segment_filter.segment_filter_summary.json")
+        baseline_summary = baseline_segment_filter_summary
+        baseline_metrics = baseline_summary.get("metrics") or {}
+        baseline_severe_outliers = baseline_summary.get("severeOutliers") or severe_outliers_for_summary(
+            sample.video_key,
+            baseline_summary,
+            frames_for_outliers,
+            min_outlier_manual_duration_sec,
+        )
+    baseline_outlier_type_counts = count_outlier_types(baseline_severe_outliers)
     active_summary = summary
     segment_filter_summary_path = None
     segment_filter_metrics = None
@@ -1134,10 +1349,25 @@ def evaluate_sample(args: argparse.Namespace, sample: Sample, repo_root: Path, s
         frames_payload = frames_payload_for_outliers
         if not isinstance(frames_payload, dict):
             raise RuntimeError(f"invalid frames payload for {sample.video_key}: {frames_path}")
-        active_summary = apply_segment_filter_to_summary(args, sample, summary, frames_payload, segment_filter_runtime, repo_root)
-        segment_filter_summary_path = str(args.out_dir / f"{sample.video_key}.segment_filter_summary.json")
+        active_summary = apply_segment_filter_to_summary(
+            args,
+            sample,
+            summary,
+            frames_payload,
+            segment_filter_runtime,
+            repo_root,
+            min_outlier_manual_duration_sec,
+        )
+        segment_filter_summary_path = str(args.out_dir / f"{sample.video_key}{smoothing_suffix}.segment_filter_summary.json")
         segment_filter_metrics = active_summary.get("metrics") or {}
         segment_filter_outliers = active_summary.get("severeOutliers") or []
+    active_severe_outliers = active_summary.get("severeOutliers") if segment_filter_runtime is not None else severe_outliers_for_summary(
+        sample.video_key,
+        active_summary,
+        frames_for_outliers,
+        min_outlier_manual_duration_sec,
+    )
+    active_outlier_type_counts = count_outlier_types(active_severe_outliers or [])
     live_simulation = run_live_simulation(args, sample, frames_path, repo_root)
 
     return {
@@ -1148,24 +1378,35 @@ def evaluate_sample(args: argparse.Namespace, sample: Sample, repo_root: Path, s
         "statsCachePath": str(sample.stats_cache_path),
         "ignoreRanges": list(sample.ignore_ranges),
         "evaluationIgnoredSec": active_summary.get("evaluationIgnoredSec") or summary.get("evaluationIgnoredSec") or 0,
+        "evaluationShortManualOutlierMinDurationSec": min_outlier_manual_duration_sec,
         "framesPath": str(frames_path),
         "summaryPath": str(smoothing_path),
+        "baselineSummaryPath": str(current_smoothing_path if has_threshold_adjustment else smoothing_path),
+        "baselineSegmentFilterSummaryPath": baseline_segment_filter_summary_path,
         "segmentFilterSummaryPath": segment_filter_summary_path,
-        "outlierReplayPath": str(args.out_dir / f"{sample.video_key}.outlier_replay.json") if segment_filter_runtime is not None else None,
+        "outlierReplayPath": str(args.out_dir / f"{sample.video_key}{smoothing_suffix}.outlier_replay.json") if segment_filter_runtime is not None else None,
         "metrics": active_summary.get("metrics") or {},
         "baselineMetrics": baseline_metrics,
         "segmentFilterMetrics": segment_filter_metrics,
         "rawModelMetrics": summary.get("rawModelMetrics") or {},
+        "thresholdCalibration": active_summary.get("thresholdCalibration") or summary.get("thresholdCalibration"),
+        "thresholdWindowAdvice": active_summary.get("thresholdWindowAdvice") or summary.get("thresholdWindowAdvice"),
         "method": active_summary.get("method"),
-        "baselineMethod": summary.get("method"),
+        "baselineMethod": baseline_summary.get("method"),
         "smoothingProfile": active_summary.get("smoothingProfile") or summary.get("smoothingProfile"),
         "smoothingVersion": summary.get("smoothingVersion"),
         "segmentCount": len(active_summary.get("segments") or []),
-        "baselineSegmentCount": len(summary.get("segments") or []),
-        "manualCount": len(summary.get("matches") or []),
+        "baselineSegmentCount": len(baseline_summary.get("segments") or []),
+        "manualCount": len(active_summary.get("matches") or summary.get("matches") or []),
         "liveSimulation": live_simulation,
-        "severeOutliers": active_summary.get("severeOutliers") if segment_filter_runtime is not None else baseline_severe_outliers,
+        "severeOutliers": active_severe_outliers,
         "baselineSevereOutliers": baseline_severe_outliers,
+        "baselineSevereOutlierCount": len(baseline_severe_outliers),
+        "activeSevereOutlierCount": len(active_severe_outliers or []),
+        "outlierCountDelta": len(active_severe_outliers or []) - len(baseline_severe_outliers),
+        "baselineOutlierTypeCounts": baseline_outlier_type_counts,
+        "activeOutlierTypeCounts": active_outlier_type_counts,
+        "outlierTypeCountDelta": diff_counts(active_outlier_type_counts, baseline_outlier_type_counts),
         "segmentFilterSevereOutliers": segment_filter_outliers,
     }
 
@@ -1320,6 +1561,13 @@ def main() -> None:
     severe_outliers = []
     for item in evaluated:
         severe_outliers.extend(item["severeOutliers"])
+    baseline_outlier_type_counts: Dict[str, int] = {}
+    active_outlier_type_counts: Dict[str, int] = {}
+    for item in evaluated:
+        for key, value in (item.get("baselineOutlierTypeCounts") or {}).items():
+            baseline_outlier_type_counts[key] = baseline_outlier_type_counts.get(key, 0) + int(value or 0)
+        for key, value in (item.get("activeOutlierTypeCounts") or {}).items():
+            active_outlier_type_counts[key] = active_outlier_type_counts.get(key, 0) + int(value or 0)
 
     payload = {
         "outDir": str(args.out_dir),
@@ -1330,14 +1578,31 @@ def main() -> None:
         "segmentFilterRequestedProfile": args.segment_filter_profile,
         "segmentFilterAssetProfileUsed": segment_filter_runtime.asset_profile_used if segment_filter_runtime else None,
         "edgeTrimAdvisorAssetProfileUsed": segment_filter_runtime.edge_asset_profile_used if segment_filter_runtime else None,
+        "thresholdCalibratorEnabled": bool(args.threshold_calibrator),
+        "thresholdCalibratorMode": args.threshold_calibrator,
+        "thresholdCalibratorModelDir": str(args.threshold_calibrator_model_dir),
+        "thresholdCalibratorProfile": args.threshold_calibrator_profile or args.smoothing_profile,
+        "requireThresholdCalibratorAssets": bool(args.require_threshold_calibrator_assets),
+        "thresholdWindowAdvisorEnabled": bool(args.threshold_window_advisor),
+        "thresholdWindowAdvisorMode": args.threshold_window_advisor,
+        "thresholdWindowAdvisorModelDir": str(args.threshold_window_advisor_model_dir),
+        "thresholdWindowAdvisorProfile": args.threshold_window_advisor_profile or args.smoothing_profile,
+        "requireThresholdWindowAdvisorAssets": bool(args.require_threshold_window_advisor_assets),
+        "splitMedley": bool(args.split_medley),
         "jobs": min(args.jobs, max(1, len(runnable))),
         "commandTimeoutSec": args.command_timeout_sec,
         "evaluatedCount": len(evaluated),
         "skippedCount": len(skipped),
         "failureCount": len(failures),
         "aggregateMetrics": aggregate_metrics(evaluated),
-        "baselineAggregateMetrics": aggregate_metrics([{**item, "metrics": item.get("baselineMetrics") or {}} for item in evaluated]) if segment_filter_runtime else None,
+        "baselineAggregateMetrics": aggregate_metrics([{**item, "metrics": item.get("baselineMetrics") or {}} for item in evaluated]) if (segment_filter_runtime or args.threshold_calibrator or args.threshold_window_advisor) else None,
         "segmentFilterAggregateMetrics": aggregate_metrics([{**item, "metrics": item.get("segmentFilterMetrics") or {}} for item in evaluated]) if segment_filter_runtime else None,
+        "baselineSevereOutlierCount": sum(int(item.get("baselineSevereOutlierCount") or 0) for item in evaluated),
+        "activeSevereOutlierCount": sum(int(item.get("activeSevereOutlierCount") or 0) for item in evaluated),
+        "outlierCountDelta": sum(int(item.get("outlierCountDelta") or 0) for item in evaluated),
+        "baselineOutlierTypeCounts": baseline_outlier_type_counts,
+        "activeOutlierTypeCounts": active_outlier_type_counts,
+        "outlierTypeCountDelta": diff_counts(active_outlier_type_counts, baseline_outlier_type_counts),
         "liveAggregateMetrics": aggregate_live_metrics(evaluated) if args.simulate_live else None,
         "videos": evaluated,
         "skipped": skipped,

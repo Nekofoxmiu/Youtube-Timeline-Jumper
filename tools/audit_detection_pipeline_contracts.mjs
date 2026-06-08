@@ -131,6 +131,12 @@ async function validateLiveRuntimeContract(repoRoot) {
     'Live smoothing must resolve profile from liveAnalysisMethod.'
   );
   assert(
+    /const LIVE_THRESHOLD_CALIBRATOR_ENABLED = true;/u.test(offscreenSource)
+      && /async function runLiveThresholdCalibration/u.test(offscreenSource)
+      && /thresholdCalibratorAssetNames\(assetProfile\)/u.test(offscreenSource),
+    'Live threshold calibrator must be wired through optional profile assets.'
+  );
+  assert(
     /provisionalSegments\.push\(\{ \.\.\.segment, provisional: true \}\);/u.test(offscreenSource)
       && /finalizeNewLiveSegments\(\s*session,\s*finalSegments,/u.test(offscreenSource),
     'Live provisional segments must stay separate from segment-filter finalization.'
@@ -149,12 +155,25 @@ async function validateLiveRuntimeContract(repoRoot) {
   const pcm30Profile = segmentFilterProfileForLiveAnalysisMethod('pcm-rollover-30min');
   const aed60Options = resolveSegmentFilterProfileOptions(aed60Profile, { finalizeAll: true });
   const pcm30Options = resolveSegmentFilterProfileOptions(pcm30Profile, { finalizeAll: true });
+  const calibratedOptions = resolveSegmentFilterProfileOptions(pcm30Profile, {
+    finalizeAll: true,
+    overrides: {
+      thresholdCalibration: {
+        applied: true,
+        segmentKeepThresholdDelta: 0.03,
+        trimConfidenceThresholdDelta: 0.02,
+      },
+    },
+  });
   assert(aed60Profile === 'live-realtime-aed60', 'AED60 method must map to live-realtime-aed60 finalizer profile.');
   assert(pcm30Profile === 'live-pcm30', 'PCM30 method must map to live-pcm30 finalizer profile.');
   assert(aed60Options.negativeStartTrimBoundaryScan === false, 'AED60 must not use PCM30 negative-start boundary scan.');
   assert(pcm30Options.negativeStartTrimBoundaryScan === true, 'PCM30 must use guarded negative-start boundary scan.');
-  assert(aed60Options.strongInstrumentalStartTrimEnabled === true, 'AED60 must keep guarded strong-instrumental long intro recovery enabled.');
+  assert(aed60Options.allowInstrumentalStartTrim === true, 'AED60 must keep ordinary instrumental intro recovery for real song intros.');
+  assert(aed60Options.strongInstrumentalStartTrimEnabled === true, 'AED60 must keep dampened strong-instrumental recovery for long real intros.');
+  assert(aed60Options.strongInstrumentalStartTrimScale < 1, 'AED60 strong-instrumental recovery must be dampened to avoid full BGM overrun.');
   assert(pcm30Options.strongInstrumentalStartTrimEnabled === false, 'PCM30 must not inherit AED60-only strong-instrumental long intro recovery.');
+  assert(pcm30Options.allowInstrumentalStartTrim === true, 'PCM30 may keep instrumental start evidence because it has longer context and boundary scan.');
   assert(
     aed60Options.weakSongSideInstrumentalStartTrimTemporalThreshold === 0.7,
     'AED60 must keep weak song-side instrumental start extension guard enabled.'
@@ -162,6 +181,11 @@ async function validateLiveRuntimeContract(repoRoot) {
   assert(
     resolveShortPrefixRestartStartRefinementOptions(aed60Profile).enabled === true,
     'AED60 must keep guarded short-prefix restart enabled after the AED60 full gate.'
+  );
+  assert(
+    calibratedOptions.keepThreshold > pcm30Options.keepThreshold
+      && calibratedOptions.trimConfidenceThreshold > pcm30Options.trimConfidenceThreshold,
+    'Segment filter resolver must apply threshold calibration deltas.'
   );
   return {
     defaultLiveAnalysisMethod: 'aed-cache-60s',
@@ -178,6 +202,9 @@ async function validateLiveRuntimeContract(repoRoot) {
     aed60LargeEndTrimScale: aed60Options.largeEndTrimScale,
     pcm30LargeEndTrimScale: pcm30Options.largeEndTrimScale,
     aed60WeakSongSideInstrumentalStartTrim: {
+      allowInstrumentalStartTrim: aed60Options.allowInstrumentalStartTrim,
+      strongInstrumentalStartTrimEnabled: aed60Options.strongInstrumentalStartTrimEnabled,
+      strongInstrumentalStartTrimScale: aed60Options.strongInstrumentalStartTrimScale,
       temporalThreshold: aed60Options.weakSongSideInstrumentalStartTrimTemporalThreshold,
       reducedScale: aed60Options.weakSongSideInstrumentalStartTrimScale,
     },

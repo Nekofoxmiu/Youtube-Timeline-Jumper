@@ -25,6 +25,22 @@ import {
   runSegmentFilterPipeline,
   segmentFilterAssetNames,
 } from '../../lib/songDetection/segmentFilter.js';
+import {
+  applyThresholdCalibrationToFrames,
+  createHeuristicThresholdCalibration,
+  loadThresholdCalibratorModel,
+  noThresholdCalibration,
+  normalizeThresholdCalibratorProfile,
+  runThresholdCalibratorModel,
+  thresholdCalibratorAssetNames,
+} from '../../lib/songDetection/thresholdCalibrator.js';
+import {
+  loadThresholdWindowAdvisorModel,
+  noThresholdWindowAdvice,
+  normalizeThresholdWindowAdvisorProfile,
+  runThresholdWindowAdvisorModel,
+  thresholdWindowAdvisorAssetNames,
+} from '../../lib/songDetection/thresholdWindowAdvisor.js';
 
 const DEFAULT_SAMPLE_RATE = 48000;
 const DEFAULT_WORKLET_CHUNK_FRAMES = 2048;
@@ -736,6 +752,12 @@ async function loadFinalizerRuntimes({
   enabled,
   modelDir = 'models/fireredvad/aed',
   assetProfile = 'default',
+  thresholdCalibratorEnabled = false,
+  thresholdCalibratorModelDir = modelDir,
+  thresholdCalibratorMode = '',
+  thresholdWindowAdvisorEnabled = false,
+  thresholdWindowAdvisorModelDir = modelDir,
+  thresholdWindowAdvisorMode = '',
 }) {
   if (!enabled) return null;
   const ort = globalThis.ort;
@@ -768,8 +790,43 @@ async function loadFinalizerRuntimes({
     ? assetProfile
     : 'default';
   const modelPath = (name) => toFileUrl(resolve(modelDir, name));
+  const loadThresholdCalibratorRuntime = async () => {
+    if (!thresholdCalibratorEnabled || String(thresholdCalibratorMode).trim().toLowerCase() === 'heuristic') {
+      return null;
+    }
+    const thresholdNames = thresholdCalibratorAssetNames(assetProfile);
+    const modelPath = resolve(thresholdCalibratorModelDir, thresholdNames.model);
+    const metaPath = resolve(thresholdCalibratorModelDir, thresholdNames.meta);
+    if (!existsSync(modelPath) || !existsSync(metaPath)) return null;
+    return loadThresholdCalibratorModel({
+      ort,
+      assetProfile,
+      modelUrl: toFileUrl(modelPath),
+      metaUrl: toFileUrl(metaPath),
+      requireAssetProfile: requireProfileAssets,
+      executionProviders: ['wasm'],
+    }).catch(() => null);
+  };
+  const loadThresholdWindowAdvisorRuntime = async () => {
+    if (!thresholdWindowAdvisorEnabled || String(thresholdWindowAdvisorMode).trim().toLowerCase() === 'heuristic') {
+      return null;
+    }
+    const thresholdNames = thresholdWindowAdvisorAssetNames(assetProfile);
+    const modelFile = resolve(thresholdWindowAdvisorModelDir, thresholdNames.model);
+    const metaFile = resolve(thresholdWindowAdvisorModelDir, thresholdNames.meta);
+    if (!existsSync(modelFile) || !existsSync(metaFile)) return null;
+    return loadThresholdWindowAdvisorModel({
+      ort,
+      assetProfile,
+      modelUrl: toFileUrl(modelFile),
+      metaUrl: toFileUrl(metaFile),
+      requireAssetProfile: requireProfileAssets,
+      executionProviders: ['wasm'],
+    }).catch(() => null);
+  };
+
   try {
-    const [segmentFilter, edgeTrimAdvisor] = await Promise.all([
+    const [segmentFilter, edgeTrimAdvisor, thresholdCalibrator, thresholdWindowAdvisor] = await Promise.all([
       loadSegmentFilterModel({
         ort,
         assetProfile: segmentFilterProfileUsed,
@@ -786,8 +843,10 @@ async function loadFinalizerRuntimes({
         requireAssetProfile: requireProfileAssets,
         executionProviders: ['wasm'],
       }).catch(() => null),
+      loadThresholdCalibratorRuntime(),
+      loadThresholdWindowAdvisorRuntime(),
     ]);
-    return { segmentFilter, edgeTrimAdvisor };
+    return { segmentFilter, edgeTrimAdvisor, thresholdCalibrator, thresholdWindowAdvisor };
   } catch (error) {
     console.warn('[pcm-live-sim] finalizer unavailable; using heuristic final segments.', error);
     return null;
@@ -825,6 +884,7 @@ async function applyFinalizer(runtimes, segments, frames, smoothing, {
   skipSegmentFilter = false,
   disableEdgeTrim = false,
   speechResetEndRefinement = true,
+  thresholdCalibration = null,
 }) {
   const normalized = uniqueSegments(segments);
   if (skipSegmentFilter || !runtimes?.segmentFilter || !normalized.length) {
@@ -867,6 +927,17 @@ async function applyFinalizer(runtimes, segments, frames, smoothing, {
       startTrimMinAbsSec: liveStartEdgeTrimMinAbsSec,
     },
   });
+  if (thresholdCalibration?.applied) {
+    options.keepThreshold = Math.max(
+      0.01,
+      Math.min(0.99, Number(options.keepThreshold) + Number(thresholdCalibration.segmentKeepThresholdDelta || 0))
+    );
+    options.trimConfidenceThreshold = Math.max(
+      0.01,
+      Math.min(0.99, Number(options.trimConfidenceThreshold) + Number(thresholdCalibration.trimConfidenceThresholdDelta || 0))
+    );
+    options.thresholdCalibration = thresholdCalibration;
+  }
   const applyOptions = {
     ...options,
     startTrimEvidenceFrames: frames,
@@ -910,6 +981,8 @@ async function applyFinalizer(runtimes, segments, frames, smoothing, {
       liveEndTrimEvidenceGuardEnabled: Boolean(options.endTrimEvidenceGuard),
       finalizerProfile: liveProfile,
       keepThreshold: options.keepThreshold,
+      trimConfidenceThreshold: options.trimConfidenceThreshold,
+      thresholdCalibration,
       liveFinalKeepThreshold: finalizeAll ? options.keepThreshold : null,
       startEdgeTrimEnabled: liveStartEdgeTrimEnabled,
       startEdgeTrimScale: liveStartEdgeTrimScale,
@@ -973,7 +1046,7 @@ async function streamFfmpegPcm({
 
 const args = parseArgs(process.argv);
 if (!args.audio || !args.out) {
-  throw new Error('Usage: node tools/live/simulate_live_pcm_detection.mjs --audio <audio.m4a/mp4> --out <summary.json> [--manual <manual.txt>] [--live-method aed-cache-60s|pcm-rollover-30min] [--segment-filter-model-dir models/fireredvad/aed] [--segment-filter-profile default|live-pcm30|live-realtime-aed60] [--require-profile-assets] [--start-sec 0] [--end-sec 600] [--ffmpeg ffmpeg] [--sample-rate 48000] [--chunk-frames 2048] [--report-step-sec 5] [--lookahead-sec 180] [--min-segment-duration-sec 90] [--stall-insertions atSec:durationSec,...] [--gate-stalls] [--snapshot-unavailable-insertions atSec:durationSec,...] [--ignore-ranges startSec:endSec,...] [--no-segment-filter] [--enable-start-edge-trim] [--disable-start-edge-trim] [--start-edge-trim-scale 1] [--start-edge-trim-min-abs-sec 2] [--disable-speech-reset-end-refinement] [--include-frames] [--include-checkpoints]');
+  throw new Error('Usage: node tools/live/simulate_live_pcm_detection.mjs --audio <audio.m4a/mp4> --out <summary.json> [--manual <manual.txt>] [--live-method aed-cache-60s|pcm-rollover-30min] [--segment-filter-model-dir models/fireredvad/aed] [--segment-filter-profile default|live-pcm30|live-realtime-aed60] [--threshold-calibrator model|heuristic] [--threshold-calibrator-profile live-pcm30|live-realtime-aed60] [--threshold-window-advisor model] [--threshold-window-advisor-profile live-pcm30|live-realtime-aed60] [--require-profile-assets] [--start-sec 0] [--end-sec 600] [--ffmpeg ffmpeg] [--sample-rate 48000] [--chunk-frames 2048] [--report-step-sec 5] [--lookahead-sec 180] [--min-segment-duration-sec 90] [--stall-insertions atSec:durationSec,...] [--gate-stalls] [--snapshot-unavailable-insertions atSec:durationSec,...] [--ignore-ranges startSec:endSec,...] [--no-segment-filter] [--enable-start-edge-trim] [--disable-start-edge-trim] [--start-edge-trim-scale 1] [--start-edge-trim-min-abs-sec 2] [--disable-speech-reset-end-refinement] [--include-frames] [--include-checkpoints]');
 }
 
 const audio = String(args.audio);
@@ -1008,6 +1081,18 @@ const liveStartEdgeTrimMinAbsSec = Math.max(
 );
 const speechResetEndRefinement = !Boolean(args['disable-speech-reset-end-refinement']);
 const segmentFilterModelDir = String(args['segment-filter-model-dir'] || 'models/fireredvad/aed');
+const thresholdCalibratorEnabled = Boolean(args['threshold-calibrator']);
+const thresholdCalibratorMode = String(args['threshold-calibrator'] || '').trim().toLowerCase();
+const thresholdCalibratorModelDir = String(args['threshold-calibrator-model-dir'] || segmentFilterModelDir);
+const thresholdCalibratorProfile = normalizeThresholdCalibratorProfile(
+  args['threshold-calibrator-profile'] || segmentFilterAssetProfile
+);
+const thresholdWindowAdvisorEnabled = Boolean(args['threshold-window-advisor']);
+const thresholdWindowAdvisorMode = String(args['threshold-window-advisor'] || '').trim().toLowerCase();
+const thresholdWindowAdvisorModelDir = String(args['threshold-window-advisor-model-dir'] || segmentFilterModelDir);
+const thresholdWindowAdvisorProfile = normalizeThresholdWindowAdvisorProfile(
+  args['threshold-window-advisor-profile'] || segmentFilterAssetProfile
+);
 const requireProfileAssets = Boolean(args['require-profile-assets']);
 const stallInsertions = parseStallInsertions(args['stall-insertions']);
 const gateStalls = Boolean(args['gate-stalls']);
@@ -1027,6 +1112,12 @@ const finalizerRuntimes = await loadFinalizerRuntimes({
   enabled: segmentFilterEnabled,
   modelDir: segmentFilterModelDir,
   assetProfile: segmentFilterAssetProfile,
+  thresholdCalibratorEnabled,
+  thresholdCalibratorModelDir,
+  thresholdCalibratorMode,
+  thresholdWindowAdvisorEnabled,
+  thresholdWindowAdvisorModelDir,
+  thresholdWindowAdvisorMode,
 });
 assertRequiredProfileAssets({
   enabled: segmentFilterEnabled,
@@ -1034,6 +1125,22 @@ assertRequiredProfileAssets({
   requestedProfile: segmentFilterAssetProfile,
   runtimes: finalizerRuntimes,
 });
+if (
+  thresholdCalibratorEnabled
+  && requireProfileAssets
+  && thresholdCalibratorMode !== 'heuristic'
+  && !finalizerRuntimes?.thresholdCalibrator
+) {
+  throw new Error(`Required threshold calibrator profile asset was not loaded for "${thresholdCalibratorProfile}".`);
+}
+if (
+  thresholdWindowAdvisorEnabled
+  && requireProfileAssets
+  && thresholdWindowAdvisorMode !== 'heuristic'
+  && !finalizerRuntimes?.thresholdWindowAdvisor
+) {
+  throw new Error(`Required threshold window advisor profile asset was not loaded for "${thresholdWindowAdvisorProfile}".`);
+}
 
 const initialAnalysisStartOriginSec = computeNextIntegerSecond(startSec);
 let activeAnalysisOriginSec = initialAnalysisStartOriginSec;
@@ -1429,15 +1536,48 @@ if (activeRangeOpen) {
 
 let finalSegments = uniqueSegments([...completedSegments, ...finalizedState.segments]);
 let globalFinalizationFilter = null;
-const fullContextSmoothing = frames.length
-  ? smoothFireRedAnalyses(frames, finalNowSec, {
+let thresholdCalibration = noThresholdCalibration(thresholdCalibratorEnabled ? 'not-run' : 'disabled', segmentFilterAssetProfile);
+let thresholdWindowAdvice = noThresholdWindowAdvice(thresholdWindowAdvisorEnabled ? 'not-run' : 'disabled', thresholdWindowAdvisorProfile);
+let finalizationFrames = frames;
+if (thresholdCalibratorEnabled && frames.length) {
+  if (thresholdCalibratorMode === 'heuristic') {
+    thresholdCalibration = createHeuristicThresholdCalibration(frames, {
+      profile: thresholdCalibratorProfile,
+      stage: 'live-final',
+    });
+  } else if (finalizerRuntimes?.thresholdCalibrator) {
+    thresholdCalibration = await runThresholdCalibratorModel(finalizerRuntimes.thresholdCalibrator, frames, {
+      profile: thresholdCalibratorProfile,
+      stage: 'live-final',
+    });
+  } else {
+    thresholdCalibration = noThresholdCalibration('asset-missing', thresholdCalibratorProfile);
+  }
+  finalizationFrames = applyThresholdCalibrationToFrames(frames, thresholdCalibration).frames;
+}
+if (thresholdWindowAdvisorEnabled && finalizationFrames.length) {
+  if (thresholdWindowAdvisorMode === 'heuristic') {
+    thresholdWindowAdvice = noThresholdWindowAdvice('heuristic-unavailable', thresholdWindowAdvisorProfile);
+  } else if (finalizerRuntimes?.thresholdWindowAdvisor) {
+    const windowResult = await runThresholdWindowAdvisorModel(finalizerRuntimes.thresholdWindowAdvisor, finalizationFrames, {
+      profile: thresholdWindowAdvisorProfile,
+      stage: 'live-final',
+    });
+    finalizationFrames = windowResult.frames || finalizationFrames;
+    thresholdWindowAdvice = windowResult.advice || noThresholdWindowAdvice('not-run', thresholdWindowAdvisorProfile);
+  } else {
+    thresholdWindowAdvice = noThresholdWindowAdvice('asset-missing', thresholdWindowAdvisorProfile);
+  }
+}
+const fullContextSmoothing = finalizationFrames.length
+  ? smoothFireRedAnalyses(finalizationFrames, finalNowSec, {
     startSec: initialAnalysisStartOriginSec,
     minSegmentDurationSec,
     smoothingProfile: segmentFilterAssetProfile,
   })
   : null;
 if (completedAnalysisRanges.length && finalSegments.length && segmentFilterEnabled && fullContextSmoothing) {
-  globalFinalizationFilter = await applyFinalizer(finalizerRuntimes, finalSegments, frames, fullContextSmoothing, {
+  globalFinalizationFilter = await applyFinalizer(finalizerRuntimes, finalSegments, finalizationFrames, fullContextSmoothing, {
     currentTimeSec: finalNowSec,
     finalCutoffSec: finalNowSec,
     minSegmentDurationSec,
@@ -1446,6 +1586,7 @@ if (completedAnalysisRanges.length && finalSegments.length && segmentFilterEnabl
     skipSegmentFilter: false,
     disableEdgeTrim: true,
     speechResetEndRefinement,
+    thresholdCalibration,
   });
   finalSegments = uniqueSegments(globalFinalizationFilter.segments);
 }
@@ -1463,13 +1604,14 @@ const evaluationIgnoreRanges = mergeEvaluationIgnoreRanges([
   })),
 ]);
 const frameTimes = frames.map((frame) => Number(frame.timeSec) || 0);
-const predictedLabels = labelsFromSegments(frameTimes, finalSegments);
-const manualLabels = labelsFromSegments(frameTimes, evaluationManual);
-const rawModelLabels = frames.map((frame) => {
+const finalFrameTimes = finalizationFrames.map((frame) => Number(frame.timeSec) || 0);
+const predictedLabels = labelsFromSegments(finalFrameTimes, finalSegments);
+const manualLabels = labelsFromSegments(finalFrameTimes, evaluationManual);
+const rawModelLabels = finalizationFrames.map((frame) => {
   const threshold = Number(frame.temporalHeadThreshold) || 0.75;
   return Number(frame.temporalHeadProbability ?? frame.songProbability) >= threshold ? 1 : 0;
 });
-const evaluationMask = frameTimes.map((timeSec) => (
+const evaluationMask = finalFrameTimes.map((timeSec) => (
   !evaluationIgnoreRanges.some((range) => timeSec >= range.startSec && timeSec < range.endSec)
 ));
 const filterByEvaluationMask = (values) => values.filter((_, index) => evaluationMask[index]);
@@ -1518,6 +1660,14 @@ const summary = {
     segmentFilterEnabled,
     segmentFilterModelDir,
     segmentFilterAssetProfile,
+    thresholdCalibratorEnabled,
+    thresholdCalibratorMode,
+    thresholdCalibratorModelDir,
+    thresholdCalibratorProfile,
+    thresholdWindowAdvisorEnabled,
+    thresholdWindowAdvisorMode,
+    thresholdWindowAdvisorModelDir,
+    thresholdWindowAdvisorProfile,
     smoothingProfile: segmentFilterAssetProfile,
     requireProfileAssets,
     speechResetEndRefinement,
@@ -1525,6 +1675,8 @@ const summary = {
     edgeTrimAdvisorLoaded: Boolean(finalizerRuntimes?.edgeTrimAdvisor),
     segmentFilterAssetProfileUsed: finalizerRuntimes?.segmentFilter?.assetProfile || null,
     edgeTrimAdvisorAssetProfileUsed: finalizerRuntimes?.edgeTrimAdvisor?.assetProfile || null,
+    thresholdCalibratorAssetProfileUsed: finalizerRuntimes?.thresholdCalibrator?.assetProfile || null,
+    thresholdWindowAdvisorAssetProfileUsed: finalizerRuntimes?.thresholdWindowAdvisor?.assetProfile || null,
   },
   runtimeInfo: detector.getRuntimeInfo(),
   detectorVersion: detector.getDetectorVersion(),
@@ -1538,6 +1690,8 @@ const summary = {
   evaluationIgnoredSec: roundNumber(ignoredEvaluationFrameCount * DEFAULT_HOP_SEC, 3),
   finalSegmentCount: finalSegments.length,
   finalSegments,
+  thresholdCalibration,
+  thresholdWindowAdvice,
   smoothingProfile: fullContextSmoothing?.smoothingProfile || segmentFilterAssetProfile,
   smoothingMethod: fullContextSmoothing?.method || null,
   trackerSegments: fullContextSmoothing?.trackerSegments || [],

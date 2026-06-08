@@ -7,6 +7,10 @@ const DEFAULT_VARIANTS = ['pcm-current', 'pcm-no-filter', 'aed60-current'];
 const CANDIDATE_CURRENT_BASELINE = Object.freeze({
   'pcm-candidate-model': 'pcm-current',
   'aed60-candidate-model': 'aed60-current',
+  'pcm-calibrated': 'pcm-current',
+  'aed60-calibrated': 'aed60-current',
+  'pcm-window-advisor': 'pcm-current',
+  'aed60-window-advisor': 'aed60-current',
 });
 const VARIANTS = Object.freeze({
   'pcm-current': {
@@ -45,10 +49,38 @@ const VARIANTS = Object.freeze({
     liveMethod: 'pcm-rollover-30min',
     segmentFilter: false,
   },
+  'pcm-calibrated': {
+    suffix: 'pcm_threshold_calibrated',
+    liveMethod: 'pcm-rollover-30min',
+    segmentFilter: true,
+    thresholdCalibrator: true,
+    thresholdCalibratorProfile: 'live-pcm30',
+  },
+  'pcm-window-advisor': {
+    suffix: 'pcm_threshold_window_advisor',
+    liveMethod: 'pcm-rollover-30min',
+    segmentFilter: true,
+    thresholdWindowAdvisor: true,
+    thresholdWindowAdvisorProfile: 'live-pcm30',
+  },
   'aed60-current': {
     suffix: 'aed60_overlap60',
     liveMethod: 'aed-cache-60s',
     segmentFilter: true,
+  },
+  'aed60-calibrated': {
+    suffix: 'aed60_threshold_calibrated',
+    liveMethod: 'aed-cache-60s',
+    segmentFilter: true,
+    thresholdCalibrator: true,
+    thresholdCalibratorProfile: 'live-realtime-aed60',
+  },
+  'aed60-window-advisor': {
+    suffix: 'aed60_threshold_window_advisor',
+    liveMethod: 'aed-cache-60s',
+    segmentFilter: true,
+    thresholdWindowAdvisor: true,
+    thresholdWindowAdvisorProfile: 'live-realtime-aed60',
   },
   'aed60-current-no-start-trim': {
     suffix: 'aed60_overlap60_no_start_trim',
@@ -381,6 +413,26 @@ async function runVariant({ cwd, sample, variantName, variant, outDir, options }
   if (options.segmentFilterProfile) args.push('--segment-filter-profile', options.segmentFilterProfile);
   if (!variant.segmentFilter) args.push('--no-segment-filter');
   if (options.requireProfileAssets && variant.segmentFilter) args.push('--require-profile-assets');
+  if (variant.thresholdCalibrator) {
+    args.push('--threshold-calibrator', options.thresholdCalibratorMode);
+    args.push(
+      '--threshold-calibrator-profile',
+      options.thresholdCalibratorProfile || variant.thresholdCalibratorProfile || options.segmentFilterProfile || 'live-pcm30'
+    );
+    if (options.thresholdCalibratorModelDir) {
+      args.push('--threshold-calibrator-model-dir', options.thresholdCalibratorModelDir);
+    }
+  }
+  if (variant.thresholdWindowAdvisor) {
+    args.push('--threshold-window-advisor', options.thresholdWindowAdvisorMode);
+    args.push(
+      '--threshold-window-advisor-profile',
+      options.thresholdWindowAdvisorProfile || variant.thresholdWindowAdvisorProfile || options.segmentFilterProfile || 'live-pcm30'
+    );
+    if (options.thresholdWindowAdvisorModelDir) {
+      args.push('--threshold-window-advisor-model-dir', options.thresholdWindowAdvisorModelDir);
+    }
+  }
   if (variant.disableSpeechResetEndRefinement) args.push('--disable-speech-reset-end-refinement');
   if (variant.enableStartEdgeTrim) {
     args.push('--enable-start-edge-trim');
@@ -427,6 +479,7 @@ function buildRow({ sample, variantName, result, options }) {
     severeOutlierCount: Array.isArray(result.summary.severeOutliers)
       ? result.summary.severeOutliers.length
       : 0,
+    outlierTypeCounts: countOutlierTypes(result.summary.severeOutliers),
     perSongDeviationIssueCount: perSongDeviationSummary.issueCount,
     perSongDeviationAffectedSongCount: perSongDeviationSummary.affectedSongCount,
     perSongDeviationPassed: perSongDeviationSummary.passed,
@@ -439,6 +492,14 @@ function buildRow({ sample, variantName, result, options }) {
     segmentFilterAssetProfile: result.summary.params?.segmentFilterAssetProfile || null,
     segmentFilterAssetProfileUsed: result.summary.params?.segmentFilterAssetProfileUsed || null,
     edgeTrimAdvisorAssetProfileUsed: result.summary.params?.edgeTrimAdvisorAssetProfileUsed || null,
+    thresholdCalibratorEnabled: Boolean(result.summary.params?.thresholdCalibratorEnabled),
+    thresholdCalibratorProfile: result.summary.params?.thresholdCalibratorProfile || null,
+    thresholdCalibratorAssetProfileUsed: result.summary.params?.thresholdCalibratorAssetProfileUsed || null,
+    thresholdCalibration: result.summary.thresholdCalibration || null,
+    thresholdWindowAdvisorEnabled: Boolean(result.summary.params?.thresholdWindowAdvisorEnabled),
+    thresholdWindowAdvisorProfile: result.summary.params?.thresholdWindowAdvisorProfile || null,
+    thresholdWindowAdvisorAssetProfileUsed: result.summary.params?.thresholdWindowAdvisorAssetProfileUsed || null,
+    thresholdWindowAdvice: result.summary.thresholdWindowAdvice || null,
     requireProfileAssets: Boolean(result.summary.params?.requireProfileAssets),
   };
 }
@@ -604,6 +665,15 @@ function classifyPerSongDeviations(sample, variantName, summary, options) {
   };
 }
 
+function countOutlierTypes(outliers) {
+  const counts = {};
+  for (const outlier of Array.isArray(outliers) ? outliers : []) {
+    const type = String(outlier?.type || 'unknown').trim() || 'unknown';
+    counts[type] = (counts[type] || 0) + 1;
+  }
+  return counts;
+}
+
 function aggregate(rows, variantName) {
   const selected = rows.filter((row) => row.variant === variantName && row.metrics);
   const expectedNoSongRows = rows.filter((row) => row.variant === variantName && row.expectedNoSong);
@@ -616,9 +686,15 @@ function aggregate(rows, variantName) {
   let perSongDeviationIssueCount = 0;
   let perSongDeviationAffectedSongCount = 0;
   let perSongDeviationFailedRowCount = 0;
+  let severeOutlierCount = 0;
+  const outlierTypeCounts = {};
   for (const row of selected) {
     for (const key of Object.keys(totals)) totals[key] += Math.round(finite(row.metrics[key]));
     meanF1 += finite(row.metrics.f1);
+    severeOutlierCount += finite(row.severeOutlierCount, 0);
+    for (const [type, count] of Object.entries(row.outlierTypeCounts || {})) {
+      outlierTypeCounts[type] = (outlierTypeCounts[type] || 0) + finite(count, 0);
+    }
     perSongDeviationIssueCount += finite(row.perSongDeviationIssueCount, 0);
     perSongDeviationAffectedSongCount += finite(row.perSongDeviationAffectedSongCount, 0);
     if (row.perSongDeviationPassed === false) perSongDeviationFailedRowCount += 1;
@@ -648,6 +724,8 @@ function aggregate(rows, variantName) {
     expectedNoSongCount: expectedNoSongRows.length,
     expectedNoSongPredictedSec,
     expectedNoSongDurationSec,
+    severeOutlierCount,
+    outlierTypeCounts,
     perSongDeviationIssueCount,
     perSongDeviationAffectedSongCount,
     perSongDeviationFailedRowCount,
@@ -710,6 +788,37 @@ function buildCandidateCurrentNoSongRegression(aggregates, variantNames, maxNoSo
     .filter((row) => row.comparable);
 }
 
+function buildCandidateCurrentOutlierRegression(aggregates, variantNames) {
+  return variantNames
+    .filter((name) => CANDIDATE_CURRENT_BASELINE[name] && aggregates[name] && aggregates[CANDIDATE_CURRENT_BASELINE[name]])
+    .map((name) => {
+      const baselineName = CANDIDATE_CURRENT_BASELINE[name];
+      const baseline = aggregates[baselineName];
+      const candidate = aggregates[name];
+      const allTypes = new Set([
+        ...Object.keys(baseline.outlierTypeCounts || {}),
+        ...Object.keys(candidate.outlierTypeCounts || {}),
+      ]);
+      const typeDeltas = {};
+      let typeRegression = false;
+      for (const type of allTypes) {
+        const delta = finite(candidate.outlierTypeCounts?.[type], 0) - finite(baseline.outlierTypeCounts?.[type], 0);
+        typeDeltas[type] = delta;
+        if (delta > 0) typeRegression = true;
+      }
+      const severeOutlierDelta = finite(candidate.severeOutlierCount, 0) - finite(baseline.severeOutlierCount, 0);
+      return {
+        baseline: baselineName,
+        candidate: name,
+        baselineSevereOutlierCount: baseline.severeOutlierCount,
+        candidateSevereOutlierCount: candidate.severeOutlierCount,
+        severeOutlierDelta,
+        outlierTypeCountDelta: typeDeltas,
+        passed: severeOutlierDelta <= 0 && !typeRegression,
+      };
+    });
+}
+
 function csvEscape(value) {
   const text = String(value ?? '');
   return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
@@ -740,6 +849,16 @@ async function main() {
     minSegmentDurationSec: finite(args['min-segment-duration-sec'], 90),
     segmentFilterModelDir: args['segment-filter-model-dir'] ? String(args['segment-filter-model-dir']) : null,
     segmentFilterProfile: args['segment-filter-profile'] ? String(args['segment-filter-profile']) : null,
+    thresholdCalibratorModelDir: args['threshold-calibrator-model-dir']
+      ? String(args['threshold-calibrator-model-dir'])
+      : (args['segment-filter-model-dir'] ? String(args['segment-filter-model-dir']) : null),
+    thresholdCalibratorMode: args['threshold-calibrator-mode'] ? String(args['threshold-calibrator-mode']) : 'model',
+    thresholdCalibratorProfile: args['threshold-calibrator-profile'] ? String(args['threshold-calibrator-profile']) : null,
+    thresholdWindowAdvisorModelDir: args['threshold-window-advisor-model-dir']
+      ? String(args['threshold-window-advisor-model-dir'])
+      : (args['segment-filter-model-dir'] ? String(args['segment-filter-model-dir']) : null),
+    thresholdWindowAdvisorMode: args['threshold-window-advisor-mode'] ? String(args['threshold-window-advisor-mode']) : 'model',
+    thresholdWindowAdvisorProfile: args['threshold-window-advisor-profile'] ? String(args['threshold-window-advisor-profile']) : null,
     candidateSegmentFilterModelDir: args['candidate-segment-filter-model-dir']
       ? String(args['candidate-segment-filter-model-dir'])
       : null,
@@ -814,6 +933,10 @@ async function main() {
     variantNames,
     finite(args['max-no-song-increase-sec'], 0.001)
   );
+  const candidateCurrentOutlierRegression = buildCandidateCurrentOutlierRegression(
+    aggregates,
+    variantNames
+  );
   const perSongDeviationIssues = rows.flatMap((row) => (
     Array.isArray(row.perSongDeviationSummary?.issues) ? row.perSongDeviationSummary.issues : []
   ));
@@ -839,6 +962,7 @@ async function main() {
     regression,
     candidateCurrentRegression,
     candidateCurrentNoSongRegression,
+    candidateCurrentOutlierRegression,
     perSongDeviationGate: {
       baselineVariant: baselineVariantForPerSongGate,
       maxStartDeltaSec: options.perSongMaxStartDeltaSec,
@@ -854,7 +978,7 @@ async function main() {
   await writeFile(resolve(outDir, 'live_pcm_ab_summary.json'), JSON.stringify(payload, null, 2), 'utf8');
 
   const csvLines = [
-    'sample,variant,f1,precision,recall,tp,fp,fn,tn,segments,severeOutlierCount,perSongDeviationIssueCount,perSongDeviationAffectedSongCount,perSongDeviationPassed,evaluationManualCount,evaluationSkippedShortManualCount,evaluationIgnoredSec,expectedNoSong,predictedSongSec,maxPredictedSongSec,noSongPassed,stopCheckpointSec,reused,elapsedMs,modelDir,segmentFilterAssetProfile,segmentFilterAssetProfileUsed,edgeTrimAdvisorAssetProfileUsed,requireProfileAssets,output',
+    'sample,variant,f1,precision,recall,tp,fp,fn,tn,segments,severeOutlierCount,outlierTypeCounts,perSongDeviationIssueCount,perSongDeviationAffectedSongCount,perSongDeviationPassed,evaluationManualCount,evaluationSkippedShortManualCount,evaluationIgnoredSec,expectedNoSong,predictedSongSec,maxPredictedSongSec,noSongPassed,stopCheckpointSec,reused,elapsedMs,modelDir,segmentFilterAssetProfile,segmentFilterAssetProfileUsed,edgeTrimAdvisorAssetProfileUsed,thresholdCalibratorEnabled,thresholdCalibratorProfile,thresholdCalibratorAssetProfileUsed,thresholdCalibrationApplied,thresholdCalibrationReasonCodes,thresholdWindowAdvisorEnabled,thresholdWindowAdvisorProfile,thresholdWindowAdvisorAssetProfileUsed,thresholdWindowAdviceApplied,thresholdWindowAdviceReasonCodes,requireProfileAssets,output',
     ...rows.map((row) => [
       row.sampleId,
       row.variant,
@@ -867,6 +991,7 @@ async function main() {
       row.metrics?.tn ?? '',
       row.segmentCount,
       row.severeOutlierCount,
+      JSON.stringify(row.outlierTypeCounts || {}),
       row.perSongDeviationIssueCount,
       row.perSongDeviationAffectedSongCount,
       row.perSongDeviationPassed,
@@ -884,6 +1009,16 @@ async function main() {
       row.segmentFilterAssetProfile ?? '',
       row.segmentFilterAssetProfileUsed ?? '',
       row.edgeTrimAdvisorAssetProfileUsed ?? '',
+      row.thresholdCalibratorEnabled,
+      row.thresholdCalibratorProfile ?? '',
+      row.thresholdCalibratorAssetProfileUsed ?? '',
+      row.thresholdCalibration?.applied ?? '',
+      Array.isArray(row.thresholdCalibration?.reasonCodes) ? row.thresholdCalibration.reasonCodes.join('|') : '',
+      row.thresholdWindowAdvisorEnabled,
+      row.thresholdWindowAdvisorProfile ?? '',
+      row.thresholdWindowAdvisorAssetProfileUsed ?? '',
+      row.thresholdWindowAdvice?.applied ?? '',
+      Array.isArray(row.thresholdWindowAdvice?.reasonCodes) ? row.thresholdWindowAdvice.reasonCodes.join('|') : '',
       row.requireProfileAssets,
       row.outputPath,
     ].map(csvEscape).join(',')),
@@ -918,7 +1053,7 @@ async function main() {
     console.log(
       `  ${variantName}: meanF1=${formatMetric(metrics.meanF1)} `
       + `F1=${formatMetric(metrics.f1)} P=${formatMetric(metrics.precision)} R=${formatMetric(metrics.recall)} `
-      + `FP=${metrics.fp} FN=${metrics.fn} `
+      + `FP=${metrics.fp} FN=${metrics.fn} outliers=${metrics.severeOutlierCount} `
       + `songDeviation=${metrics.perSongDeviationIssueCount}/${metrics.perSongDeviationAffectedSongCount}`
       + (metrics.expectedNoSongCount
         ? ` noSongPred=${formatMetric(metrics.expectedNoSongPredictedSec)}s/${formatMetric(metrics.expectedNoSongDurationSec)}s`
@@ -944,6 +1079,12 @@ async function main() {
       + `increaseSec=${formatMetric(item.predictedSongSecIncrease)} ${item.passed ? 'PASS' : 'FAIL'}`
     );
   }
+  for (const item of candidateCurrentOutlierRegression) {
+    console.log(
+      `[live-pcm-ab] gate ${item.candidate} outliers vs current ${item.baseline}: `
+      + `delta=${item.severeOutlierDelta} ${item.passed ? 'PASS' : 'FAIL'}`
+    );
+  }
   console.log(
     `[live-pcm-ab] per-song deviation gate: `
     + `${payload.perSongDeviationGate.passed ? 'PASS' : 'FAIL'} `
@@ -959,6 +1100,9 @@ async function main() {
     process.exitCode = 1;
   }
   if (args['fail-on-regression'] && candidateCurrentNoSongRegression.some((item) => !item.passed)) {
+    process.exitCode = 1;
+  }
+  if (args['fail-on-regression'] && candidateCurrentOutlierRegression.some((item) => !item.passed)) {
     process.exitCode = 1;
   }
   if (

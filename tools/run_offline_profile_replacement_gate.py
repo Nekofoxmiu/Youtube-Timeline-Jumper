@@ -19,6 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Gate offline-final profile model replacement.")
     parser.add_argument("--candidate-segment-filter-model-dir", type=Path, required=True)
     parser.add_argument("--current-segment-filter-model-dir", type=Path, default=Path("models/fireredvad/aed"))
+    parser.add_argument("--cache-dir", type=Path, default=Path("training_runs/firered_head_retrain_eval_current"))
     parser.add_argument("--out-dir", type=Path, default=Path("training_runs/offline_final_replacement_gate"))
     parser.add_argument("--ids", nargs="*", default=None, help="Optional video IDs for smoke checks, e.g. 013 014 015.")
     parser.add_argument("--jobs", type=int, default=3)
@@ -43,6 +44,7 @@ def evaluate_command(
     python: str,
     out_dir: Path,
     model_dir: Path,
+    cache_dir: Path,
     jobs: int,
     command_timeout_sec: float,
     ids: Sequence[str] | None,
@@ -52,6 +54,8 @@ def evaluate_command(
         "tools/evaluate_smoothing_batch.py",
         "--out-dir",
         str(out_dir),
+        "--cache-dir",
+        str(cache_dir),
         "--smoothing-profile",
         "offline-final",
         "--segment-filter",
@@ -100,13 +104,15 @@ def build_comparison(current: Dict[str, Any], candidate: Dict[str, Any], args: a
     f1_drop = current_f1 - candidate_f1
     mean_f1_drop = current_mean_f1 - candidate_mean_f1
     severe_outlier_increase = candidate_outliers - current_outliers
+    current_evaluated = int(current.get("evaluatedCount") or 0)
+    candidate_evaluated = int(candidate.get("evaluatedCount") or 0)
     return {
         "profile": "offline-final",
         "currentModelDir": str(args.current_segment_filter_model_dir),
         "candidateModelDir": str(args.candidate_segment_filter_model_dir),
         "current": {
             "aggregateMetrics": current.get("aggregateMetrics"),
-            "evaluatedCount": current.get("evaluatedCount"),
+            "evaluatedCount": current_evaluated,
             "failureCount": current.get("failureCount"),
             "severeOutlierCount": current_outliers,
             "segmentFilterAssetProfileUsed": current.get("segmentFilterAssetProfileUsed"),
@@ -114,7 +120,7 @@ def build_comparison(current: Dict[str, Any], candidate: Dict[str, Any], args: a
         },
         "candidate": {
             "aggregateMetrics": candidate.get("aggregateMetrics"),
-            "evaluatedCount": candidate.get("evaluatedCount"),
+            "evaluatedCount": candidate_evaluated,
             "failureCount": candidate.get("failureCount"),
             "severeOutlierCount": candidate_outliers,
             "segmentFilterAssetProfileUsed": candidate.get("segmentFilterAssetProfileUsed"),
@@ -132,6 +138,8 @@ def build_comparison(current: Dict[str, Any], candidate: Dict[str, Any], args: a
             and severe_outlier_increase <= args.max_severe_outlier_increase
             and int(current.get("failureCount") or 0) == 0
             and int(candidate.get("failureCount") or 0) == 0
+            and current_evaluated > 0
+            and candidate_evaluated == current_evaluated
             and current.get("segmentFilterAssetProfileUsed") == "offline-final"
             and current.get("edgeTrimAdvisorAssetProfileUsed") == "offline-final"
             and candidate.get("segmentFilterAssetProfileUsed") == "offline-final"
@@ -161,6 +169,7 @@ def main() -> int:
         python=args.python,
         out_dir=current_out,
         model_dir=args.current_segment_filter_model_dir,
+        cache_dir=args.cache_dir,
         jobs=args.jobs,
         command_timeout_sec=args.command_timeout_sec,
         ids=args.ids,
@@ -169,6 +178,7 @@ def main() -> int:
         python=args.python,
         out_dir=candidate_out,
         model_dir=args.candidate_segment_filter_model_dir,
+        cache_dir=args.cache_dir,
         jobs=args.jobs,
         command_timeout_sec=args.command_timeout_sec,
         ids=args.ids,
@@ -179,6 +189,7 @@ def main() -> int:
         "candidateCommand": candidate_cmd,
         "currentModelDir": str(args.current_segment_filter_model_dir),
         "candidateModelDir": str(args.candidate_segment_filter_model_dir),
+        "cacheDir": str(args.cache_dir),
         "ids": args.ids,
     }
     (args.out_dir / "offline_profile_replacement_gate_plan.json").write_text(
